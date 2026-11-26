@@ -1298,6 +1298,11 @@ class StoreCapabilities:
     # the fact the invariant needs; it is declared alongside, never inferred.
     has_remote: bool = False
     multi_writer: bool = False
+    # The DECLARED history setting (athenaeum#3160): ``"git"`` or ``"none"``.
+    # Distinct from ``versioned``, which stays a fact about the location (is it
+    # in fact a git working tree). ``"none"`` says the operator chose plain
+    # files; ``git`` with ``versioned=False`` says the repository is missing.
+    history: str = "git"
 
     def __post_init__(self) -> None:
         if self.multi_writer and not (self.versioned and self.has_remote):
@@ -1958,9 +1963,15 @@ class FilesystemStore:
         *,
         non_purgeable_surfaces: Collection[str] = (),
         read_only_surfaces: Collection[str] = (),
+        history: str = "git",
+        surface_history: Mapping[str, str] | None = None,
         write_gate: Callable[[str], str | None] | None = None,
     ) -> None:
         self._knowledge_root = Path(knowledge_root)
+        # Declared history (athenaeum#3160): the installation's, plus any
+        # per-surface override. Under ``none`` nothing here runs git to commit.
+        self._history = history
+        self._surface_history = dict(surface_history or {})
         self._roots = dict(roots)
         # Surfaces whose adapter declares ``purgeable: false`` (R2, athenaeum#2615).
         # Empty by default, so every surface keeps the store-level
@@ -1987,6 +1998,7 @@ class FilesystemStore:
             versioned=_versioned,
             has_remote=_has_remote,
             multi_writer=_versioned and _has_remote,
+            history=history,
             purgeable=True,
             compare_and_swap=True,
             leases=True,  # S4 (athenaeum#979): FileLease over flock, see .lease()
@@ -2033,6 +2045,10 @@ class FilesystemStore:
         """Public form of :meth:`_surface_repo` (athenaeum#2620)."""
         return self._surface_repo(surface)
 
+    def history_for(self, surface: str) -> str:
+        """The declared history of *surface*: its own override, else the installation's."""
+        return self._surface_history.get(surface, self._history)
+
     def capabilities_for(self, surface: str) -> StoreCapabilities:
         """The capability profile of *surface* (design note §4.5 R2).
 
@@ -2050,6 +2066,7 @@ class FilesystemStore:
             versioned=repo is not None,
             has_remote=has_remote,
             multi_writer=has_remote,
+            history=self.history_for(surface),
             purgeable=surface not in self._non_purgeable,
         )
 
@@ -2298,13 +2315,15 @@ class FilesystemStore:
         posture ``git_snapshot`` always had, in case ``.git`` is removed
         out-of-band between construction and this call.
         """
-        sha = _commit_all(self._knowledge_root, label)
+        sha = None if self._history == "none" else _commit_all(self._knowledge_root, label)
         # R2 (athenaeum#2615): a surface that is its own git repository is a
         # restore point of its own. Committed here so every existing caller
         # gets it for free; the return value stays the knowledge root's SHA.
         for repo, surfaces in self.own_repo_surfaces().items():
             if all(name in self._read_only for name in surfaces):
                 continue  # a read-only mount is never committed into (athenaeum#2621)
+            if all(self.history_for(name) == "none" for name in surfaces):
+                continue  # declared plain files: no git call (athenaeum#3160)
             _commit_all(repo, label)
         return sha
 
@@ -2320,6 +2339,8 @@ class FilesystemStore:
         for repo, surfaces in self.versioned_surface_repos().items():
             if all(name in self._read_only for name in surfaces):
                 continue
+            if all(self.history_for(name) == "none" for name in surfaces):
+                continue  # declared plain files: no git call (athenaeum#3160)
             sha = _commit_all(repo, label)
             if sha is not None:
                 for surface in surfaces:
