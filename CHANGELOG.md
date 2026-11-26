@@ -66,6 +66,15 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- One resolver now answers where a field or a page type is stored:
+  `storage.route_for(page_type, field=None, *, config)` returns a frozen
+  `RouteDecision` (`targets`, `rule`, `sensitive`) computed from the existing
+  `storage.mapping`, `storage.excluded_fields`, `storage.excluded_read_mapping`
+  and `librarian.corrections.sensitive_fields` keys. The excluded-field read
+  path, `process_correction_record` and the free-text value-routing vault
+  location read those tables through it, and a test fails the build if another
+  module reads them. No behaviour change and no new configuration key
+  (athenaeum#3158).
 - `athenaeum retire-pages` is now `athenaeum retire` (athenaeum#3151).
   `retire-pages` still works for this release as a deprecated alias that
   prints a note, and is removed in the next one. The override for the
