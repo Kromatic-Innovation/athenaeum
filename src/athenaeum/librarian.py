@@ -307,7 +307,7 @@ from athenaeum.self_resolving import flag_self_resolving_claims
 from athenaeum.sensitivity_routing import (
     SensitivityRoutingError,
     refuse_unrouted_value_classes,
-    route_sensitive_values,
+    screen_raw_for_compile,
 )
 from athenaeum.storage import (
     ReadOnlySurfaceError,
@@ -3057,47 +3057,13 @@ def process_one(
     # carry no source handle at all.
     incoming_handles = collect_handles(raw_meta)
     if not dry_run:
-        preamble = raw.content[: len(raw.content) - len(raw_body)]
-        redacted_body = route_sensitive_values(
-            raw_ref=raw.ref,
-            text=raw_body,
-            frontmatter=raw_meta,
-            config=config,
-            knowledge_root=wiki_root.parent,
+        # athenaeum#3168: routes free-text values and drops fields a `to: []`
+        # rule discards, in one helper shared with the batch transport. The raw
+        # file on disk is not touched.
+        raw_meta, raw_body = screen_raw_for_compile(
+            raw, config=config, knowledge_root=wiki_root.parent
         )
-        if redacted_body != raw_body:
-            raw._content = preamble + redacted_body
-        # athenaeum#3168: a frontmatter field a `to: []` rule discards is dropped
-        # here, where the compile run first reads the raw, so no tier writes it
-        # and the rest of the page is written as usual. The raw file on disk is
-        # not touched.
-        _raw_type = str(raw_meta.get("type") or "").strip()
-        # A page type discarded whole is not captured (the capture gate below
-        # answers that), so its fields are left for that gate to see. A bad
-        # storage table surfaces where the page destination is resolved.
-        _discarded_keys: dict[str, str] = {}
-        if _raw_type:
-            try:
-                if not route_for(_raw_type, config=config).discarded:
-                    for _key in raw_meta:
-                        _decision = route_for(_raw_type, str(_key), config=config)
-                        if _decision.discarded and _decision.rule is not None:
-                            _discarded_keys[str(_key)] = _decision.rule
-            except StorageConfigError:
-                _discarded_keys = {}
-        if _discarded_keys:
-            for _rule in _discarded_keys.values():
-                note_discard(_rule)
-            _, _body_now = parse_frontmatter(raw.content)
-            raw._content = (
-                render_frontmatter(
-                    {k: v for k, v in raw_meta.items() if str(k) not in _discarded_keys}
-                )
-                + "\n"
-                + _body_now
-            )
-            raw_meta, raw_body = parse_frontmatter(raw.content)
-            incoming_handles = collect_handles(raw_meta)
+        incoming_handles = collect_handles(raw_meta)
 
     # Sticky intake access (issue athenaeum#320 §5): an `access:` stamped on the raw
     # file at remember() time by the intake screener is CALLER-AUTHORITATIVE —

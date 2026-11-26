@@ -126,6 +126,7 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_r
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
+from athenaeum.sensitivity_routing import screen_raw_for_compile
 from athenaeum.storage import discarded_page_types, refuse_read_only_write
 from athenaeum.store import ReadOnlySurfaceError
 from athenaeum.store_links import admit_page_write
@@ -1367,6 +1368,12 @@ def process_batch_run(
         states.append(st)
         log.info("Processing (batch): %s", raw.ref)
         try:
+            # Issue athenaeum#3168: the same first-read screen process_one runs
+            # (free-text value routing, then dropping fields a `to: []` rule
+            # discards), before any tier reads the raw. A routing error
+            # propagates to the handler below and leaves the raw on disk.
+            screen_raw_for_compile(raw, config=config, knowledge_root=wiki_root.parent)
+
             # Issue athenaeum#2363: the never-ingest class gate, entity tier --
             # mirrors athenaeum.librarian.process_one's own check (the only
             # other entity-tier call site of check_and_refuse) so the batch
@@ -2903,6 +2910,7 @@ def _states_for_classify_handle(
     config: dict[str, object] | None,
     out: "BatchCollectResult",
     relevance_policy: RelevancePolicy | None = None,
+    knowledge_root: Path | None = None,
 ) -> tuple[list[_FileState], list[str]]:
     """Rebuild the per-file states a collected ``classify`` batch applies to.
 
@@ -2928,6 +2936,10 @@ def _states_for_classify_handle(
             out._count(reason or "raw-missing")
             dropped.append(record.ref)
             continue
+        if knowledge_root is not None:
+            # athenaeum#3168: the raw is re-read from disk, so re-apply the
+            # first-read screen the submitting run applied.
+            screen_raw_for_compile(raw, config=config, knowledge_root=knowledge_root)
         _discarded_types = discarded_page_types(config)
         if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             _rp_gate = gate_raw_content(
@@ -3295,7 +3307,12 @@ def collect_pending_batches(
                 # needs it; an invalid policy raises (fail closed), as at submit.
                 relevance_policy = load_relevance_policy(wiki_root)
             states, dropped = _states_for_classify_handle(
-                handle, index, config=config, out=out, relevance_policy=relevance_policy
+                handle,
+                index,
+                config=config,
+                out=out,
+                relevance_policy=relevance_policy,
+                knowledge_root=wiki_root.parent,
             )
         elif knob == "write":
             states, dropped = _states_for_write_handle(handle, out=out)

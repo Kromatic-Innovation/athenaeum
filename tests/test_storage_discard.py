@@ -30,6 +30,7 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content
 from athenaeum.run_summary_log import build_run_summary_ledger_record
 from athenaeum.sensitivity_routing import (
     SensitivityRoutingError,
+    _render_vault_record,
     refuse_unrouted_value_classes,
     resolve_sensitive_record,
     route_sensitive_values,
@@ -175,6 +176,80 @@ def test_compile_keeps_the_field_when_no_rule_says_otherwise(tmp_path: Path) -> 
     (page,) = (knowledge / "wiki").glob("*.md")
     assert SENTINEL in page.read_text(encoding="utf-8")
     assert discard_counts() == {}
+
+
+def _batch_compile(tmp_path: Path, cfg: dict[str, Any], raw_text: str) -> Path:
+    from athenaeum.batch import process_batch_run
+    from athenaeum.models import TokenUsage
+    from tests.test_batch_mode import FALLBACK_ACCESS, FALLBACK_TAGS, _FakeClient
+
+    knowledge = tmp_path / "knowledge"
+    wiki = knowledge / "wiki"
+    wiki.mkdir(parents=True)
+    _raw(knowledge / "raw" / "sessions", "20260810T090000Z-aaaaaaaa.md", raw_text)
+    from athenaeum.intake import discover_raw_files
+
+    process_batch_run(
+        discover_raw_files(knowledge / "raw"),
+        EntityIndex(wiki),
+        wiki,
+        _FakeClient(lambda params: "[]", allow_sync=False),
+        ["reference"],
+        FALLBACK_TAGS,
+        FALLBACK_ACCESS,
+        usage=TokenUsage(),
+        config=cfg,
+        max_api_calls=100,
+    )
+    return knowledge
+
+
+_FIELD_RAW = (
+    "---\nuid: note-1\ntype: reference\nname: Support ticket\naccess: internal\n"
+    f"ticket_secret: {SENTINEL}\n---\n\nPlain body.\n"
+)
+
+
+def test_batch_compile_writes_the_page_without_the_discarded_field(tmp_path: Path) -> None:
+    cfg = _cfg([{"page_type": "reference", "fields": ["ticket_secret"], "to": []}])
+    knowledge = _batch_compile(tmp_path, cfg, _FIELD_RAW)
+    (page,) = (knowledge / "wiki").glob("*.md")
+    text = page.read_text(encoding="utf-8")
+    meta, body = parse_frontmatter(text)
+    assert "ticket_secret" not in meta
+    assert meta["name"] == "Support ticket" and "Plain body." in body
+    assert SENTINEL not in text
+    assert discard_counts() == {"storage.routes[0]": 1}
+
+
+def test_batch_compile_keeps_the_field_when_no_rule_says_otherwise(tmp_path: Path) -> None:
+    knowledge = _batch_compile(tmp_path, _cfg([]), _FIELD_RAW)
+    (page,) = (knowledge / "wiki").glob("*.md")
+    assert SENTINEL in page.read_text(encoding="utf-8")
+
+
+def test_batch_compile_discards_a_free_text_class(tmp_path: Path) -> None:
+    cfg = _free_text_cfg([{"sensitivity_class": "pii", "to": []}])
+    raw_text = (
+        "---\nuid: note-2\ntype: reference\nname: Mail note\naccess: internal\n---\n\n"
+        f"Reach them at {SENTINEL_EMAIL} soon.\n"
+    )
+    knowledge = _batch_compile(tmp_path, cfg, raw_text)
+    pages = list((knowledge / "wiki").glob("*.md"))
+    assert pages
+    assert all(SENTINEL not in p.read_text(encoding="utf-8") for p in pages)
+    assert "[sensitive:pii" in pages[0].read_text(encoding="utf-8")
+    assert discard_counts() == {"storage.routes[0]": 1}
+
+
+def test_screen_raw_for_compile_leaves_the_raw_file_on_disk_untouched(tmp_path: Path) -> None:
+    from athenaeum.sensitivity_routing import screen_raw_for_compile
+
+    raw = _raw(tmp_path / "raw", "a.md", _FIELD_RAW)
+    cfg = _cfg([{"page_type": "reference", "fields": ["ticket_secret"], "to": []}])
+    meta, _ = screen_raw_for_compile(raw, config=cfg, knowledge_root=tmp_path)
+    assert "ticket_secret" not in meta
+    assert SENTINEL in raw.path.read_text(encoding="utf-8")
 
 
 # --- AC2: contact write ----------------------------------------------------------
@@ -607,9 +682,45 @@ def test_sentinel_appears_in_no_file_other_than_the_raw_the_test_wrote(
         knowledge_root=k4,
     )
 
-    assert _leaks([k1, k2, root, k4, cache], allowed) == []
+    # 5. batch compile write
+    k6 = tmp_path / "k6"
+    k6.mkdir()
+    knowledge6 = _batch_compile(k6, cfg1, _FIELD_RAW)
+    allowed.update((knowledge6 / "raw").rglob("*.md"))
+
+    assert _leaks([k1, k2, root, k4, k6, cache], allowed) == []
     # Positive control: the scan does see the sentinel where it is kept.
     kept = tmp_path / "k5"
     kept.mkdir()
     (kept / "page.md").write_text(SENTINEL, encoding="utf-8")
     assert _leaks([kept], set()) == [kept / "page.md"]
+
+
+# --- A record stored before routing demanded a rule is still readable ----------------
+
+
+def test_legacy_record_in_the_excluded_location_resolves_with_no_rule(tmp_path: Path) -> None:
+    cfg = {"sensitivity": {"routing": {"enabled": True}}}
+    record_id = "1" * 32
+    vault = tmp_path / "excluded" / "sensitivity" / "pii"
+    vault.mkdir(parents=True)
+    (vault / f"{record_id}.md").write_text(
+        _render_vault_record(
+            record_id=record_id,
+            sensitivity_class="pii",
+            source_ref="raw/a.md",
+            value=SENTINEL_EMAIL,
+        ),
+        encoding="utf-8",
+    )
+    resolved = resolve_sensitive_record("pii", record_id, cfg, tmp_path)
+    assert resolved == SENTINEL_EMAIL
+    # Writes stay refused.
+    with pytest.raises(SensitivityRoutingError):
+        route_sensitive_values(
+            raw_ref="raw/a.md",
+            text=f"Mail {SENTINEL_EMAIL}",
+            frontmatter={},
+            config=cfg,
+            knowledge_root=tmp_path,
+        )

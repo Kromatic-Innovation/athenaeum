@@ -211,6 +211,7 @@ from athenaeum.sensitivity import (
     classify,
 )
 from athenaeum.storage import (
+    EXCLUDED,
     RouteDecision,
     StorageConfigError,
     available_adapters,
@@ -250,12 +251,15 @@ def _class_action(sensitivity_class: str, routing_cfg: dict[str, Any]) -> str:
     return block.get("action", "route")
 
 
-def _class_decision(sensitivity_class: str, config: dict[str, Any] | None) -> RouteDecision:
+def _class_decision(
+    sensitivity_class: str, config: dict[str, Any] | None, *, require_rule: bool = True
+) -> RouteDecision:
     """The ``storage.routes`` / ``storage.mapping`` decision for a class, or a refusal.
 
     A class with no rule is refused, naming the rule to write (athenaeum#3168):
     it no longer falls back to the built-in excluded location, and it is not
-    discarded either.
+    discarded either. ``require_rule=False`` (the read path) returns the
+    unruled decision instead, so an already-stored record stays readable.
     """
     try:
         # A storage.routes sensitivity_class rule decides first; a class no
@@ -267,7 +271,7 @@ def _class_decision(sensitivity_class: str, config: dict[str, Any] | None) -> Ro
         raise SensitivityRoutingError(
             f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
         ) from exc
-    if decision.rule is None:
+    if decision.rule is None and require_rule:
         raise SensitivityRoutingError(_missing_rule_message(sensitivity_class))
     return decision
 
@@ -310,21 +314,30 @@ def _vault_root_for_class(
     sensitivity_class: str,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    *,
+    for_read: bool = False,
 ) -> Path:
     """Resolve the on-disk vault root for *sensitivity_class* — fail closed.
+
+    ``for_read=True`` (resolving an already-stored record) lets a class with no
+    rule fall back to the built-in excluded location, where such records were
+    written before athenaeum#3168; writes still refuse a class with no rule.
 
     See this module's docstring, "Unsafe vault surface, fail closed." A class
     whose rule discards (``to: []``) has no vault: this raises, and the callers
     that reach here never do for a discarded class (see :func:`_route_one`).
     """
-    decision = _class_decision(sensitivity_class, config)
-    if not decision.targets:
+    decision = _class_decision(sensitivity_class, config, require_rule=not for_read)
+    unruled = decision.rule is None
+    if not decision.targets and not unruled:
         raise SensitivityRoutingError(
             f"sensitivity class {sensitivity_class!r} is discarded ({decision.rule}); "
             "there is no vault root"
         )
     try:
-        adapter = available_adapters(config)[decision.targets[0]]
+        adapter = (
+            EXCLUDED if unruled else available_adapters(config)[decision.targets[0]]
+        )
     except StorageConfigError as exc:
         raise SensitivityRoutingError(
             f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
@@ -340,6 +353,61 @@ def _vault_root_for_class(
             "(fail closed)"
         )
     return adapter.resolve_root(knowledge_root) / "sensitivity" / sensitivity_class
+
+
+def screen_raw_for_compile(
+    raw: Any,
+    *,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> tuple[dict[str, Any], str]:
+    """The compile run's first read of a raw: route free-text values, drop discarded fields.
+
+    The ONE place both transports (``librarian.process_one`` and the batch
+    transport) call before any tier reads ``raw.content`` (athenaeum#3168).
+    Two steps, both mutating only the in-memory ``raw`` (never the file):
+
+    1. :func:`route_sensitive_values` over the body (frontmatter untouched).
+    2. A frontmatter field a ``storage.routes`` rule with ``to: []`` discards is
+       removed, so no tier writes it. A page type discarded whole is left for
+       the capture gate; a bad storage table surfaces where the page
+       destination is resolved.
+
+    Returns the re-parsed ``(frontmatter, body)``. Raises
+    :class:`SensitivityRoutingError` on a routing failure (fail closed).
+    """
+    raw_meta, raw_body = parse_frontmatter(raw.content)
+    preamble = raw.content[: len(raw.content) - len(raw_body)]
+    redacted_body = route_sensitive_values(
+        raw_ref=raw.ref,
+        text=raw_body,
+        frontmatter=raw_meta,
+        config=config,
+        knowledge_root=knowledge_root,
+    )
+    if redacted_body != raw_body:
+        raw._content = preamble + redacted_body
+    raw_type = str(raw_meta.get("type") or "").strip()
+    discarded_keys: dict[str, str] = {}
+    if raw_type:
+        try:
+            if not route_for(raw_type, config=config).discarded:
+                for key in raw_meta:
+                    decision = route_for(raw_type, str(key), config=config)
+                    if decision.discarded and decision.rule is not None:
+                        discarded_keys[str(key)] = decision.rule
+        except StorageConfigError:
+            discarded_keys = {}
+    if discarded_keys:
+        for rule in discarded_keys.values():
+            note_discard(rule)
+        _, body_now = parse_frontmatter(raw.content)
+        raw._content = (
+            render_frontmatter({k: v for k, v in raw_meta.items() if str(k) not in discarded_keys})
+            + "\n"
+            + body_now
+        )
+    return parse_frontmatter(raw.content)
 
 
 def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -> str:
@@ -716,7 +784,9 @@ def resolve_sensitive_record(
             return None
 
         try:
-            vault_root = _vault_root_for_class(wanted_class, config, knowledge_root)
+            vault_root = _vault_root_for_class(
+                wanted_class, config, knowledge_root, for_read=True
+            )
         except SensitivityRoutingError:
             return None
 
