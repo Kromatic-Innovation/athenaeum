@@ -59,6 +59,15 @@ def test_scanner_ignores_references_that_are_not_constructions() -> None:
     ) == []
 
 
+def test_registry_is_the_only_other_door_and_it_lives_in_storage() -> None:
+    """The registry (athenaeum#3165) adds no construction site: a registered
+    factory is invoked only by ``storage.open_store``, and the sole
+    ``FilesystemStore`` construction in ``storage.py`` is the built-in factory
+    ``open_store`` selects."""
+    source = (SRC / "storage.py").read_text(encoding="utf-8")
+    assert len(filesystem_store_constructions(source)) == 1
+
+
 def test_no_production_module_constructs_a_filesystem_store_directly() -> None:
     offenders = {
         str(path.relative_to(SRC)): hits
