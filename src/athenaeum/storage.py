@@ -2023,8 +2023,12 @@ def write_raw_intake_screened(
     :func:`write_raw_intake` would write. :func:`write_raw_intake` stays for
     content that was already screened.
     """
-    # Deferred: sensitivity_routing imports this module at module scope.
-    from athenaeum.sensitivity_routing import screen_intake_content
+    # sensitivity_routing imports this module at module scope and the import
+    # graph is pinned acyclic (tests/test_import_graph_acyclic.py), so it is
+    # resolved by name at call time, as :func:`_pii_policy` does for pii.
+    screen_intake_content = importlib.import_module(
+        "athenaeum.sensitivity_routing"
+    ).screen_intake_content
 
     screened = screen_intake_content(
         content, raw_ref=raw_ref, config=config, knowledge_root=knowledge_root
