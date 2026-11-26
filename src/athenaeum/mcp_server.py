@@ -3128,6 +3128,8 @@ def remember_write(
     explicit_request: bool = False,
     audit_transport: str = "stdio",
     pinned_audience: set[str] | None = None,
+    config: dict | None = None,
+    knowledge_root: Path | None = None,
 ) -> str:
     """Save a piece of knowledge to the raw intake directory.
 
@@ -3254,6 +3256,16 @@ def remember_write(
             ``remember`` tool passes the server's pin, under
             ``--transport http`` only.
 
+    Value routing / discard (athenaeum#3175): after the access-label screen and
+    before the raw is written, the body and the declared frontmatter fields are
+    screened with the same rules the compile run applies
+    (:func:`athenaeum.sensitivity_routing.screen_intake_content`). A routed value
+    goes to its vault first and the raw carries a pointer; a discarded value is
+    replaced by the fixed marker. A vault failure returns an ``Error:`` string and
+    writes nothing. *config* / *knowledge_root* (default: the parent of
+    *wiki_root*, else of *raw_root*) say which rules; with none that apply the raw
+    is byte-identical to what was written before.
+
     When *wiki_root* is given and the final raw carries the explicit-remember
     marker (stamped by *explicit_request* or already in *content*'s own
     frontmatter) AND a ``never`` rule matches it, one ``override`` audit
@@ -3356,9 +3368,27 @@ def remember_write(
     except ValueError as exc:
         return f"Error: invalid `screening` config: {exc}"
 
+    # athenaeum#3175: route / discard BEFORE the raw note exists. The label above
+    # was resolved on the original text (so a routed value still raises the
+    # note's access label); the vault write happens here, the raw write below.
+    try:
+        from athenaeum.sensitivity_routing import (
+            SensitivityRoutingError,
+            screen_intake_content,
+        )
+
+        screened_content = screen_intake_content(
+            content,
+            config=config,
+            knowledge_root=knowledge_root
+            or (wiki_root.parent if wiki_root is not None else raw_root.parent),
+        )
+    except SensitivityRoutingError as exc:
+        return f"Error: value routing failed, nothing was written: {exc}"
+
     replaced_notes: list[str] = []
     final_content = _inject_provenance_frontmatter(
-        content,
+        screened_content,
         wiki_source,
         field_sources_map,
         extras,
@@ -5092,6 +5122,8 @@ def create_server(
         """
         if is_disabled("capture", cache_dir=cache_dir):
             return _KILL_SWITCH_MSG
+        from athenaeum.config import load_config
+
         result = remember_write(
             raw_root,
             content,
@@ -5118,6 +5150,8 @@ def create_server(
             pinned_audience=(
                 caller_audience if transport == "http" and caller_audience else None
             ),
+            config=config if config is not None else load_config(wiki_root.parent),
+            knowledge_root=wiki_root.parent,
         )
         if result.startswith("Saved to") and cache_dir is not None:
             _refresh_extra_root_index(

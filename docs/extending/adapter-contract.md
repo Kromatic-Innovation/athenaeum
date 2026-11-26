@@ -207,6 +207,8 @@ If your integration can speak the MCP protocol, the sanctioned write path is the
 - writes to `raw/<source>/<timestamp>-<uuid8>.md` for you,
 - path-guards the write (stays in `raw/`, never `wiki/`),
 - screens content for sensitive material and stamps an `access:` label,
+- routes or discards values a rule names before the raw file exists (see
+  "Screening at write time" below),
 - injects/merges the `source` / `field_sources` provenance frontmatter.
 
 ```text
@@ -237,6 +239,35 @@ python examples/adapters/minimal_adapter.py /tmp/kb --source press-releases
 python -m athenaeum run --path /tmp/kb             # compile raw → wiki
 ls /tmp/kb/wiki                                     # see the compiled entity
 ```
+
+### Screening at write time
+
+A raw file is on disk the moment it is written: a knowledge directory that is a
+git repository commits it, a synced folder copies it, and the recall index
+picks it up before any compile. So a value that a rule routes to a vault or
+discards has to be handled at the write, not at the next compile.
+
+- `remember` does this for you: after the access-label screen and before the
+  raw file is written, free-text values and declared frontmatter fields are
+  routed or discarded by the `sensitivity.routing` and `storage.routes` rules.
+- A Python intake author calls `athenaeum.storage.write_raw_intake_screened(
+  target_dir, content, config=..., knowledge_root=..., raw_ref=...)` instead of
+  `write_raw_intake`. Pass the same `raw_ref` (any stable, non-secret string
+  that names the item) on a retry. `write_raw_intake` stays for content that is
+  already screened.
+- The order is fixed: vault write, then raw write. A failed vault write raises
+  and nothing is written for the note. A crash between the two leaves a vault
+  record and no raw file; retrying with the same `raw_ref` rewrites the same
+  record.
+- With no rule that applies, the file written is byte-identical to the
+  unscreened one.
+
+What this does not cover:
+
+- A file placed in raw intake by a program that does not call athenaeum (§5b,
+  or any other writer). Nothing screens it until the compile run.
+- A value that no recogniser and no declared field identifies. A rule can only
+  act on what it can recognise; an unrecognised value is written as given.
 
 ---
 

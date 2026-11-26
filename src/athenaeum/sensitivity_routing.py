@@ -437,6 +437,226 @@ def screen_raw_for_compile(
     return parse_frontmatter(raw.content)
 
 
+# ---------------------------------------------------------------------------
+# athenaeum#3175 — the intake call site. The same screen the compile run uses
+# (:func:`route_sensitive_values`, the ``storage.routes`` resolver), applied at
+# the moment athenaeum writes a raw note rather than at the next compile.
+# ---------------------------------------------------------------------------
+
+_MAX_ID_PROBES = 64
+
+
+def _collision_free_record_id(record_id: str, *, value: str, vault: Path) -> str:
+    """The first deterministic id from *record_id* whose record is absent or holds *value*."""
+    candidate = record_id
+    for n in range(_MAX_ID_PROBES):
+        if n:
+            candidate = uuid.uuid5(_RECORD_ID_NAMESPACE, f"{record_id}|{n}").hex
+        path = vault / f"{candidate}.md"
+        if not path.exists():
+            return candidate
+        try:
+            _meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            return candidate
+        if _value_from_vault_body(body) == value:
+            return candidate
+    raise SensitivityRoutingError(
+        f"{vault.name}: no free vault record id after {_MAX_ID_PROBES} probes — failing closed"
+    )
+
+
+def _field_class_name(page_type: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", page_type)
+    return f"field_{cleaned}"
+
+
+def _field_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    import json
+
+    return json.dumps(value, sort_keys=True, default=str, ensure_ascii=False)
+
+
+def _route_one_field(
+    *,
+    raw_ref: str,
+    page_type: str,
+    key: str,
+    value: Any,
+    targets: tuple[str, ...],
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> str:
+    """Write one routed frontmatter field's value to its vault(s); return the pointer."""
+    sensitivity_class = _field_class_name(page_type)
+    text = _field_text(value)
+    record_id = _record_id_for(raw_ref, sensitivity_class, 0, 0)
+    record_id = uuid.uuid5(_RECORD_ID_NAMESPACE, f"{record_id}|field|{key}").hex
+    vaults: dict[str, Path] = {}
+    try:
+        adapters = available_adapters(config)
+        for name in targets:
+            adapter = adapters[name]
+            if adapter.corpus_policy.in_corpus:
+                raise SensitivityRoutingError(
+                    f"storage rule routes field {key!r} of page type {page_type!r} to "
+                    f"adapter {adapter.name!r}, which participates in the corpus — "
+                    "refusing to write a routed value there (fail closed)"
+                )
+            vaults[name] = adapter.resolve_root(knowledge_root) / "sensitivity" / sensitivity_class
+    except (StorageConfigError, KeyError) as exc:
+        raise SensitivityRoutingError(
+            f"field {key!r} of page type {page_type!r}: storage configuration is invalid"
+        ) from exc
+    primary = vaults[targets[0]]
+    record_id = _collision_free_record_id(record_id, value=text, vault=primary)
+    rendered = _render_vault_record(
+        record_id=record_id,
+        sensitivity_class=sensitivity_class,
+        source_ref=raw_ref,
+        value=text,
+    )
+
+    def _write(name: str) -> None:
+        vaults[name].mkdir(parents=True, exist_ok=True)
+        atomic_write_text(vaults[name] / f"{record_id}.md", rendered)
+
+    try:
+        apply_to_targets(tuple(vaults), _write)
+    except StorageTargetError as exc:
+        raise SensitivityRoutingError(f"{raw_ref}: {exc}") from exc
+    return _pointer_text(sensitivity_class, record_id)
+
+
+def _derived_intake_ref(
+    meta: dict[str, object],
+    body: str,
+    screened_keys: set[str],
+    config: dict[str, Any] | None,
+) -> str:
+    """A stable ref for a note with none supplied: the text, screened values blanked.
+
+    Hashing the whole note would put a guessable digest of a low-entropy value
+    (a national id, say) into a pointer; blanking each value the screen acts on
+    first keeps the ref a function of the surrounding text only. Two notes that
+    differ only in the value share a ref, which ``probe_collisions`` handles.
+    """
+    import hashlib
+
+    try:
+        spans = sorted(
+            m.match.span
+            for m in classify(text=body, frontmatter=meta, config=config)
+            if m.match.span is not None
+        )
+    except SensitivityConfigError:
+        spans = []
+    blanked, pos = [], 0
+    for start, end in spans:
+        if start < pos:
+            continue
+        blanked.append(body[pos:start])
+        pos = end
+    blanked.append(body[pos:])
+    kept = {str(k): v for k, v in meta.items() if str(k) not in screened_keys}
+    digest = hashlib.sha256(
+        ("\x00".join(blanked) + "\x01" + repr(sorted(kept.items()))).encode("utf-8")
+    ).hexdigest()
+    return f"intake:{digest}"
+
+
+def screen_intake_content(
+    content: str,
+    *,
+    raw_ref: str | None = None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> str:
+    """Screen one raw note's text at write time: route or discard, return what to write.
+
+    The intake call site of the same screen the compile run applies
+    (:func:`route_sensitive_values` plus the ``storage.routes`` field rules of
+    :func:`screen_raw_for_compile`), run before the raw note exists (athenaeum#3175):
+
+    1. Free-text values in the body are routed to their vault or replaced by the
+       fixed discard marker.
+    2. A frontmatter field a rule routes for the note's declared ``type`` has its
+       value written to the vault and replaced by a pointer; a field a rule
+       discards is removed.
+
+    Every vault write happens here, before the caller writes the raw note: a
+    failure raises :class:`SensitivityRoutingError` and nothing has been
+    written for the note. *raw_ref* must be stable for the same note (the record
+    ids derive from it), so a retry after a crash converges on the same records.
+    Left out, it is derived from the text with every screened value blanked.
+
+    With no rule that applies, *content* is returned unchanged, byte for byte.
+    """
+    meta, body = parse_frontmatter(content)
+    preamble = content[: len(content) - len(body)]
+    raw_type = str(meta.get("type") or "").strip()
+    discarded: dict[str, str] = {}
+    routed: dict[str, tuple[str, ...]] = {}
+    if raw_type:
+        try:
+            if not route_for(raw_type, config=config).discarded:
+                for key in meta:
+                    decision = route_for(raw_type, str(key), config=config)
+                    if decision.discarded and decision.rule is not None:
+                        discarded[str(key)] = decision.rule
+                    elif decision.targets:
+                        routed[str(key)] = decision.targets
+        except StorageConfigError:
+            discarded, routed = {}, {}
+
+    if not discarded and not routed:
+        try:
+            routing_on = bool(resolve_sensitivity_routing(config).get("enabled", False))
+        except ValueError:
+            routing_on = True  # route_sensitive_values below raises the named error
+        if not routing_on:
+            return content
+
+    if raw_ref is None:
+        try:
+            raw_ref = _derived_intake_ref(meta, body, set(discarded) | set(routed), config)
+        except Exception:  # noqa: BLE001 - screen below fails closed on a bad config
+            raw_ref = "intake:unkeyed"
+    redacted_body = route_sensitive_values(
+        raw_ref=raw_ref,
+        text=body,
+        frontmatter=meta,
+        config=config,
+        knowledge_root=knowledge_root,
+        probe_collisions=True,
+    )
+
+    if not discarded and not routed:
+        return content if redacted_body == body else preamble + redacted_body
+
+    new_meta: dict[str, object] = {}
+    for key, value in meta.items():
+        k = str(key)
+        if k in discarded:
+            note_discard(discarded[k])
+            continue
+        if k in routed:
+            new_meta[key] = _route_one_field(
+                raw_ref=raw_ref,
+                page_type=raw_type,
+                key=k,
+                value=value,
+                targets=routed[k],
+                config=config,
+                knowledge_root=knowledge_root,
+            )
+            continue
+        new_meta[key] = value
+    return render_frontmatter(new_meta) + "\n" + redacted_body
+
+
 def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -> str:
     """Deterministic record id — derived from metadata only, never the value (AC11)."""
     name = f"{raw_ref}|{sensitivity_class}|{start}|{end}"
@@ -494,6 +714,7 @@ def _route_one(
     value: str,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    probe_collisions: bool = False,
 ) -> str:
     decision = _class_decision(sensitivity_class, config)
     if decision.discarded:
@@ -502,6 +723,12 @@ def _route_one(
         note_discard(decision.rule)
         return _discard_marker(sensitivity_class)
     record_id = _record_id_for(raw_ref, sensitivity_class, start, end)
+    if probe_collisions:
+        record_id = _collision_free_record_id(
+            record_id,
+            value=value,
+            vault=_vault_root_for_class(sensitivity_class, config, knowledge_root),
+        )
     # Every target in order, each write idempotent (the record id is derived from
     # the span, the file is replaced whole); a failure names the target and
     # raises (athenaeum#3169).
@@ -531,6 +758,7 @@ def route_sensitive_values(
     frontmatter: dict[str, Any] | None,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    probe_collisions: bool = False,
 ) -> str:
     """Scan *text*, route every matching, routable value, return redacted text.
 
@@ -541,6 +769,12 @@ def route_sensitive_values(
     to the knowledge root, for example) — used only to derive each match's
     deterministic ``record_id`` (AC11) and to name the file in any raised
     error message.
+
+    *probe_collisions* (the intake call site, athenaeum#3175) lets a caller whose
+    *raw_ref* is derived from the text rather than a unique file path stay safe
+    when two different values share a ref and a span: an existing record that
+    holds a different value moves the id to the next free one, deterministically,
+    so a retry of the same text still converges on the same record.
 
     Returns *text* completely unchanged when ``sensitivity.routing.enabled``
     is off (the default) or nothing routable matched — see this module's
@@ -626,6 +860,7 @@ def route_sensitive_values(
                 value=value,
                 config=config,
                 knowledge_root=knowledge_root,
+                probe_collisions=probe_collisions,
             )
         except SensitivityRoutingError:
             raise
