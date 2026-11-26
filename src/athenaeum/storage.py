@@ -572,7 +572,9 @@ def _decision_for_adapter_names(
     )
 
 
-def _decision_for_class(entity_class: str, rule: str | None, config: dict[str, Any] | None) -> RouteDecision:
+def _decision_for_class(
+    entity_class: str, rule: str | None, config: dict[str, Any] | None
+) -> RouteDecision:
     adapter = resolve_adapter_for_class(entity_class, config)
     return _decision_for_adapter_names((adapter.name,), rule, config)
 

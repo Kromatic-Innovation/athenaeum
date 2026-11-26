@@ -62,7 +62,12 @@ FIELD_CASES: list[tuple[str, dict[str, Any] | None, str, str, tuple[str, ...], s
     ),
     (
         "read-mapping-person-to-identity",
-        {"storage": {"mapping": {"pii": "excluded"}, "excluded_read_mapping": {"person": "person"}}},
+        {
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "excluded_read_mapping": {"person": "person"},
+            }
+        },
         "person",
         "emails",
         (),
@@ -119,7 +124,11 @@ def test_route_decision_is_frozen() -> None:
 
 @pytest.mark.parametrize(
     "config",
-    [None, PII_EXCLUDED, {"storage": {"mapping": {"recipe": "wiki-markdown-embedded", "pii": "excluded"}}}],
+    [
+        None,
+        PII_EXCLUDED,
+        {"storage": {"mapping": {"recipe": "wiki-markdown-embedded", "pii": "excluded"}}},
+    ],
 )
 @pytest.mark.parametrize("page_type", ["person", "pii", "recipe", "unmapped", "  pii  "])
 def test_whole_type_route_matches_resolve_adapter_for_class(

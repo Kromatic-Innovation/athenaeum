@@ -267,9 +267,9 @@ def surface_class_for_page_class(
     cls = (page_class or "").strip()
     if not cls:
         return ""
-    from athenaeum.config import resolve_excluded_read_mapping
+    from athenaeum.storage import configured_excluded_read_mapping
 
-    configured = resolve_excluded_read_mapping(config)
+    configured = configured_excluded_read_mapping(config)
     if cls in configured:
         return configured[cls]
     return DEFAULT_EXCLUDED_READ_MAPPING.get(cls, cls)
@@ -5494,7 +5494,8 @@ def resolve_excluded_fields(
 
     1. explicit operator config — ``storage.excluded_fields.<surface_class>``,
        a list of frontmatter field names (see
-       :func:`athenaeum.config.resolve_excluded_fields_config`);
+       :func:`athenaeum.config.resolve_excluded_fields_config`, read through
+       :func:`athenaeum.storage.configured_excluded_fields`);
     2. surface class ``pii`` — the built-in default stays
        :data:`CONTACT_DATA_FIELDS` VERBATIM, so a person read is byte-identical
        to what it returned before this function existed;
@@ -5516,9 +5517,9 @@ def resolve_excluded_fields(
     stable for a given record. Rules 1 and 2 return the configured/built-in
     order and ignore *record_meta* entirely.
     """
-    from athenaeum.config import resolve_excluded_fields_config
+    from athenaeum.storage import configured_excluded_fields
 
-    configured = resolve_excluded_fields_config(config).get(surface_class)
+    configured = configured_excluded_fields(config).get(surface_class)
     if configured is not None:
         return tuple(configured)
     if surface_class == PII_ENTITY_CLASS:
