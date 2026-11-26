@@ -117,11 +117,14 @@ def _server(knowledge: Path, *, caller_audience: set[str] | None = None):
 
 
 class TestMcpRecallToolFlag:
-    def test_recall_tool_declares_with_pii(self, corpus: Path) -> None:
+    def test_recall_tool_declares_include_sensitive(self, corpus: Path) -> None:
         tool = _tool(_server(corpus), "recall")
 
+        assert "include_sensitive" in tool.parameters["properties"]
+        # `None` (not False) so a deprecated spelling passed with a different
+        # value can be told apart from the new name left unset (athenaeum#3163).
+        assert tool.parameters["properties"]["include_sensitive"]["default"] is None
         assert "with_pii" in tool.parameters["properties"]
-        assert tool.parameters["properties"]["with_pii"]["default"] is False
 
     def test_recall_tool_default_is_unchanged(self, corpus: Path) -> None:
         tool = _tool(_server(corpus), "recall")
@@ -134,7 +137,7 @@ class TestMcpRecallToolFlag:
     def test_recall_tool_threads_the_flag(self, corpus: Path) -> None:
         tool = _tool(_server(corpus), "recall")
 
-        result = tool.fn("widget", with_pii=True)
+        result = tool.fn("widget", include_sensitive=True)
 
         assert "alex@example.org" in result
 
@@ -145,8 +148,9 @@ class TestMcpReadEntityTool:
         tool = _tool(_server(corpus), "read_entity")
 
         props = tool.parameters["properties"]
-        assert set(props) >= {"uid", "entity_class", "include_excluded", "usage_classes"}
-        assert props["include_excluded"]["default"] is False
+        assert set(props) >= {"uid", "entity_class", "include_sensitive", "usage_classes"}
+        assert props["include_sensitive"]["default"] is None
+        assert "include_excluded" in props
 
     def test_reads_a_person_through_the_generic_tool(self, corpus: Path) -> None:
         tool = _tool(_server(corpus), "read_entity")
@@ -538,7 +542,7 @@ class TestDateTypedFrontmatterCoercion:
         knowledge = self._dated_source_corpus(tmp_path)
         tool = _tool(_server(knowledge), "recall")
 
-        result = tool.fn("widget", with_pii=True)
+        result = tool.fn("widget", include_sensitive=True)
 
         assert '"source": "2026-03-01T10:30:00"' in result
         assert "2026-03-01 10:30:00" not in result
@@ -546,13 +550,13 @@ class TestDateTypedFrontmatterCoercion:
     def test_recall_with_pii_handle_shaped_query_does_not_crash(
         self, tmp_path: Path
     ) -> None:
-        """The handle-shaped path (``recall("alex@example.org", with_pii=True)``)
+        """The handle-shaped path (``recall("alex@example.org", include_sensitive=True)``)
         had NO ``default=`` fallback at all before the fix — a raw datetime
         ``source`` crashed it outright, not merely mis-formatted it."""
         knowledge = self._dated_source_corpus(tmp_path)
         tool = _tool(_server(knowledge), "recall")
 
-        result = tool.fn("alex@example.org", with_pii=True)
+        result = tool.fn("alex@example.org", include_sensitive=True)
         payload = json.loads(result)
 
         assert payload["resolved"] is True
@@ -574,7 +578,7 @@ class TestDateTypedFrontmatterCoercion:
         # `_dated_source_corpus` populated.
         _write_config(knowledge)
 
-        rc = cmd_recall(_recall_args(knowledge, "alex@example.org", with_pii=True))
+        rc = cmd_recall(_recall_args(knowledge, "alex@example.org", include_sensitive=True))
         payload = json.loads(capsys.readouterr().out)
 
         assert rc == 0
@@ -587,6 +591,7 @@ def _entity_args(knowledge: Path, uid: str, **kwargs: object) -> argparse.Namesp
         path=knowledge,
         uid=uid,
         entity_class=kwargs.get("entity_class", "person"),
+        include_sensitive=kwargs.get("include_sensitive", False),
         include_excluded=kwargs.get("include_excluded", False),
         usage_class=kwargs.get("usage_class", []),
     )
@@ -596,7 +601,7 @@ class TestCliEntityCommand:
     def test_prints_the_same_json_object_shape(
         self, corpus: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cmd_entity(_entity_args(corpus, "alex", include_excluded=True))
+        rc = cmd_entity(_entity_args(corpus, "alex", include_sensitive=True))
         payload = json.loads(capsys.readouterr().out)
 
         assert rc == 0
@@ -699,6 +704,7 @@ def _recall_args(knowledge: Path, query: str, **kwargs: object) -> argparse.Name
         backend="keyword",
         audience=kwargs.get("audience", None),
         as_of=None,
+        include_sensitive=kwargs.get("include_sensitive", False),
         with_pii=kwargs.get("with_pii", False),
         usage_class=kwargs.get("usage_class", []),
     )
@@ -725,7 +731,7 @@ class TestCliRecallWithPii:
     def test_with_pii_appends_the_excluded_fields(
         self, corpus: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        assert cmd_recall(_recall_args(corpus, "widget", with_pii=True)) == 0
+        assert cmd_recall(_recall_args(corpus, "widget", include_sensitive=True)) == 0
         out = capsys.readouterr().out
 
         assert "emails=alex@example.org" in out
@@ -798,7 +804,7 @@ class TestCliRecallWithPii:
 
         monkeypatch.setattr(pii, "iter_contact_records", _explode)
 
-        assert cmd_recall(_recall_args(knowledge, "widget", with_pii=True)) == 0
+        assert cmd_recall(_recall_args(knowledge, "widget", include_sensitive=True)) == 0
         out = capsys.readouterr().out
 
         assert "alex.md" not in out
@@ -819,7 +825,7 @@ class TestCliRecallWithPii:
 
         monkeypatch.setattr(pii, "iter_contact_records", _explode)
 
-        assert cmd_recall(_recall_args(knowledge, "widget", with_pii=True)) == 0
+        assert cmd_recall(_recall_args(knowledge, "widget", include_sensitive=True)) == 0
 
         assert "atlas.md" in capsys.readouterr().out
 
@@ -841,7 +847,7 @@ class TestCliRecallWithPii:
 
         monkeypatch.setattr(pii, "iter_contact_records", _explode)
 
-        assert cmd_recall(_recall_args(knowledge, "widget", with_pii=True)) == 0
+        assert cmd_recall(_recall_args(knowledge, "widget", include_sensitive=True)) == 0
 
         assert "loose.md" in capsys.readouterr().out
 
@@ -871,7 +877,7 @@ class TestCliRecallWithPii:
 
         monkeypatch.setattr(pii, "iter_contact_records", _counting)
 
-        cmd_recall(_recall_args(knowledge, "widget", with_pii=True))
+        cmd_recall(_recall_args(knowledge, "widget", include_sensitive=True))
         out = capsys.readouterr().out
 
         assert out.count("@example.org") == 3

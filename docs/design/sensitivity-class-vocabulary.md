@@ -535,7 +535,7 @@ whether it joins the corpus at all (`docs/extending/storage-adapter-contract.md`
 three orthogonal `corpus_policy` bits). A class that maps to a
 non-`recallable` surface is unreachable through recall regardless of its
 `read_policy.access`; `read_policy` only matters for a class whose surface
-is at least reachable through the read interface (`recall(with_pii=True)` /
+is at least reachable through the read interface (`recall(include_sensitive=True)` /
 `read_entity`, the athenaeum#883/#885/#886 surfaces
 `docs/design/security-posture.md:29-33` names).
 

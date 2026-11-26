@@ -76,8 +76,8 @@ def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         "'remote' pins this server for exposure to a third-party host: the "
         "three owner-only decision-queue mutators (resolve_question, "
         "resolve_merge, review_audit_item) are not registered at all, while "
-        "remember and raise_decision stay available, and excluded fields are "
-        "withheld (see --excluded-fields). Overrides ATHENAEUM_SERVE_PROFILE "
+        "remember and raise_decision stay available, and sensitive fields are "
+        "withheld (see --sensitive-reads). Overrides ATHENAEUM_SERVE_PROFILE "
         "and serve.profile in athenaeum.yaml. Unset = no preset = unchanged "
         "behaviour.",
     )
@@ -94,20 +94,31 @@ def add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         "serve.tools in athenaeum.yaml. Unset = no allowlist.",
     )
     serve_parser.add_argument(
-        "--excluded-fields",
+        "--sensitive-reads",
         type=str,
         default=None,
         choices=["off", "on"],
-        help="Whether this server may resolve excluded "
+        help="Whether this server may resolve sensitive "
         "(off-corpus) fields such as a person's contact data. 'on' is the "
-        "historical behaviour -- recall(with_pii=True) and "
-        "read_entity(include_excluded=True) return the values. 'off' "
+        "historical behaviour -- recall(include_sensitive=True) and "
+        "read_entity(include_sensitive=True) return the values. 'off' "
         "withholds them: recall returns a withheld notice instead, "
         "read_entity returns none, and enumerate_entities refuses a "
         "PII-scoped predicate or output field. Defaults to 'off' under "
         "--profile remote, otherwise 'on'. Overrides "
-        "ATHENAEUM_SERVE_EXCLUDED_FIELDS and serve.excluded_fields in "
+        "ATHENAEUM_SERVE_SENSITIVE_READS and serve.sensitive_reads in "
         "athenaeum.yaml.",
+    )
+    serve_parser.add_argument(
+        "--excluded-fields",
+        type=str,
+        default=None,
+        choices=["off", "on"],
+        help="Deprecated name for --sensitive-reads (and "
+        "ATHENAEUM_SERVE_EXCLUDED_FIELDS for ATHENAEUM_SERVE_SENSITIVE_READS): "
+        "behaves the same, prints a notice, and is removed in the next minor "
+        "release. The yaml key serve.excluded_fields is refused; use "
+        "serve.sensitive_reads.",
     )
     serve_parser.add_argument(
         "--cache-dir",
@@ -394,10 +405,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         resolve_serve_auth_max_token_lifetime,
         resolve_serve_auth_resource,
         resolve_serve_auth_scopes,
-        resolve_serve_excluded_fields,
         resolve_serve_host,
         resolve_serve_port,
         resolve_serve_profile,
+        resolve_serve_sensitive_reads,
         resolve_serve_tools,
         resolve_serve_transport,
     )
@@ -563,8 +574,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         remote_policy = build_remote_policy(
             profile=resolve_serve_profile(cfg, getattr(args, "profile", None)),
             tools=resolve_serve_tools(cfg, getattr(args, "tools", None)),
-            excluded_fields=resolve_serve_excluded_fields(
-                cfg, getattr(args, "excluded_fields", None)
+            sensitive_reads=resolve_serve_sensitive_reads(
+                cfg,
+                getattr(args, "sensitive_reads", None),
+                getattr(args, "excluded_fields", None),
             ),
         )
     except RemotePolicyError as exc:
@@ -600,8 +613,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     if remote_policy is not None:
         print(
-            "[remote-policy] excluded fields: "
-            f"{'on' if remote_policy.excluded_fields else 'off (withheld)'}"
+            "[remote-policy] sensitive reads: "
+            f"{'on' if remote_policy.sensitive_reads else 'off (withheld)'}"
             + (
                 ""
                 if remote_policy.allowed_tools is None

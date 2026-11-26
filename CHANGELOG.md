@@ -98,6 +98,30 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- The flag that returns sensitive values is named `include_sensitive` on every
+  read (athenaeum#3163): the `recall`, `read_entity` and `enumerate_entities`
+  MCP tools, and `athenaeum recall`, `athenaeum entity` and `athenaeum
+  enumerate` (`--include-sensitive`). It replaces `with_pii` / `--with-pii` and
+  `include_excluded` / `--include-excluded`, which still work and behave
+  identically but print one notice naming the replacement (a
+  `deprecation_notice` in the tool result, a line on stderr for the command
+  line); passing an old and the new name with different values is an error.
+  The served ceiling is renamed the same way: `serve.sensitive_reads: on | off`
+  replaces `serve.excluded_fields` (same values, same default under each
+  profile), `athenaeum serve --sensitive-reads` replaces `--excluded-fields`,
+  and `ATHENAEUM_SERVE_SENSITIVE_READS` replaces
+  `ATHENAEUM_SERVE_EXCLUDED_FIELDS`. The old yaml key is refused at startup
+  with the replacement printed; the old flag and environment variable are
+  accepted with a notice. The `read_entity` payload key
+  `excluded_fields_withheld` is now `sensitive_reads_withheld`. The tool
+  descriptions and the served instructions use the new name. **The old names
+  (`with_pii`, `include_excluded`, `--with-pii`, `--include-excluded`,
+  `--excluded-fields`, `ATHENAEUM_SERVE_EXCLUDED_FIELDS`) are removed in the
+  next minor release.** With the flag set, `read_entity` and `athenaeum entity`
+  now also replace a routed-value pointer (`[sensitive:<class>:<id> ...]`) in
+  the page body with its value, under the class's own read policy; the
+  pointer text now names that read instead of an internal function.
+
 - A field correction is written to the location `storage.route_for(page_type,
   field)` returns, and in place on the page when it returns none (athenaeum#3162).
   Default behaviour change: where contact fields are kept on a separate

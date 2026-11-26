@@ -77,7 +77,7 @@ string for every redaction on a page, naming a destination but giving the
 reader nothing to act on. The proposed pointer differs per matched value
 (distinct `record_id`, §2) and names the function a reader (an agent) calls
 to re-request it, closing the operator's stated requirement ("if the agent
-doesn't use `with_pii=True` then it should get the redacted block and know
+doesn't use `include_sensitive=True` then it should get the redacted block and know
 it can make the request again"). The exact literal wording is a reversible,
 non-security choice (§9) and is not load-bearing to any of this note's
 harder calls.
@@ -126,7 +126,7 @@ marker for the whole page).
 
 **AC3's constraint, restated precisely, because it is the fact that forces
 this section's decision.** The existing excluded-surface read machinery —
-`with_pii=True` in `recall`, `mcp_server._excluded_block_for_hit`,
+`include_sensitive=True` in `recall`, `mcp_server._excluded_block_for_hit`,
 `read_entity` — resolves through
 `pii.ExcludedRecordIndex.by_uid(uid)`. It is uid-keyed by construction. A
 hit with no `uid` has nothing to join on and the excluded block is simply

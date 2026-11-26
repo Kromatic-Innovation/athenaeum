@@ -125,13 +125,20 @@ def add_enumerate_subparser(subparsers: argparse._SubParsersAction) -> None:
         "beyond the always-present uid/type/name.",
     )
     parser.add_argument(
+        "--include-sensitive",
+        dest="include_sensitive",
+        action="store_true",
+        help="Required to predicate or select `google_contact_*` fields "
+        "(issue athenaeum#965 AC amendment 1). The same flag, under the same "
+        "name, as `recall --include-sensitive`. NOT required for "
+        "`do_not_email` (ungated by athenaeum#1122).",
+    )
+    parser.add_argument(
         "--with-pii",
         dest="with_pii",
         action="store_true",
-        help="Required to predicate or select `google_contact_*` fields "
-        "(issue athenaeum#965 AC amendment 1). Same flag contract "
-        "`recall --with-pii` already uses. NOT required for `do_not_email` "
-        "(ungated by athenaeum#1122).",
+        help="Deprecated name for --include-sensitive: behaves the same, "
+        "prints a notice, and is removed in the next minor release.",
     )
     parser.add_argument(
         "--include-split",
@@ -184,6 +191,9 @@ def cmd_enumerate(args: argparse.Namespace) -> int:
     extra_roots = resolve_indexed_surfaces(knowledge_root, cfg)
     caller_audience = resolve_audience(cfg, getattr(args, "audience", None))
 
+    from athenaeum.pii import cli_sensitive_flag
+
+    include_sensitive = cli_sensitive_flag(args, {"--with-pii": "with_pii"})
     try:
         result = enumerate_entities(
             wiki_root,
@@ -195,7 +205,7 @@ def cmd_enumerate(args: argparse.Namespace) -> int:
             limit=args.limit,
             cursor=args.cursor,
             fields=args.field,
-            with_pii=args.with_pii,
+            with_pii=include_sensitive,
             caller_audience=caller_audience,
             extra_roots=extra_roots,
             config=cfg,

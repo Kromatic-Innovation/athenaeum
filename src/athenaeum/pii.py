@@ -141,7 +141,7 @@ Five pieces, in the order the issue settles them:
    its validity state including any valid-time close
    (:class:`IdentifierValidity`) — plus, per record, the do-not-email mark
    with provenance (:class:`DoNotEmailState`). Those ride the EXISTING read
-   path: ``recall(with_pii=True)`` and :func:`read_entity`, plus
+   path: ``recall(include_sensitive=True)`` and :func:`read_entity`, plus
    :func:`read_identifier_facts` for the bulk by-address case.
 
    **Explicit non-goal: no suppression/eligibility predicate ships here, and
@@ -174,6 +174,7 @@ import json
 import logging
 import os
 import re
+import sys
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -5700,7 +5701,7 @@ def json_date_default(obj: object) -> str:
     The ONE coercion point for every JSON-emitting read surface built over the
     sanctioned excluded-field read path — ``read_entity``
     (:meth:`EntityRead.to_dict` carries ``frontmatter`` unconverted) and
-    ``recall(with_pii=True)`` (:mod:`athenaeum.mcp_server`'s excluded-facts
+    ``recall(include_sensitive=True)`` (:mod:`athenaeum.mcp_server`'s excluded-facts
     render and handle-resolution join, both of which can carry a
     :class:`ContactClassification`'s ``source`` straight from record
     frontmatter). Passed as ``default=`` at each call site rather than
@@ -6168,6 +6169,68 @@ def read_entity(
         surface_class=surface_class,
         config=config,
     )
+
+
+def reconcile_sensitive_flag(
+    new_name: str,
+    new_value: bool | None,
+    legacy: Mapping[str, bool | None],
+) -> tuple[bool, list[str]]:
+    """Fold the deprecated spellings of the sensitive-read flag into the new one.
+
+    *new_name* is how the caller spells the new flag (``include_sensitive``
+    for a tool parameter, ``--include-sensitive`` on the command line);
+    *legacy* maps each deprecated spelling, in the same style, to the value
+    the caller passed (``None`` = not passed). Returns ``(value, notices)``:
+    one notice per deprecated name that was used, each naming the
+    replacement. A deprecated name behaves exactly like the new one.
+
+    Raises:
+        ValueError: a deprecated name and the new name (or two deprecated
+            names) were passed with different values.
+    """
+    passed: list[tuple[str, bool]] = []
+    if new_value is not None:
+        passed.append((new_name, bool(new_value)))
+    notices: list[str] = []
+    for old_name, old_value in legacy.items():
+        if old_value is None:
+            continue
+        passed.append((old_name, bool(old_value)))
+        notices.append(
+            f"`{old_name}` is deprecated: use `{new_name}` instead. The old "
+            "name still works and is removed in the next minor release."
+        )
+    values = {value for _, value in passed}
+    if len(values) > 1:
+        names = " and ".join(f"`{name}`" for name, _ in passed)
+        raise ValueError(
+            f"{names} name the same flag but were passed different values; "
+            f"pass `{new_name}` alone."
+        )
+    return (values.pop() if values else False), notices
+
+
+def cli_sensitive_flag(args: Any, legacy_dests: Mapping[str, str]) -> bool:
+    """The command line's ``--include-sensitive``, folding in the old spellings.
+
+    *legacy_dests* maps each deprecated option string to its argparse ``dest``
+    (``{"--with-pii": "with_pii"}``). These are ``store_true`` flags, so
+    "passed" means ``True``; each one passed prints one stderr notice naming
+    ``--include-sensitive`` and counts as the same flag.
+    """
+    legacy: dict[str, bool | None] = {
+        option: (True if getattr(args, dest, False) else None)
+        for option, dest in legacy_dests.items()
+    }
+    value, notices = reconcile_sensitive_flag(
+        "--include-sensitive",
+        True if getattr(args, "include_sensitive", False) else None,
+        legacy,
+    )
+    for notice in notices:
+        print(notice, file=sys.stderr)
+    return value
 
 
 class ExcludedSurfaceUnavailable(RuntimeError):
@@ -6649,6 +6712,8 @@ __all__ = [
     "IdentifierValidity",
     "validity_for_value",
     "assemble_excluded_validity",
+    "reconcile_sensitive_flag",
+    "cli_sensitive_flag",
     "ExcludedSurfaceUnavailable",
     "IdentifierFacts",
     "read_identifier_facts",

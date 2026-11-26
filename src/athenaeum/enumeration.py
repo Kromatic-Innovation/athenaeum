@@ -52,9 +52,9 @@ exists for fields whose VALUE is not itself sensitive but whose presence is a
 durable, cross-system identifier — a key that lets a holder join this
 person's wiki page to an out-of-band store. ``google_contact_*`` is exactly
 that: a join key into a contact system outside the corpus. Gating it means a
-caller must opt in (``with_pii=True``, the identical flag CONTRACT
-``recall(with_pii=...)`` already uses — a boolean gate a caller opts into,
-not the excluded-surface RECORD JOIN ``recall(with_pii=True)`` performs for a
+caller must opt in (``include_sensitive=True``, the identical flag CONTRACT
+``recall(include_sensitive=...)`` already uses — a boolean gate a caller opts into,
+not the excluded-surface RECORD JOIN ``recall(include_sensitive=True)`` performs for a
 person's contact data, see ``pii.assemble_excluded_read``) before this module
 will use it as a predicate or return it as an output field, from the SAME
 on-page frontmatter every other field is read from. Referencing a gated
@@ -79,13 +79,13 @@ deliberately did not add ``do_not_email_reason`` / ``do_not_email_date`` in
 its place, for the same reason: a reason string and a date are no more a
 durable cross-system identifier than the boolean they annotate. This is
 unrelated to, and does not change, the separate ``recall`` / ``read_entity``
-reverse-lookup path, where ``with_pii=True`` stays required because there the
+reverse-lookup path, where ``include_sensitive=True`` stays required because there the
 lookup KEY is an email address on the excluded surface (see
 ``docs/extending/authorized-reader-contract.md``) — this module never looks anything
 up by address.
 
 A caller that needs the full excluded-surface record for an enumerated hit
-still follows up with ``recall(with_pii=True)`` or ``read_entity`` by the
+still follows up with ``recall(include_sensitive=True)`` or ``read_entity`` by the
 returned ``uid`` — reusing that join here for every type-filtered candidate
 would be a materially heavier operation with no acceptance criterion asking
 for it, and this module's job is discovery (which uids match), not the deep
@@ -137,7 +137,7 @@ DEFAULT_LIMIT = 50
 #: uses (``do_not_email != true``).
 PREDICATE_KINDS: tuple[str, ...] = ("eq", "substring", "regex")
 
-#: Field names gated behind ``with_pii=True`` (AC amendment 1): an exact-name
+#: Field names gated behind ``include_sensitive=True`` (AC amendment 1): an exact-name
 #: set plus a prefix set (``google_contact``, ``google_contact_kromatic``, ...
 #: are all durable-identifier fields sharing this one prefix). Checked at the
 #: API boundary before any candidate is read, so a caller that forgets the
@@ -152,7 +152,7 @@ _PII_GATED_FIELD_PREFIXES: tuple[str, ...] = ("google_contact",)
 
 
 def is_pii_gated_field(field_name: str) -> bool:
-    """True iff *field_name* requires ``with_pii=True`` to predicate/select on."""
+    """True iff *field_name* requires ``include_sensitive=True`` to predicate/select on."""
     if field_name in _PII_GATED_EXACT_FIELDS:
         return True
     return any(field_name.startswith(p) for p in _PII_GATED_FIELD_PREFIXES)
@@ -398,7 +398,7 @@ def enumerate_entities(
     scoping, PII gating, audience scoping, pagination). Never raises for an
     unrecognized ``entity_type`` (AC 4) or an empty match — it raises
     :class:`ValueError` only for a genuine caller error: a PII-gated field
-    referenced without ``with_pii=True``, or a cursor that does not belong
+    referenced without ``include_sensitive=True``, or a cursor that does not belong
     to this exact ``(entity_type, sort_key, descending)`` triple.
 
     Args:
@@ -457,7 +457,7 @@ def enumerate_entities(
     if gated_requested and not with_pii:
         raise ValueError(
             "Field(s) "
-            f"{sorted(set(gated_requested))} require with_pii=True to use as a "
+            f"{sorted(set(gated_requested))} require include_sensitive=True to use as a "
             "predicate or requested output field (issue athenaeum#965 AC amendment 1)."
         )
 

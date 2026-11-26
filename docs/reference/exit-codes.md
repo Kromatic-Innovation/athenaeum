@@ -236,7 +236,7 @@ immediately below.
 
 | Code | Name | Meaning |
 |---|---|---|
-| `0` | — | The uid resolved to a page; the record printed to stdout (redaction markers in place of withheld fields unless `--include-excluded`). |
+| `0` | — | The uid resolved to a page; the record printed to stdout (redaction markers in place of withheld fields unless `--include-sensitive`). |
 | `1` | `EXIT_NOT_FOUND` | The uid does not resolve to any page. |
 | `2` | — | Usage error: no `--uid` given (read mode only — see the "`2` as a usage error" convention above; issue athenaeum#2488 moved this check from argparse's own `required=True` into `cmd_entity` itself so the nested `rename` sub-action could have its own, independently required `--uid`). |
 | `70` | `EXIT_INTERNAL_ERROR` | The uid DID resolve, but something else in the read/serialize path failed (e.g. an unserializable frontmatter value) before a full record could be printed. |

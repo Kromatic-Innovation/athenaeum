@@ -5737,38 +5737,6 @@ authorization server never issues, and every tool call would fail for a
 reason the operator cannot see from the configuration. No seed in
 ``_DEFAULTS``.
 
-### `resolve_serve_excluded_fields`
-
-- **YAML path:** `serve.excluded_fields`
-- **Environment variable:** `ATHENAEUM_SERVE_EXCLUDED_FIELDS`
-- **CLI flag:** —
-- **Default:** `None`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve the serve-time excluded-fields pin.
-
-Returns ``True`` (excluded values are resolvable, the historical
-behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
-`athenaeum.remote_policy.build_remote_policy` fall back to the
-active profile's default (``off`` under ``remote``) and keeps a server
-with no serve-time pins at all unchanged. A plain ``bool`` could not
-express that third state.
-
-Precedence follows the repo convention CLI > env > yaml > default:
-
-- ``cli_value`` — the ``athenaeum serve --excluded-fields`` flag.
-- ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` — env var.
-- ``serve.excluded_fields`` — yaml string.
-- ``None`` — not set.
-
-The vocabulary is the words ``off`` / ``on``
-(`athenaeum.remote_policy.VALID_EXCLUDED_FIELDS_VALUES`), not a
-bool, so YAML's permissive truthiness cannot quietly pick a side on a
-PII-egress boundary; anything else raises
-`athenaeum.remote_policy.RemotePolicyError` and
-``athenaeum serve`` exits non-zero, exactly as
-`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
-
 ### `resolve_serve_host`
 
 - **YAML path:** `serve.host`
@@ -5855,6 +5823,46 @@ surface than the operator asked for — the same fail-loud posture
 the documented exception to this module's warn-and-fall-back policy for
 a knob whose silent default has a safety cost. No seed in ``_DEFAULTS``
 so the code default stays reachable.
+
+### `resolve_serve_sensitive_reads`
+
+- **YAML path:** `serve.sensitive_reads`
+- **Environment variable:** `ATHENAEUM_SERVE_SENSITIVE_READS`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the serve-time sensitive-reads pin.
+
+Returns ``True`` (sensitive values are resolvable, the historical
+behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
+`athenaeum.remote_policy.build_remote_policy` fall back to the
+active profile's default (``off`` under ``remote``) and keeps a server
+with no serve-time pins at all unchanged. A plain ``bool`` could not
+express that third state.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` — the ``athenaeum serve --sensitive-reads`` flag.
+- ``ATHENAEUM_SERVE_SENSITIVE_READS`` — env var.
+- ``serve.sensitive_reads`` — yaml string.
+- ``None`` — not set.
+
+The names this setting had before its rename are deprecated aliases for one minor
+release: ``legacy_cli_value`` (``--excluded-fields``) and the
+``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` env var resolve identically, and a
+notice naming the replacement goes to stderr. The old yaml key
+``serve.excluded_fields`` is NOT an alias: it is refused, with the
+replacement printed (see ``_REMOVED_CONFIG_KEYS``). Setting a deprecated
+and a current name to different values raises.
+
+The vocabulary is the words ``off`` / ``on``
+(`athenaeum.remote_policy.VALID_SENSITIVE_READS_VALUES`), not a
+bool, so YAML's permissive truthiness cannot quietly pick a side on a
+PII-egress boundary; anything else raises
+`athenaeum.remote_policy.RemotePolicyError` and
+``athenaeum serve`` exits non-zero, exactly as
+`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
 
 ### `resolve_serve_tools`
 
@@ -6590,6 +6598,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_RUN_TYPE` | `src/athenaeum/_cmd_index.py`, `src/athenaeum/_cmd_run.py`, `src/athenaeum/librarian.py`, `src/athenaeum/spend.py` |
 | `ATHENAEUM_SCOPE_SAMENESS_MAX_TOKENS` | `src/athenaeum/decision_answers.py` |
 | `ATHENAEUM_SCOPE_SAMENESS_THINKING` | `src/athenaeum/decision_answers.py` |
+| `ATHENAEUM_SERVE_EXCLUDED_FIELDS` | `src/athenaeum/_cmd_serve.py`, `src/athenaeum/config.py` |
 | `ATHENAEUM_SESSION_END_RUNTIME_MARGIN` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `src/athenaeum/librarian.py` |
