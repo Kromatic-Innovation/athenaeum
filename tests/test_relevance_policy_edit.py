@@ -40,6 +40,15 @@ EXISTING = (
 )
 
 
+def _shown(wiki_root: Path, decision_type: str, decision_id: str) -> str:
+    """The fingerprint the pending item has now, as a host that just listed
+    it would echo it back (issue athenaeum#2530). Authority-routed items
+    hold an answer that names no fingerprint (ruling D2)."""
+    from athenaeum.decision_answers import current_fingerprints
+
+    return min(current_fingerprints(wiki_root, decision_type, decision_id), default="")
+
+
 @pytest.fixture
 def kb(tmp_path: Path) -> Path:
     wiki = tmp_path / "wiki"
@@ -228,6 +237,7 @@ class TestRemoteProposal:
             kb / "raw",
             decision_id=proposal_id,
             decision_type="relevance-policy-edit",
+            shown_fingerprint=_shown(kb / "wiki", "relevance-policy-edit", proposal_id),
             verdict=verdict,
             wiki_root=kb / "wiki",
         )
@@ -340,6 +350,7 @@ class TestRouteRule:
             kb / "raw",
             decision_id=out["proposal_id"],
             decision_type="relevance-policy-edit",
+            shown_fingerprint=_shown(kb / "wiki", "relevance-policy-edit", out["proposal_id"]),
             verdict="approve",
             wiki_root=kb / "wiki",
         )

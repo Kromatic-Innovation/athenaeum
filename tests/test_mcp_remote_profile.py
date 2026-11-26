@@ -143,15 +143,26 @@ PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
     # (run-lock seconds) on the three answer tools -- the ONLY delta; no
     # property removed, and neither is required.
     "resolve_merge": {
-        "properties": ["apply", "decision", "id", "note", "wait"],
+        # Issue athenaeum#2530 re-pinned the answer tools: answerer, channel,
+        # evidence and shown_fingerprint are its answer-record fields.
+        "properties": [
+            "answerer", "apply", "channel", "decision", "evidence", "id", "note",
+            "shown_fingerprint", "wait",
+        ],  # fmt: skip
         "required": ["decision", "id"],
     },
     "resolve_question": {
-        "properties": ["answer", "apply", "id", "wait"],
+        "properties": [
+            "answer", "answerer", "apply", "channel", "evidence", "id",
+            "shown_fingerprint", "wait",
+        ],  # fmt: skip
         "required": ["answer", "id"],
     },
     "review_audit_item": {
-        "properties": ["apply", "human_verdict", "id", "note", "wait"],
+        "properties": [
+            "answerer", "apply", "channel", "evidence", "human_verdict", "id",
+            "note", "shown_fingerprint", "wait",
+        ],  # fmt: skip
         "required": ["human_verdict", "id"],
     },
     "scan_retraction_cascade": {"properties": [], "required": []},

@@ -51,6 +51,7 @@ from athenaeum.config import (
 from athenaeum.decision_answers import (
     VALID_DECISION_TYPES,
     apply_decision_answers,
+    current_fingerprints,
     write_decision_answer,
 )
 from athenaeum.decision_framing import (
@@ -1003,11 +1004,16 @@ def _answer(
     knowledge_root = wiki.parent
     raw_root = knowledge_root / "raw"
     (raw_root / "answers").mkdir(parents=True, exist_ok=True)
+    # Issue athenaeum#2530: a page-recompile item is authority-routed, so a
+    # real answer surface echoes the fingerprint it showed.
     path = write_decision_answer(
         raw_root,
         decision_id=decision_id,
         decision_type=DECISION_TYPE,
         verdict=verdict,
+        shown_fingerprint=min(
+            current_fingerprints(wiki, DECISION_TYPE, decision_id), default=""
+        ),
     )
     report = apply_decision_answers(wiki, raw_root, config=_config(), lock=lock)
     # An applied answer file stays on disk, so a second call re-reads the

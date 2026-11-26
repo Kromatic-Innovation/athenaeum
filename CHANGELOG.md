@@ -66,6 +66,21 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- A decision answer that does not name the fingerprint of the item it
+  answers is no longer applied on an authority-routed item (`confirmation`,
+  `proposed-rule`, `auto-apply-threshold`, `dimension-proposal`,
+  `relevance-policy-edit`, `page-recompile`). It is held with error code
+  `held_unconfirmed` and the item stays in the queue; answering again with
+  the item's current `fingerprint` (from `athenaeum decisions list --json` or
+  `list_pending_decisions`) applies it. On a competence-routed item
+  (`question`, `merge`, `audit`, `coordinate`) such an answer still applies,
+  marked `unverified`. Two more refusals apply to every answer: one naming a
+  fingerprint the item no longer has ends `stale` and is not applied, and
+  one whose answerer is an agent is refused on an authority-routed item
+  (`agent_on_authority`). The checks run when the answer is applied, so they
+  cover the immediate apply, the `ingest-answers` tick and answer files
+  written by hand. An answer file already waiting on disk for an authority
+  item is held the same way on the next tick (athenaeum#2530).
 - The per-turn recall hook (`athenaeum-claude-hook`) now gives the topic
   extractor the previous turn as well as the new message: the previous user
   message and the end of the assistant's last reply, each cut to 1,500
@@ -148,6 +163,21 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- Decision answers now record who answered, where, and what they were shown
+  (`answer_version: 2`). `athenaeum decisions answer` takes
+  `--shown-fingerprint`, `--answerer-id`, `--answerer-kind`
+  (`human`/`agent`/`unknown`), `--channel-host`, `--channel-surface`,
+  `--evidence-strength` and `--evidence-ref`; the MCP tools
+  `resolve_question`, `resolve_merge` and `review_audit_item` take
+  `shown_fingerprint`, `answerer`, `channel` and `evidence`. Each surface
+  records its own channel by default (`cli`/`tty` for the CLI, `mcp` with
+  host `unknown` for the MCP tools), and agent triage records itself as an
+  agent answerer with the fingerprint of the item it read. A field that does
+  not fit is refused before anything is written (`invalid_answer_record`). A
+  `merge` answer with a named answerer stamps `decided_by` as `human:<id>` or
+  `agent:<id>` instead of `human:unattributed`. Each budget-ledger answer
+  event now carries `channel.host` and `evidence.strength` (event version 2;
+  version 1 events read as before) (athenaeum#2530).
 - Spend records can now say who paid. Set `spend.account` in
   `athenaeum.yaml` (or `ATHENAEUM_SPEND_ACCOUNT`, which wins) to an opaque
   label such as `team-api-key`, and every new `spend.jsonl` record carries it

@@ -149,6 +149,196 @@ VALID_DECISION_TYPES: frozenset[str] = frozenset(
 #: ``decision_id``.
 DECISION_ANSWER_SOURCE_TAG = "decision_answer"
 
+# ---------------------------------------------------------------------------
+# Answer record v2 (issue athenaeum#2530, design athenaeum#2489 section 4)
+# ---------------------------------------------------------------------------
+
+#: A record with no ``shown_fingerprint`` is today's format, version 1. It
+#: carries no ``answer_version`` key, so every file written before this
+#: version existed reads as version 1 unchanged.
+ANSWER_VERSION_LEGACY = 1
+
+#: A record that names the fingerprint of the item as it was shown. The
+#: fingerprint is required for this version.
+ANSWER_VERSION = 2
+
+ANSWERER_HUMAN = "human"
+ANSWERER_AGENT = "agent"
+ANSWERER_UNKNOWN = "unknown"
+ANSWERER_KINDS: tuple[str, ...] = (ANSWERER_HUMAN, ANSWERER_AGENT, ANSWERER_UNKNOWN)
+
+EVIDENCE_UNVERIFIED = "unverified"
+EVIDENCE_ASSERTED = "asserted"
+EVIDENCE_VERIFIED = "verified"
+EVIDENCE_STRENGTHS: tuple[str, ...] = (EVIDENCE_UNVERIFIED, EVIDENCE_ASSERTED, EVIDENCE_VERIFIED)
+
+#: The ``channel`` keys a record may carry. ``host`` is required whenever a
+#: channel is given: it is the one the budget ledger records.
+CHANNEL_FIELDS: tuple[str, ...] = ("host", "surface", "adapter", "adapter_version")
+
+#: Outcome error codes the answer-record preflight adds
+#: (:func:`preflight_answer_record`).
+#:
+#: ``stale``: the answer names a fingerprint the item no longer has. The item
+#: changed after it was shown, so the answer is not applied and the item
+#: stays in the queue with its new framing.
+ERROR_STALE = "stale"
+#: ``held_unconfirmed``: an answer with no fingerprint on an
+#: ``authority``-routed item (ruling D2). Not applied; it waits for an answer
+#: that names what was shown.
+ERROR_HELD_UNCONFIRMED = "held_unconfirmed"
+#: ``agent_on_authority``: an agent answered an item only the owner may decide.
+ERROR_AGENT_ON_AUTHORITY = "agent_on_authority"
+
+_FINGERPRINT_PREFIX = "sha256:"
+
+
+class AnswerRecordInvalid(ValueError):
+    """A writer was handed answer-record fields that do not fit section 4.
+
+    Raised by :func:`render_decision_answer` (and so by every writer) before
+    anything is written. Callers turn it into a structured refusal.
+    """
+
+
+def _fingerprint_is_well_formed(value: str) -> bool:
+    if not value.startswith(_FINGERPRINT_PREFIX):
+        return False
+    digest = value[len(_FINGERPRINT_PREFIX) :]
+    return len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+
+
+def normalize_answer_record_fields(
+    *,
+    shown_fingerprint: str | None = None,
+    answerer: Any = None,
+    channel: Any = None,
+    evidence: Any = None,
+) -> dict[str, Any]:
+    """Check and normalize the section 4 fields; return the keys to record.
+
+    The three objects are typed ``Any`` because this is also the check a
+    hand-written file's frontmatter goes through: anything that is not a
+    mapping is refused here, at runtime.
+
+    Returns only the keys that were supplied, plus ``answer_version: 2`` when
+    a fingerprint is given. Nothing supplied returns ``{}``: the record is
+    then version 1, exactly as before.
+
+    Rules:
+
+    - ``shown_fingerprint`` is ``sha256:`` plus 64 lowercase hex digits, the
+      shape :func:`athenaeum.decision_framing.fingerprint_for` produces.
+    - ``answerer`` is ``{id, kind}``. ``id`` is required; ``kind`` is one of
+      :data:`ANSWERER_KINDS` and defaults to ``unknown``.
+    - ``channel`` takes the :data:`CHANNEL_FIELDS` keys, all strings;
+      ``host`` is required.
+    - ``evidence`` is ``{strength, ref}``. ``strength`` is required and is
+      one of :data:`EVIDENCE_STRENGTHS`; ``ref`` is a string or null. A
+      strength above ``unverified`` needs a fingerprint: with no record of
+      what was shown, nothing about the answer can be checked.
+
+    Raises:
+        AnswerRecordInvalid: any rule above is broken. Unknown keys inside
+            ``answerer``/``channel``/``evidence`` are refused too, so a typo
+            is not silently dropped.
+    """
+    out: dict[str, Any] = {}
+
+    fingerprint = (shown_fingerprint or "").strip()
+    if fingerprint:
+        if not _fingerprint_is_well_formed(fingerprint):
+            raise AnswerRecordInvalid(
+                "shown_fingerprint must be 'sha256:' followed by 64 lowercase "
+                f"hex digits, got {fingerprint!r}"
+            )
+        out["answer_version"] = ANSWER_VERSION
+        out["shown_fingerprint"] = fingerprint
+
+    if answerer is not None:
+        if not isinstance(answerer, Mapping):
+            raise AnswerRecordInvalid("answerer must be an object with 'id' and 'kind'")
+        unknown = sorted(set(answerer) - {"id", "kind"})
+        if unknown:
+            raise AnswerRecordInvalid(f"answerer has unknown key(s): {', '.join(unknown)}")
+        answerer_id = answerer.get("id")
+        if not isinstance(answerer_id, str) or not answerer_id.strip():
+            raise AnswerRecordInvalid("answerer.id must be a non-empty string")
+        kind = answerer.get("kind", ANSWERER_UNKNOWN)
+        if kind not in ANSWERER_KINDS:
+            raise AnswerRecordInvalid(
+                f"answerer.kind must be one of {list(ANSWERER_KINDS)}, got {kind!r}"
+            )
+        out["answerer"] = {"id": answerer_id.strip(), "kind": kind}
+
+    if channel is not None:
+        if not isinstance(channel, Mapping):
+            raise AnswerRecordInvalid("channel must be an object")
+        unknown = sorted(set(channel) - set(CHANNEL_FIELDS))
+        if unknown:
+            raise AnswerRecordInvalid(f"channel has unknown key(s): {', '.join(unknown)}")
+        normalized: dict[str, str] = {}
+        for key in CHANNEL_FIELDS:
+            value = channel.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise AnswerRecordInvalid(f"channel.{key} must be a string")
+            if value.strip():
+                normalized[key] = value.strip()
+        if "host" not in normalized:
+            raise AnswerRecordInvalid("channel.host must be a non-empty string")
+        out["channel"] = normalized
+
+    if evidence is not None:
+        if not isinstance(evidence, Mapping):
+            raise AnswerRecordInvalid("evidence must be an object with 'strength' and 'ref'")
+        unknown = sorted(set(evidence) - {"strength", "ref"})
+        if unknown:
+            raise AnswerRecordInvalid(f"evidence has unknown key(s): {', '.join(unknown)}")
+        strength = evidence.get("strength")
+        if strength not in EVIDENCE_STRENGTHS:
+            raise AnswerRecordInvalid(
+                f"evidence.strength must be one of {list(EVIDENCE_STRENGTHS)}, got {strength!r}"
+            )
+        ref = evidence.get("ref")
+        if ref is not None and not isinstance(ref, str):
+            raise AnswerRecordInvalid("evidence.ref must be a string or null")
+        if strength != EVIDENCE_UNVERIFIED and not fingerprint:
+            raise AnswerRecordInvalid(
+                f"evidence.strength {strength!r} needs a shown_fingerprint; an "
+                "answer with no record of what was shown is unverified"
+            )
+        out["evidence"] = {"strength": strength, "ref": ref.strip() if ref else None}
+
+    return out
+
+
+def surface_channel(given: Any, *, host: str, surface: str, adapter: str) -> Any:
+    """The ``channel`` a built-in write surface records.
+
+    Starts from what the surface itself knows (*host*, *surface*, *adapter*
+    and the installed athenaeum version as ``adapter_version``) and lets the
+    caller's own *given* channel override any key it supplies: a host that
+    reaches athenaeum through the MCP server knows its own name, the server
+    does not. A *given* that is not a mapping is returned unchanged, so
+    :func:`normalize_answer_record_fields` refuses it with its usual message.
+    """
+    if given is not None and not isinstance(given, Mapping):
+        return given
+    from athenaeum import __version__
+
+    channel: dict[str, Any] = {
+        "host": host,
+        "surface": surface,
+        "adapter": adapter,
+        "adapter_version": str(__version__),
+    }
+    for key, value in (given or {}).items():
+        if not (isinstance(value, str) and not value.strip()):
+            channel[key] = value
+    return channel
+
 
 class MalformedDecisionAnswer(ValueError):
     """A ``raw/answers/*.md`` file carries ``decision_id`` but fails schema."""
@@ -208,6 +398,58 @@ class DecisionAnswer:
     #: (e.g. :mod:`athenaeum.triage`, which never writes a ``merge`` answer
     #: at all — see that module's "Why only question/coordinate" note).
     actor: str = ""
+    #: Issue athenaeum#2530 (design athenaeum#2489 section 4): the record's
+    #: version. ``2`` exactly when :attr:`shown_fingerprint` is set.
+    answer_version: int = ANSWER_VERSION_LEGACY
+    #: The fingerprint of the item as the answerer was shown it. Empty for a
+    #: version-1 record.
+    shown_fingerprint: str = ""
+    #: ``{id, kind}``; empty when the writer recorded none.
+    answerer: dict[str, str] = field(default_factory=dict)
+    #: ``{host, surface, adapter, adapter_version}``; empty when none.
+    channel: dict[str, str] = field(default_factory=dict)
+    #: ``{strength, ref}`` as recorded; empty when none. Read
+    #: :attr:`evidence_strength` for the strength that applies.
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def answerer_kind(self) -> str:
+        """The answerer's kind; ``unknown`` when none was recorded."""
+        return self.answerer.get("kind") or ANSWERER_UNKNOWN
+
+    @property
+    def evidence_strength(self) -> str:
+        """The strength this answer is treated as having.
+
+        A record with no fingerprint is ``unverified`` whatever it claims
+        (section 4, ruling D2): nothing records what its answerer saw. A
+        fingerprinted record with no ``evidence`` is ``unverified`` too; how a
+        stronger level is established is a separate design.
+        """
+        if not self.shown_fingerprint:
+            return EVIDENCE_UNVERIFIED
+        strength = self.evidence.get("strength")
+        return strength if strength in EVIDENCE_STRENGTHS else EVIDENCE_UNVERIFIED
+
+    @property
+    def channel_host(self) -> str:
+        return self.channel.get("host", "")
+
+
+def _decided_by(answer: DecisionAnswer, fallback: str) -> str:
+    """The ``decided_by`` stamp for an applied answer.
+
+    Issue athenaeum#2530 takes over the attribution athenaeum#2523 stubbed:
+    an answer whose answerer is a recorded agent is stamped ``agent:<id>``;
+    a human answerer (or the older ``actor`` key) is ``human:<id>``; an
+    answer with neither keeps the caller's pipeline *fallback*.
+    """
+    answerer_id = answer.answerer.get("id", "")
+    if answer.answerer_kind == ANSWERER_AGENT and answerer_id:
+        return f"agent:{answerer_id}"
+    if answer.actor:
+        return f"human:{answer.actor}"
+    return fallback
 
 
 @dataclass
@@ -241,6 +483,10 @@ class DecisionAnswerOutcome:
     #: this same ``decision_id`` and was applied in this file's place.
     #: Empty for every other outcome.
     superseded_by: str = ""
+    #: Issue athenaeum#2530: the evidence strength the answer was applied
+    #: with (see :attr:`DecisionAnswer.evidence_strength`). Set on every
+    #: outcome that reached the preflight; empty otherwise.
+    evidence_strength: str = ""
 
 
 @dataclass
@@ -267,6 +513,10 @@ def render_decision_answer(
     origin_decision_type: str = "",
     name: str = "",
     actor: str = "",
+    shown_fingerprint: str = "",
+    answerer: Mapping[str, Any] | None = None,
+    channel: Mapping[str, Any] | None = None,
+    evidence: Mapping[str, Any] | None = None,
 ) -> str:
     """Render a decision-answer raw-intake record (athenaeum#908 D1 format).
 
@@ -296,7 +546,20 @@ def render_decision_answer(
     ``human:<actor>`` and a ``pipeline:merge-<decision>`` ``decided_by``
     stamp. See :attr:`DecisionAnswer.actor`'s docstring for why the two
     current human surfaces both pass the placeholder ``"unattributed"``.
+
+    ``shown_fingerprint``, ``answerer``, ``channel``, ``evidence`` (issue
+    athenaeum#2530): the answer-record fields of design athenaeum#2489
+    section 4, checked by :func:`normalize_answer_record_fields`. A
+    fingerprint makes the record ``answer_version: 2``; without one the
+    record stays version 1 and carries whichever of the other fields were
+    given. Raises :class:`AnswerRecordInvalid` on a field that does not fit.
     """
+    record_fields = normalize_answer_record_fields(
+        shown_fingerprint=shown_fingerprint,
+        answerer=answerer,
+        channel=channel,
+        evidence=evidence,
+    )
     if decision_type not in VALID_DECISION_TYPES:
         raise ValueError(
             f"decision_type must be one of {sorted(VALID_DECISION_TYPES)}, "
@@ -327,6 +590,7 @@ def render_decision_answer(
         meta["name"] = name.strip()
     if actor and actor.strip():
         meta["actor"] = actor.strip()
+    meta.update(record_fields)
 
     frontmatter = yaml.safe_dump(
         meta, sort_keys=False, allow_unicode=True, default_flow_style=False
@@ -350,6 +614,10 @@ def write_decision_answer(
     origin_decision_type: str = "",
     name: str = "",
     actor: str = "",
+    shown_fingerprint: str = "",
+    answerer: Mapping[str, Any] | None = None,
+    channel: Mapping[str, Any] | None = None,
+    evidence: Mapping[str, Any] | None = None,
     config: dict | None = None,
     wiki_root: Path | None = None,
 ) -> Path:
@@ -367,6 +635,11 @@ def write_decision_answer(
     ``actor`` (issue athenaeum#2523): forwarded verbatim to
     :func:`render_decision_answer` — see its docstring and
     :attr:`DecisionAnswer.actor`.
+
+    ``shown_fingerprint`` / ``answerer`` / ``channel`` / ``evidence`` (issue
+    athenaeum#2530): forwarded to :func:`render_decision_answer`. They are
+    checked before anything is written; a bad one raises
+    :class:`AnswerRecordInvalid`.
 
     Issue athenaeum#2544: for ``decision_type == "coordinate"``, *verdict*
     is first run through :func:`validate_coordinate_answer` — the exact
@@ -394,11 +667,18 @@ def write_decision_answer(
     should pass it).
 
     Raises:
+        AnswerRecordInvalid: a section 4 field does not fit. Checked first.
         CoordinateAnswerRefused: *decision_type* is ``"coordinate"`` and
             *verdict* fails validation. Never raised for any other
             *decision_type*, and never after this point (nothing below
             this check can fail the same way).
     """
+    normalize_answer_record_fields(
+        shown_fingerprint=shown_fingerprint,
+        answerer=answerer,
+        channel=channel,
+        evidence=evidence,
+    )
     if decision_type == "coordinate":
         effective_wiki_root = wiki_root if wiki_root is not None else raw_root.parent / "wiki"
         pending_path = effective_wiki_root / "_pending_questions.md"
@@ -428,6 +708,10 @@ def write_decision_answer(
         origin_decision_type=origin_decision_type,
         name=name,
         actor=actor,
+        shown_fingerprint=shown_fingerprint,
+        answerer=answerer,
+        channel=channel,
+        evidence=evidence,
     )
 
     stem = f"{filename_ts}-{decision_type}-{decision_id}"
@@ -520,6 +804,184 @@ def preflight_audit(wiki_root: Path, decision_id: str) -> tuple[bool, str | None
     if already_reviewed:
         return False, "already_resolved", f"audit item already reviewed: {decision_id}"
     return True, None, "ok"
+
+
+# ---------------------------------------------------------------------------
+# Answer-record preflight (issue athenaeum#2530, design athenaeum#2489 §4)
+# ---------------------------------------------------------------------------
+
+
+class LiveQueue:
+    """The pending queue as an answer is checked against it.
+
+    Built lazily, at most once until :meth:`invalidate`, so a tick that walks
+    many answer files does not rebuild the queue for each one. The walk
+    invalidates it after every applied answer, because applying one item can
+    change another.
+
+    Items are keyed by ``(applier decision type, id)``: the per-type id spaces
+    are unrelated (see the module docstring), so an id alone could match an
+    item of another type.
+    """
+
+    def __init__(self, wiki_root: Path, config: dict | None = None) -> None:
+        self._wiki_root = wiki_root
+        self._config = config
+        self._views: dict[bool, dict[tuple[str, str], dict[str, Any]]] = {}
+
+    def invalidate(self) -> None:
+        self._views.clear()
+
+    def _view(self, with_proposal: bool) -> dict[tuple[str, str], dict[str, Any]]:
+        if with_proposal not in self._views:
+            from athenaeum.config import resolve_decisions_max_sources_per_merge
+            from athenaeum.decision_framing import answerable_as
+            from athenaeum.decisions import collect_unframed_decisions
+
+            items = collect_unframed_decisions(
+                self._wiki_root,
+                with_proposal=with_proposal,
+                max_sources_per_merge=resolve_decisions_max_sources_per_merge(self._config),
+            )
+            view: dict[tuple[str, str], dict[str, Any]] = {}
+            for item in items:
+                applier = answerable_as(str(item.get("type") or ""))
+                item_id = item.get("id")
+                if applier is not None and isinstance(item_id, str):
+                    view[(applier, item_id)] = item
+            self._views[with_proposal] = view
+        return self._views[with_proposal]
+
+    def item(self, decision_type: str, decision_id: str) -> dict[str, Any] | None:
+        """The pending item an answer of *decision_type* would resolve, or None."""
+        return self._view(False).get((decision_type, decision_id))
+
+    def fingerprints(
+        self, decision_type: str, decision_id: str, *, stop_at: str | None = None
+    ) -> set[str]:
+        """Every fingerprint the item currently has.
+
+        With *stop_at*, returns as soon as that fingerprint is found, so the
+        common case (the answer names the default view's fingerprint) never
+        builds the ``with_proposal`` view at all.
+
+        The fingerprint covers the item's payload, and ``with_proposal``
+        changes a question's payload, so a host that listed with proposals
+        was shown a different (and equally current) fingerprint. Both views
+        count. Each is computed exactly as
+        :func:`athenaeum.decisions.list_pending_decisions` computes it: the
+        stored presentation for the item's current state digest when there
+        is one, the template presentation otherwise.
+        """
+        from athenaeum.decision_framing import (
+            fingerprint_for,
+            state_digest_for,
+            template_presentation,
+        )
+        from athenaeum.decision_presentations import load_presentations, stored_presentation
+
+        stored = load_presentations(self._wiki_root)
+        found: set[str] = set()
+        for with_proposal in (False, True):
+            item = self._view(with_proposal).get((decision_type, decision_id))
+            if item is None:
+                continue
+            digest = state_digest_for(item)
+            presentation = stored_presentation(stored, decision_id, digest)
+            if presentation is None:
+                presentation = template_presentation(item)
+            found.add(fingerprint_for(item, presentation, digest))
+            if stop_at is not None and stop_at in found:
+                break
+        return found
+
+
+def current_fingerprints(
+    wiki_root: Path, decision_type: str, decision_id: str, *, config: dict | None = None
+) -> set[str]:
+    """The fingerprints a pending item has right now (issue athenaeum#2530).
+
+    *decision_type* is the APPLIER type (:data:`VALID_DECISION_TYPES`).
+    Empty when no pending item matches. An answer naming any of these is not
+    stale.
+    """
+    return LiveQueue(wiki_root, config).fingerprints(decision_type, decision_id)
+
+
+def preflight_answer_record(
+    answer: DecisionAnswer,
+    live: LiveQueue,
+) -> DecisionAnswerOutcome | None:
+    """Check an answer's section 4 fields against the item it answers.
+
+    Returns a refused outcome, or ``None`` when the answer may go on to its
+    per-type applier. Runs only when the item is still pending: an unknown or
+    already-resolved id is left to the applier, which reports it with its own
+    long-standing error code.
+
+    In order:
+
+    1. ``answerer.kind: agent`` on an ``authority``-routed item is refused
+       (:data:`ERROR_AGENT_ON_AUTHORITY`). Routing is permission, not
+       knowledge; only the owner may decide such an item.
+    2. No fingerprint (a version-1 record) on an ``authority``-routed item is
+       held for re-confirmation (:data:`ERROR_HELD_UNCONFIRMED`, ruling D2).
+       On a ``competence``-routed item it is applied as ``unverified``.
+    3. A fingerprint the item no longer has is :data:`ERROR_STALE`: the item
+       changed after it was shown. Not applied; the item stays in the queue
+       and is offered again with its current framing.
+
+    Routing is the routing of the pending item's own type, so a
+    ``confirmation`` (authority) answered through the ``question`` applier is
+    still treated as authority.
+    """
+    from athenaeum.decision_framing import ROUTING_AUTHORITY, routing_for
+
+    item = live.item(answer.decision_type, answer.decision_id)
+    if item is None:
+        return None
+    routing = routing_for(str(item.get("type") or ""))
+
+    def refused(error_code: str, message: str) -> DecisionAnswerOutcome:
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code=error_code,
+            message=message,
+            evidence_strength=answer.evidence_strength,
+        )
+
+    if routing == ROUTING_AUTHORITY and answer.answerer_kind == ANSWERER_AGENT:
+        return refused(
+            ERROR_AGENT_ON_AUTHORITY,
+            f"{item.get('type')} item {answer.decision_id} is authority-routed: "
+            f"only the owner may decide it, and answerer "
+            f"{answer.answerer.get('id')!r} is an agent; not applied",
+        )
+    if not answer.shown_fingerprint:
+        if routing == ROUTING_AUTHORITY:
+            return refused(
+                ERROR_HELD_UNCONFIRMED,
+                f"{item.get('type')} item {answer.decision_id} is authority-routed "
+                "and this answer does not say what was shown (no "
+                "shown_fingerprint); held for re-confirmation. Answer again "
+                "with the item's current fingerprint to apply it",
+            )
+        return None
+    current = live.fingerprints(
+        answer.decision_type, answer.decision_id, stop_at=answer.shown_fingerprint
+    )
+    if answer.shown_fingerprint not in current:
+        return refused(
+            ERROR_STALE,
+            f"item {answer.decision_id} changed after it was shown: the answer "
+            f"names {answer.shown_fingerprint}, the item is now "
+            f"{', '.join(sorted(current))}; not applied. The item stays in "
+            "the queue with its current framing",
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -860,6 +1322,43 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
     raw_name = meta.get("name", "") or ""
     raw_actor = meta.get("actor", "") or ""
 
+    # Issue athenaeum#2530: the section 4 fields, checked by the same rules
+    # the writer applies. A hand-written file that breaks them is malformed
+    # rather than half-read.
+    raw_fingerprint = meta.get("shown_fingerprint")
+    if raw_fingerprint is not None and not isinstance(raw_fingerprint, str):
+        raise MalformedDecisionAnswer(f"{path}: shown_fingerprint must be a string")
+    try:
+        record = normalize_answer_record_fields(
+            shown_fingerprint=raw_fingerprint,
+            answerer=meta.get("answerer"),
+            channel=meta.get("channel"),
+            # A fingerprint-less file claiming more than unverified is not
+            # refused here (the writer refuses it); it is read as
+            # unverified instead -- see DecisionAnswer.evidence_strength.
+            evidence=_evidence_for_read(
+                meta.get("evidence"), bool((raw_fingerprint or "").strip())
+            ),
+        )
+    except AnswerRecordInvalid as exc:
+        raise MalformedDecisionAnswer(f"{path}: {exc}") from exc
+    declared_version = meta.get("answer_version")
+    if declared_version is not None and declared_version not in (
+        ANSWER_VERSION_LEGACY,
+        ANSWER_VERSION,
+    ):
+        raise MalformedDecisionAnswer(
+            f"{path}: unrecognized answer_version {declared_version!r}"
+        )
+    if declared_version == ANSWER_VERSION and "shown_fingerprint" not in record:
+        raise MalformedDecisionAnswer(
+            f"{path}: answer_version 2 requires shown_fingerprint"
+        )
+    answerer = dict(record.get("answerer") or {})
+    actor = str(raw_actor).strip()
+    if not actor and answerer.get("kind") == ANSWERER_HUMAN:
+        actor = answerer["id"]
+
     return DecisionAnswer(
         decision_id=decision_id.strip(),
         decision_type=decision_type,
@@ -870,8 +1369,28 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
         origin_decision_type=origin_decision_type,
         name=str(raw_name),
         source=str(meta.get("source") or "").strip(),
-        actor=str(raw_actor).strip(),
+        actor=actor,
+        answer_version=int(record.get("answer_version", ANSWER_VERSION_LEGACY)),
+        shown_fingerprint=str(record.get("shown_fingerprint", "")),
+        answerer=answerer,
+        channel=dict(record.get("channel") or {}),
+        evidence=dict(record.get("evidence") or {}),
     )
+
+
+def _evidence_for_read(raw: Any, has_fingerprint: bool) -> Any:
+    """``evidence`` as the loader checks it.
+
+    The writer refuses a fingerprint-less record that claims more than
+    ``unverified``. A file written some other way is read rather than
+    refused, and :attr:`DecisionAnswer.evidence_strength` treats it as
+    unverified, so the claim is passed through as plain ``unverified`` here.
+    """
+    if has_fingerprint or not isinstance(raw, Mapping):
+        return raw
+    if raw.get("strength") in EVIDENCE_STRENGTHS:
+        return {**raw, "strength": EVIDENCE_UNVERIFIED}
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -1026,7 +1545,7 @@ def _apply_short_name_escalated_answer(
                 message=f"rename to {new_name!r} refused: {preview.error}",
             )
         if not preview.noop:
-            by = f"human:{answer.actor}" if answer.actor else "pipeline:short-name-escalated-answer"
+            by = _decided_by(answer, "pipeline:short-name-escalated-answer")
             apply_rename(
                 wiki_root,
                 preview,
@@ -1168,15 +1687,14 @@ def _apply_merge_answer(
         # is the positive signal — set only by the two human-facing answer
         # surfaces (MCP's `resolve_merge` tool, the `athenaeum decisions
         # answer` CLI command), both of which stamp the placeholder
-        # "unattributed" today because no surface yet carries a real
-        # per-user identity (that is issue athenaeum#2489, still open).
-        # Once it lands, a caller that resolves a real actor flows straight
-        # through to `human:<actor>` with no further change needed here.
+        # "unattributed" when the caller names no answerer. Issue
+        # athenaeum#2530: an answer that records its answerer is stamped
+        # with it instead (`human:<id>` or `agent:<id>`, see `_decided_by`).
         # A DecisionAnswer with no actor (e.g. a hypothetical future
         # automated writer that reuses this same raw-intake path) keeps the
         # pre-existing `pipeline:merge-<decision>` stamp unchanged — the
         # human label requires that positive signal, never a default.
-        decided_by = f"human:{answer.actor}" if answer.actor else f"pipeline:merge-{decision}"
+        decided_by = _decided_by(answer, f"pipeline:merge-{decision}")
         record_pair_decision(
             wiki_root,
             source_a=sources[0],
@@ -2934,11 +3452,15 @@ def _apply_loaded_answer(
     lock: "RunLock | None",
     client: "LLMBackend | None",
     usage: "TokenUsage | None",
+    live: LiveQueue | None = None,
 ) -> DecisionAnswerOutcome:
     """Schema-check, dispatch and post-apply side channels for ONE parsed
     answer (extracted verbatim from :func:`apply_decision_answers`'s loop
     body so the directory walk and the per-file entry point
-    :func:`apply_decision_answer_file` share one implementation)."""
+    :func:`apply_decision_answer_file` share one implementation).
+
+    *live* is the queue the answer-record preflight checks against (issue
+    athenaeum#2530); a fresh one is built when omitted."""
     pending_questions_path = wiki_root / "_pending_questions.md"
     pending_merges_path = wiki_root / "_pending_merges.md"
 
@@ -2982,6 +3504,23 @@ def _apply_loaded_answer(
             error_code="schema_invalid",
             message=message,
         )
+
+    # Issue athenaeum#2530: the section 4 preflight -- stale fingerprint,
+    # fingerprint-less answer on an authority item, agent on an authority
+    # item. Here rather than in any one writer, so it covers every path an
+    # answer file can arrive by: the immediate apply, the deferred tick, and
+    # a file dropped into raw/answers/ by hand or by an adapter.
+    refusal = preflight_answer_record(
+        answer, live if live is not None else LiveQueue(wiki_root, config)
+    )
+    if refusal is not None:
+        log.info(
+            "decision_answers: %s not applied (%s): %s",
+            answer.decision_id,
+            refusal.error_code,
+            refusal.message,
+        )
+        return refusal
 
     # Issue athenaeum#1990: look up the item's OWN raise timestamp before
     # dispatching — once applied, a question/merge/audit/proposed-rule
@@ -3054,6 +3593,7 @@ def _apply_loaded_answer(
             message=f"no dispatch branch for decision_type {answer.decision_type!r}",
         )
 
+    outcome.evidence_strength = answer.evidence_strength
     if outcome.applied:
         # Best-effort: the budget ledger is instrumentation, never a
         # reason to fail an already-successful apply.
@@ -3065,6 +3605,8 @@ def _apply_loaded_answer(
                 decision_id=answer.decision_id,
                 decision_type=answer.decision_type,
                 raised_at=raised_at,
+                channel_host=answer.channel_host,
+                evidence_strength=answer.evidence_strength,
             )
         except Exception as exc:  # noqa: BLE001 - must never break apply
             log.debug(
@@ -3530,6 +4072,9 @@ def apply_decision_answers(
             # The walk is oldest-first, so the last writer wins.
             newest_answer_for[parsed.decision_id] = path
 
+    # Issue athenaeum#2530: one live queue for the whole walk, rebuilt only
+    # after an answer actually changes state.
+    live = LiveQueue(wiki_root, config)
     for path, answer, load_error in loaded:
         if load_error is not None:
             log.warning("decision_answers: %s", load_error)
@@ -3579,10 +4124,12 @@ def apply_decision_answers(
             lock=lock,
             client=client,
             usage=usage,
+            live=live,
         )
 
         report.outcomes.append(outcome)
         if outcome.applied:
+            live.invalidate()
             report.applied += 1
         else:
             report.skipped += 1
@@ -3601,6 +4148,19 @@ def apply_decision_answers(
 __all__ = [
     "VALID_DECISION_TYPES",
     "DECISION_ANSWER_SOURCE_TAG",
+    "ANSWER_VERSION",
+    "ANSWER_VERSION_LEGACY",
+    "ANSWERER_KINDS",
+    "EVIDENCE_STRENGTHS",
+    "CHANNEL_FIELDS",
+    "ERROR_STALE",
+    "ERROR_HELD_UNCONFIRMED",
+    "ERROR_AGENT_ON_AUTHORITY",
+    "AnswerRecordInvalid",
+    "LiveQueue",
+    "normalize_answer_record_fields",
+    "current_fingerprints",
+    "preflight_answer_record",
     "MalformedDecisionAnswer",
     "CoordinateAnswerRefused",
     "DecisionAnswer",

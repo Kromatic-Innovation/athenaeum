@@ -234,7 +234,12 @@ from typing import Any, Protocol
 
 from athenaeum.calibration import sample_triage_decision
 from athenaeum.config import resolve_dimensions
-from athenaeum.decision_answers import CoordinateAnswerRefused, write_decision_answer
+from athenaeum.decision_answers import (
+    AnswerRecordInvalid,
+    CoordinateAnswerRefused,
+    surface_channel,
+    write_decision_answer,
+)
 from athenaeum.decision_framing import (
     ROUTING_CLASSES,
     ROUTING_COMPETENCE,
@@ -252,6 +257,10 @@ log = logging.getLogger(__name__)
 #: or overridable by, anything the research step reads (see module
 #: docstring, "Prompt-injection hardening").
 TRIAGE_DECIDED_BY_PREFIX = "agent:"
+
+#: ``answerer.id`` on every answer record triage writes (issue
+#: athenaeum#2530), with ``answerer.kind: agent``.
+TRIAGE_ANSWERER_ID = "athenaeum-triage"
 
 #: Decision ``type``s the default researcher is OFFERED — see module
 #: docstring, "Why only `question`/`coordinate`". A FUTURE researcher
@@ -438,6 +447,7 @@ def submit_answer(
     decision_type: str,
     answer: dict[str, Any],
     config: dict[str, Any] | None = None,
+    shown_fingerprint: str = "",
 ) -> TriageSubmission:
     """Validate + write one decision answer — the SAME sequence
     ``athenaeum decisions answer`` runs (:func:`athenaeum._cmd_decisions._cmd_answer`),
@@ -470,6 +480,13 @@ def submit_answer(
     applies every other answer file — this function never mutates
     ``_pending_questions.md``/``_pending_merges.md``/the calibration
     ledger itself.
+
+    Issue athenaeum#2530 (design athenaeum#2489 section 4): the record names
+    triage as its answerer (kind ``agent``, :data:`TRIAGE_ANSWERER_ID`) and
+    its channel, and carries *shown_fingerprint* -- the fingerprint of the
+    queue item triage read -- so an item that changes before the answer is
+    applied refuses it as ``stale`` rather than taking a verdict reached on
+    the old item.
     """
     applier_type = answerable_as(decision_type)
     if applier_type is None:
@@ -519,11 +536,18 @@ def submit_answer(
             # already refused a "name" the decision_type's own schema does not
             # declare, so this is empty for every other type).
             name=str(answer.get("name", "")),
+            shown_fingerprint=shown_fingerprint,
+            answerer={"id": TRIAGE_ANSWERER_ID, "kind": "agent"},
+            channel=surface_channel(
+                None, host="athenaeum", surface="triage", adapter="athenaeum.triage"
+            ),
             config=config,
             wiki_root=knowledge_root / "wiki",
         )
     except CoordinateAnswerRefused as exc:
         return TriageSubmission(ok=False, error_code=exc.error_code, message=exc.message)
+    except AnswerRecordInvalid as exc:
+        return TriageSubmission(ok=False, error_code="invalid_answer_record", message=str(exc))
     return TriageSubmission(ok=True, path=path)
 
 
@@ -730,6 +754,7 @@ def run_triage(
             decision_type=decision_type,
             answer={"verdict": verdict_to_submit},
             config=config,
+            shown_fingerprint=str(item.get("fingerprint") or ""),
         )
         if not submission.ok:
             log.warning(

@@ -499,8 +499,13 @@ class TestConfirmationResolvesThroughExistingPath:
         res = _call(
             server,
             "resolve_question",
+            # Issue athenaeum#2530: a confirmation is authority-routed, so the
+            # host echoes the fingerprint it was shown in the list above.
             lambda fn: fn(
-                decision_id, "Confirmed — extension approach is correct.", apply="deferred"
+                decision_id,
+                "Confirmed — extension approach is correct.",
+                apply="deferred",
+                shown_fingerprint=item["fingerprint"],
             ),
         )
         assert res["ok"] is True
