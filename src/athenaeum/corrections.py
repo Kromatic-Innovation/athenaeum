@@ -151,7 +151,7 @@ from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import StorageConfigError, available_adapters, open_store, route_for
-from athenaeum.store import Store, append_line_durable
+from athenaeum.store import Store, append_line_durable, note_no_restore_point
 from athenaeum.trust_graph import (
     EQUAL,
     INCOMPARABLE,
@@ -3258,6 +3258,14 @@ def retire_batch(
     if not batch_path.exists():
         return True
     store = store if store is not None else open_store(load_config(knowledge_root), knowledge_root)
+    if store.capabilities.declares_no_history:
+        note_no_restore_point(log, knowledge_root, "corrections")
+        try:
+            batch_path.unlink()
+        except OSError as exc:
+            log.warning("corrections: could not remove batch %s: %s", batch_path, exc)
+            return False
+        return True
     if not store.capabilities.versioned:
         log.warning(
             "corrections: store at %s is not versioned — refusing to "

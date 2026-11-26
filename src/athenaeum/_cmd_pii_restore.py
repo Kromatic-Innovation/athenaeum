@@ -35,7 +35,12 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
+from athenaeum._cli_shared import (
+    _acquire_or_exit,
+    _add_lock_args,
+    _no_history_declared,
+    _resolve_knowledge_root,
+)
 
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
@@ -104,6 +109,8 @@ def cmd_pii_restore(args: argparse.Namespace) -> int:
     )
 
     knowledge_root = _resolve_knowledge_root(args, attr="knowledge_root")
+    if _no_history_declared(knowledge_root, "pii-restore"):
+        return 0
     wiki_root = (args.wiki_root or (knowledge_root / "wiki")).expanduser().resolve()
     if not wiki_root.is_dir():
         print(f"Wiki root not found: {wiki_root}", file=sys.stderr)
