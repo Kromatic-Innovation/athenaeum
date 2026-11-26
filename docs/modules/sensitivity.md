@@ -75,12 +75,12 @@ of the two sanctioned paths below, does.
 - **The audience cannot be widened by the caller** — it is an operator decision made once, at
   serve time, for the whole process.
 - **Excluded-surface fields (contact data, and whatever else is routed off-corpus) have
-  exactly two sanctioned read paths: `recall(with_pii=True)` and `read_entity`.** Every other
+  exactly two sanctioned read paths: `recall(include_sensitive=True)` and `read_entity`.** Every other
   corpus consumer — recall's default path, merge, embedding — excludes them by construction.
-  Referencing a `with_pii`-gated field without the flag raises `ValueError` immediately,
+  Referencing an `include_sensitive`-gated field without the flag raises `ValueError` immediately,
   rather than silently omitting it, so a caller cannot mistake "I forgot the flag" for "this
   field doesn't exist."
-- **The `with_pii` join runs strictly after page authorization**, so it can never be used to
+- **The `include_sensitive` join runs strictly after page authorization**, so it can never be used to
   probe whether an excluded record exists behind a page the caller isn't allowed to read at
   all, and `read_entity` never returns an excluded value for a page it withholds.
 - **`screening.medical.action: drop` is rejected outright** —

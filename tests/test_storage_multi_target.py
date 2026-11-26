@@ -501,3 +501,19 @@ def test_prose_scrub_raises_naming_a_failing_later_target(
     monkeypatch.setattr(pii, "record_contact_value", flaky)
     with pytest.raises(StorageTargetError, match="vault_b"):
         _scrub(context)
+
+
+def test_batch_compile_routes_a_free_text_value_to_every_target(tmp_path: Path) -> None:
+    from tests.test_storage_discard import SENTINEL_EMAIL, _batch_compile, _free_text_cfg
+
+    cfg = _free_text_cfg([{"sensitivity_class": "pii", "to": ["vault_a", "vault_b"]}])
+    cfg["storage"]["adapters"] = _adapters(tmp_path)
+    raw_text = (
+        "---\nuid: note-2\ntype: reference\nname: Mail note\naccess: internal\n---\n\n"
+        f"Reach them at {SENTINEL_EMAIL} soon.\n"
+    )
+    knowledge = _batch_compile(tmp_path, cfg, raw_text)
+    a = sorted((knowledge / "vault_a" / "sensitivity" / "pii").glob("*.md"))
+    b = sorted((knowledge / "vault_b" / "sensitivity" / "pii").glob("*.md"))
+    assert len(a) == 1 and [p.name for p in a] == [p.name for p in b]
+    assert SENTINEL_EMAIL in a[0].read_text() and SENTINEL_EMAIL in b[0].read_text()

@@ -481,7 +481,7 @@ are different addresses.
 The response is a JSON document (`json.dumps(..., indent=2, sort_keys=True)`,
 nothing else) carrying the person's `uid`, `display_name`, `entity_class`, and
 per-value fact fields — usage/provenance classification, bounce history,
-validity dates. Excluded values are gated by `with_pii` exactly as they are
+validity dates. Excluded values are gated by `include_sensitive` exactly as they are
 elsewhere in `recall`, and the excluded-surface lookup runs strictly after the
 same audience and `recallable` drops documented below.
 
@@ -489,7 +489,7 @@ same audience and `recallable` drops documented below.
 implementation detail: the response never carries `outreach_eligible` or
 anything shaped like "may this address be used to contact them" — that
 decision is the caller's own policy, applied over the facts this module
-returns. Access control (who may set `with_pii`, or call `recall` at all) is
+returns. Access control (who may set `include_sensitive`, or call `recall` at all) is
 a separate, deferred question (athenaeum#864); this module implements
 neither.
 
@@ -750,7 +750,7 @@ more field predicates, a sort key, and a limit — and no query string.
   `athenaeum people --company`'s `current_company` /
   `linkedin_company_at_connect` shape) — and a match kind: `eq` (exact),
   `substring`, or `regex`, all case-insensitive. `ne` is `eq` negated (e.g.
-  `do_not_email != true`, usable without `with_pii` since athenaeum#1122 —
+  `do_not_email != true`, usable without `include_sensitive` since athenaeum#1122 —
   see the scoping note below), not a fourth independent kind.
 - A caller-named `sort_key` (any frontmatter field), descending by default.
   Ties — including an entire class sharing one sort value — are always
@@ -766,8 +766,8 @@ more field predicates, a sort key, and a limit — and no query string.
   declared `fields` per hit; a field absent on a given page is included as
   `null`, never silently omitted, so every hit has the same shape.
 - `google_contact_*` is usable as a predicate AND as a requested output
-  field, gated behind `with_pii=True` — the SAME flag contract
-  `recall(with_pii=...)` already uses. Referencing it without the flag
+  field, gated behind `include_sensitive=True` — the SAME flag contract
+  `recall(include_sensitive=...)` already uses. Referencing it without the flag
   raises (CLI: nonzero exit + message; MCP: an `error` key in the response)
   rather than silently omitting the field. `do_not_email` (and its
   `_reason` / `_date` companions) is usable the same way but is **not**
@@ -815,12 +815,12 @@ minted under raises/errors rather than silently returning nonsense.
 
 **PII-gated fields — scoping note.** `google_contact_*` and `do_not_email`
 are BOTH read from the SAME on-page frontmatter as every other field — this
-is NOT `recall(with_pii=True)`'s excluded-surface RECORD JOIN (which
+is NOT `recall(include_sensitive=True)`'s excluded-surface RECORD JOIN (which
 resolves values from an off-corpus contact store for one hit at a time via
 `pii.assemble_excluded_read`). Enumeration's job is discovery — which
 `uid`s match — not the deep per-entity contact read; a caller that needs
 the full excluded-surface record for an enumerated hit still follows up
-with `recall(with_pii=True)` or `read_entity` by the returned `uid`.
+with `recall(include_sensitive=True)` or `read_entity` by the returned `uid`.
 
 Only `google_contact_*` is actually gated. The gate targets fields whose
 VALUE is a durable, cross-system join key — `google_contact_*` lets a
@@ -836,7 +836,7 @@ example above) require a *broader* grant than an unrelated one. athenaeum#1122
 removed `do_not_email` from `_PII_GATED_EXACT_FIELDS` (now empty) and
 deliberately left `do_not_email_reason` / `do_not_email_date` ungated too,
 for the identical reason. This is unrelated to the separate `recall` /
-`read_entity` reverse-lookup path, where `with_pii=True` stays required
+`read_entity` reverse-lookup path, where `include_sensitive=True` stays required
 because there the lookup KEY is an email address on the excluded surface
 (`docs/extending/authorized-reader-contract.md`) — enumeration never looks anything up
 by address, so that constraint never applied here.
@@ -915,8 +915,8 @@ Do not simplify any of these without reading this page and the related commit hi
 | `hookSpecificOutput.hookEventName` wrapper | Claude Code discards flat `{"additionalContext":...}` payloads without logging; the hook runs CI-green, `bash -n` is clean, stdout is valid JSON. | `additionalContext` never reaches the model. Zero recall signal. Only detectable by asking the model "did you receive a knowledge context block?" or by reading Claude Code source. |
 | Console API key vs `CLAUDE_CODE_OAUTH_TOKEN` | Messages API rejects OAuth tokens with `401 OAuth authentication is currently not supported`. The tokens look similar (both start `sk-ant-`). | `query-topics` returns empty on every call. Silent fallback to regex extractor. Detectable only by reading the 401 body, which the hook swallows to avoid noisy stderr. |
 | Audience filter applied INSIDE each backend query AND re-checked at render (athenaeum#312) | The filter must gate ranking/top-k, not just titles. If moved to a post-hoc filter over already-selected hits, a forbidden page still consumes a BM25/kNN slot and starves a permitted page — and a title-only filter leaks the body. | A restricted routine silently receives fewer permitted pages (forbidden ones ate the slots) or a forbidden page's snippet/body. No error — recall "works", it just leaks or under-serves. Do NOT collapse the three layers (index-time audience column, in-query predicate, fresh-frontmatter re-check) into a single post-hoc title filter. |
-| Reads reach a caller through the recall/read interface — never by opening a store path (athenaeum#863) | The interface is the one place a rule about the data can be stated, changed or enforced. A store is an ordinary directory: going around the interface *works*, so nothing signals that it happened. This is doubly true of the off-corpus excluded surfaces, which are excluded from recall by construction but are not access-controlled. Since athenaeum#883/#885/#886 they are reachable THROUGH the interface for every entity class — `recall(with_pii=True)` when searching, `pii.read_entity` / `read_entities` (or the `read_entity` tool / `athenaeum entity`) when holding a uid — so there is no longer a question the interface cannot answer. The person-shaped `pii.read_person` / `read_people`, the `read_person` tool and `athenaeum query person` were DEPRECATED wrappers over that same read (athenaeum#887) and have been REMOVED (athenaeum#888) now that every known consumer migrated to the generic path above. See [`docs/design/one-way-in-one-way-out.md`](one-way-in-one-way-out.md). | Every caller grows its own read path. Audience scoping, redaction markers, and any later authorization decision become unenforceable — not because they were removed, but because they are no longer on the path the data actually takes. Silent by nature: the direct read returns correct bytes, so nothing looks broken. |
-| `with_pii` joins excluded fields at RENDER only — after both Layer-C drops (athenaeum#885) | Excluded values are never indexed and are not searchable; the flag attaches a record to a hit the corpus already produced and already authorized. It runs strictly after (1) the fail-closed `is_page_authorized` re-check and (2) the athenaeum#532 `recallable` drop, so a hit either removes never triggers an excluded-surface lookup at all. Layers A (index build) and B (in-query predicate) are untouched by it. | Moved into Layer A, an excluded value lands in the FTS5/vector store and becomes searchable — permanently, until the index is rebuilt. Moved into Layer B, or run BEFORE either drop, the flag becomes an existence oracle: a restricted caller learns whether a record exists behind a page it may not read, by timing or by the lookup itself. Both fail silently — recall still returns plausible results. |
+| Reads reach a caller through the recall/read interface — never by opening a store path (athenaeum#863) | The interface is the one place a rule about the data can be stated, changed or enforced. A store is an ordinary directory: going around the interface *works*, so nothing signals that it happened. This is doubly true of the off-corpus excluded surfaces, which are excluded from recall by construction but are not access-controlled. Since athenaeum#883/#885/#886 they are reachable THROUGH the interface for every entity class — `recall(include_sensitive=True)` when searching, `pii.read_entity` / `read_entities` (or the `read_entity` tool / `athenaeum entity`) when holding a uid — so there is no longer a question the interface cannot answer. The person-shaped `pii.read_person` / `read_people`, the `read_person` tool and `athenaeum query person` were DEPRECATED wrappers over that same read (athenaeum#887) and have been REMOVED (athenaeum#888) now that every known consumer migrated to the generic path above. See [`docs/design/one-way-in-one-way-out.md`](one-way-in-one-way-out.md). | Every caller grows its own read path. Audience scoping, redaction markers, and any later authorization decision become unenforceable — not because they were removed, but because they are no longer on the path the data actually takes. Silent by nature: the direct read returns correct bytes, so nothing looks broken. |
+| `include_sensitive` joins excluded fields at RENDER only — after both Layer-C drops (athenaeum#885) | Excluded values are never indexed and are not searchable; the flag attaches a record to a hit the corpus already produced and already authorized. It runs strictly after (1) the fail-closed `is_page_authorized` re-check and (2) the athenaeum#532 `recallable` drop, so a hit either removes never triggers an excluded-surface lookup at all. Layers A (index build) and B (in-query predicate) are untouched by it. | Moved into Layer A, an excluded value lands in the FTS5/vector store and becomes searchable — permanently, until the index is rebuilt. Moved into Layer B, or run BEFORE either drop, the flag becomes an existence oracle: a restricted caller learns whether a record exists behind a page it may not read, by timing or by the lookup itself. Both fail silently — recall still returns plausible results. |
 | Off-corpus federation always queries with the SAME `backend_name` the primary corpus query used (athenaeum#984) | `merge_ranked_hits` sorts two hit lists by raw `score` — valid only when both scores come from the identical scorer. A future caller that queries the off-corpus shard with a different backend than the primary would silently rank incomparable scores against each other. | Off-corpus hits would rank randomly relative to corpus hits (an FTS5 BM25 score compared against a vector cosine-distance score has no shared meaning) — recall still "works" (returns *a* result), it just orders the merge nonsensically, with no error to signal it. |
 
 The shared failure mode — "ships CI-green, degrades silently" — is why

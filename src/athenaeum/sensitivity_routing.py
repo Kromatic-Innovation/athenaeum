@@ -35,7 +35,7 @@ value it names), NOT by an eventual wiki entity's ``uid``. This is a
 deliberate, security-bearing choice the design note's §2 requires stated
 explicitly rather than left implicit:
 
-    The existing excluded-surface read path (``with_pii``/``read_entity``,
+    The existing excluded-surface read path (``include_sensitive``/``read_entity``,
     ``mcp_server._excluded_block_for_hit``) and the settled contact-record
     routing story (``docs/design/field-corrections.md`` §7.1, issue athenaeum#872)
     are both uid-keyed BY CONSTRUCTION — they resolve through
@@ -187,7 +187,7 @@ emits is a literal string substituted directly into a page's body text at
 compile time, for a value that may have no owning uid at all. What the
 note does NOT settle, and what this slice does not decide either, is
 whether ``RedactionMarker`` should begin naming the read flag
-(``with_pii=True``) the way this module's pointer names its own read
+(``include_sensitive=True``) the way this module's pointer names its own read
 function — that sub-question is explicitly left with a follow-on issue,
 not resolved here or by this module. See athenaeum#1023's issue thread for
 the full disposition.
@@ -211,6 +211,7 @@ from athenaeum.sensitivity import (
     classify,
 )
 from athenaeum.storage import (
+    EXCLUDED,
     RouteDecision,
     StorageConfigError,
     StorageTargetError,
@@ -252,12 +253,15 @@ def _class_action(sensitivity_class: str, routing_cfg: dict[str, Any]) -> str:
     return block.get("action", "route")
 
 
-def _class_decision(sensitivity_class: str, config: dict[str, Any] | None) -> RouteDecision:
+def _class_decision(
+    sensitivity_class: str, config: dict[str, Any] | None, *, require_rule: bool = True
+) -> RouteDecision:
     """The ``storage.routes`` / ``storage.mapping`` decision for a class, or a refusal.
 
     A class with no rule is refused, naming the rule to write (athenaeum#3168):
     it no longer falls back to the built-in excluded location, and it is not
-    discarded either.
+    discarded either. ``require_rule=False`` (the read path) returns the
+    unruled decision instead, so an already-stored record stays readable.
     """
     try:
         # A storage.routes sensitivity_class rule decides first; a class no
@@ -269,7 +273,7 @@ def _class_decision(sensitivity_class: str, config: dict[str, Any] | None) -> Ro
         raise SensitivityRoutingError(
             f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
         ) from exc
-    if decision.rule is None:
+    if decision.rule is None and require_rule:
         raise SensitivityRoutingError(_missing_rule_message(sensitivity_class))
     return decision
 
@@ -312,24 +316,36 @@ def _vault_targets_for_class(
     sensitivity_class: str,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    *,
+    for_read: bool = False,
 ) -> list[tuple[str, Path]]:
     """Resolve ``(name, vault root)`` for every target of *sensitivity_class* — fail closed.
+
+    ``for_read=True`` (resolving an already-stored record) lets a class with no
+    rule fall back to the built-in excluded location, where such records were
+    written before athenaeum#3168; writes still refuse a class with no rule.
 
     See this module's docstring, "Unsafe vault surface, fail closed." A class
     whose rule discards (``to: []``) has no vault: this raises, and the callers
     that reach here never do for a discarded class (see :func:`_route_one`). The
     first entry is the primary (athenaeum#3169); a rule with one target yields one.
     """
-    decision = _class_decision(sensitivity_class, config)
-    if not decision.targets:
+    decision = _class_decision(sensitivity_class, config, require_rule=not for_read)
+    unruled = decision.rule is None
+    if not decision.targets and not unruled:
         raise SensitivityRoutingError(
             f"sensitivity class {sensitivity_class!r} is discarded ({decision.rule}); "
             "there is no vault root"
         )
+    if unruled:
+        # Read fallback only (``for_read``): the built-in excluded location.
+        names: tuple[str, ...] = (EXCLUDED.name,)
+    else:
+        names = decision.targets
     roots: list[tuple[str, Path]] = []
-    for name in decision.targets:
+    for name in names:
         try:
-            adapter = available_adapters(config)[name]
+            adapter = EXCLUDED if unruled else available_adapters(config)[name]
         except (StorageConfigError, KeyError) as exc:
             raise SensitivityRoutingError(
                 f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
@@ -353,9 +369,72 @@ def _vault_root_for_class(
     sensitivity_class: str,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    *,
+    for_read: bool = False,
 ) -> Path:
-    """The primary target's vault root (the one reads resolve from)."""
-    return _vault_targets_for_class(sensitivity_class, config, knowledge_root)[0][1]
+    """The primary target's vault root (the one reads resolve from).
+
+    ``for_read=True`` falls back to the built-in excluded location for a class
+    with no rule (athenaeum#3168); a write never passes it.
+    """
+    return _vault_targets_for_class(
+        sensitivity_class, config, knowledge_root, for_read=for_read
+    )[0][1]
+
+
+def screen_raw_for_compile(
+    raw: Any,
+    *,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> tuple[dict[str, Any], str]:
+    """The compile run's first read of a raw: route free-text values, drop discarded fields.
+
+    The ONE place both transports (``librarian.process_one`` and the batch
+    transport) call before any tier reads ``raw.content`` (athenaeum#3168).
+    Two steps, both mutating only the in-memory ``raw`` (never the file):
+
+    1. :func:`route_sensitive_values` over the body (frontmatter untouched).
+    2. A frontmatter field a ``storage.routes`` rule with ``to: []`` discards is
+       removed, so no tier writes it. A page type discarded whole is left for
+       the capture gate; a bad storage table surfaces where the page
+       destination is resolved.
+
+    Returns the re-parsed ``(frontmatter, body)``. Raises
+    :class:`SensitivityRoutingError` on a routing failure (fail closed).
+    """
+    raw_meta, raw_body = parse_frontmatter(raw.content)
+    preamble = raw.content[: len(raw.content) - len(raw_body)]
+    redacted_body = route_sensitive_values(
+        raw_ref=raw.ref,
+        text=raw_body,
+        frontmatter=raw_meta,
+        config=config,
+        knowledge_root=knowledge_root,
+    )
+    if redacted_body != raw_body:
+        raw._content = preamble + redacted_body
+    raw_type = str(raw_meta.get("type") or "").strip()
+    discarded_keys: dict[str, str] = {}
+    if raw_type:
+        try:
+            if not route_for(raw_type, config=config).discarded:
+                for key in raw_meta:
+                    decision = route_for(raw_type, str(key), config=config)
+                    if decision.discarded and decision.rule is not None:
+                        discarded_keys[str(key)] = decision.rule
+        except StorageConfigError:
+            discarded_keys = {}
+    if discarded_keys:
+        for rule in discarded_keys.values():
+            note_discard(rule)
+        _, body_now = parse_frontmatter(raw.content)
+        raw._content = (
+            render_frontmatter({k: v for k, v in raw_meta.items() if str(k) not in discarded_keys})
+            + "\n"
+            + body_now
+        )
+    return parse_frontmatter(raw.content)
 
 
 def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -> str:
@@ -367,13 +446,15 @@ def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -
 def _pointer_text(sensitivity_class: str, record_id: str) -> str:
     """The resolvable, non-leaking pointer substituted for a routed span (AC2).
 
-    Names :func:`resolve_sensitive_record` per the design note's proposed
-    format (§1) — the pointer text is fixed by the design, not by this
-    module's own scope.
+    Names the read a tool caller can actually make: ``read_entity`` with
+    ``include_sensitive=true`` (athenaeum#3163), which resolves the pointer
+    through :func:`resolve_pointers_in_text`. Pointers minted before that
+    change named :func:`resolve_sensitive_record` instead; both shapes match
+    :data:`_POINTER_RE`.
     """
     return (
         f"[{POINTER_PREFIX}:{sensitivity_class}:{record_id} — value withheld; "
-        "resolve via athenaeum.sensitivity_routing.resolve_sensitive_record()]"
+        "read this page with include_sensitive=true to resolve]"
     )
 
 
@@ -739,7 +820,9 @@ def resolve_sensitive_record(
             return None
 
         try:
-            vault_root = _vault_root_for_class(wanted_class, config, knowledge_root)
+            vault_root = _vault_root_for_class(
+                wanted_class, config, knowledge_root, for_read=True
+            )
         except SensitivityRoutingError:
             return None
 
@@ -779,3 +862,39 @@ def resolve_sensitive_record(
         # reaches here, but this function's contract is "value or nothing
         # resolvable — never raise", full stop.
         return None
+
+
+#: Matches a pointer of either wording (see :func:`_pointer_text`): the class
+#: and record id are captured; everything after the id up to ``]`` is prose.
+_POINTER_RE = re.compile(
+    rf"\[{POINTER_PREFIX}:([A-Za-z0-9_-]+):([0-9a-f]{{32}}) [^\]]*\]"
+)
+
+
+def resolve_pointers_in_text(
+    text: str,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    *,
+    caller_audience: set[str] | None = None,
+) -> str:
+    """Replace each resolvable pointer in *text* with its value (athenaeum#3163).
+
+    The entity read's ``include_sensitive`` path: a page body carries
+    ``[sensitive:<class>:<record_id> ...]`` pointers, and this swaps each for
+    the routed value via :func:`resolve_sensitive_record`, under the same
+    ``read_policy`` gate. A pointer that does not resolve for any reason is
+    left in place, so the caller cannot tell "not authorized" from "gone".
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        value = resolve_sensitive_record(
+            match.group(1),
+            match.group(2),
+            config,
+            knowledge_root,
+            caller_audience=caller_audience,
+        )
+        return match.group(0) if value is None else value
+
+    return _POINTER_RE.sub(_sub, text)

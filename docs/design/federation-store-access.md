@@ -883,3 +883,24 @@ as a hold, and a failure opens a decision or a correction in the store's queue
 | 7. Writer trust | No slice may rely on a writer being trusted or untrusted. Every slice here may be built. Placeholder eval named. | §12 |
 | 8. One queue across stores | One listing spans every store an install's owner may answer for. | §7 |
 | 9. Small mismatches | The access model does not require git; multi-writer sync does. | §11 |
+
+## 16. One predicate for "does this principal hold this right here" (athenaeum#3167)
+
+`athenaeum.access.can(principal, location, right, *, config, knowledge_root)`
+answers that question for any identity key, not only the owner's. It reads the
+named location's store declaration with the parser and the rights resolution
+of §5 and S2 and returns a boolean. It adds no right (the four of §4 remain the
+only ones) and no policy file (the declaration is the only source), and it
+never returns a role name.
+
+- A valid declaration: the union of the rights of every role that lists the
+  principal directly or through a group.
+- No declaration: the owner (the identity key of `owner.asserter`) holds every
+  right and every other principal holds none.
+- An invalid declaration, or a directory that cannot answer: nobody but the
+  owner holds read, and the owner holds read only. Failure narrows (§11).
+- An unknown location or an unknown right raises; an empty principal is false.
+
+Resolution is held per process, keyed by store and identity, as the owner's
+rights are today. The predicate is for checks on a sensitive read and is never
+called on the recall query path.

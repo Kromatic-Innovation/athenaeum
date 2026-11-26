@@ -82,8 +82,9 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- `athenaeum.access.can(principal, location, right, *, config, knowledge_root)` answers whether an identity key holds `read`, `propose`, `compile` or `answer` on a named location (athenaeum#3167). It reads the location's store declaration with the existing parser and rights resolution, adds no right and no policy file, and returns a boolean. A location with no declaration belongs to the owner alone; an invalid declaration or a directory that cannot answer leaves the owner with read and nobody else. An unknown location or right raises. Resolution is held per process for any identity key, so the owner path is unchanged.
+- A `storage.routes` rule with `to: []` discards what it names (athenaeum#3168): the value is stored nowhere, not on a page, in a vault, a ledger, a queue or an index. `route_for` returns empty `targets` with the rule named (`RouteDecision.discarded`), which is not the same as no rule matching. A field rule drops those fields when a page is compiled, in both the synchronous and the batch transport (one shared first-read screen, which also runs free-text value routing in batch mode), and the rest of the page is written, and the contact write writes nothing for them. A field correction to a discarded field ends with the outcome `discarded`, is never escalated, and leaves no value or value-derived id in the corrections ledger, the handoff note or a log. A `sensitivity_class` rule replaces each recognised value in free text with a fixed marker naming the class and saying the value was not stored, and writes no record. A page type rule is not captured: the intake decision drops it with a reason naming the rule. The run summary gains a `discard` phase with one counter per rule (no value, no hash). Only a rule discards. This governs what the compile run writes; a value already in a raw file is handled by the write-time screen and the screening phase.
 - A `storage.routes` rule's `to` list may name several vaults (athenaeum#3169). A write goes to each target in order and succeeds only if every target accepts it; a failure raises naming the target and is never logged and skipped, and re-running completes the targets that were missed (each write is idempotent per target). Every target must be a vault (`sensitive: true`, outside the index, not `read_only`): a list that includes a location in the index is refused, and a `read_only` target raises `StorageConfigError`. The first target is the primary and the only one read; a record or value that a later target holds and the primary lacks is reported by `athenaeum doctor` (`multi_target_divergence`), not served. Removing a value and `athenaeum retire` apply to every target, and an unreachable target is named with a non-zero exit. `athenaeum status` counts targets per rule and names any target inside a git repository, where an erasure does not reach history. Nothing keeps targets in step after an out-of-band edit.
-- A `storage.routes` rule with `to: []` discards what it names (athenaeum#3168): the value is stored nowhere, not on a page, in a vault, a ledger, a queue or an index. `route_for` returns empty `targets` with the rule named (`RouteDecision.discarded`), which is not the same as no rule matching. A field rule drops those fields when a page is compiled and the rest of the page is written, and the contact write writes nothing for them. A field correction to a discarded field ends with the outcome `discarded`, is never escalated, and leaves no value or value-derived id in the corrections ledger, the handoff note or a log. A `sensitivity_class` rule replaces each recognised value in free text with a fixed marker naming the class and saying the value was not stored, and writes no record. A page type rule is not captured: the intake decision drops it with a reason naming the rule. The run summary gains a `discard` phase with one counter per rule (no value, no hash). Only a rule discards. This governs what the compile run writes; a value already in a raw file is handled by the write-time screen and the screening phase.
 - `storage.routes`: a list of rules that each send a page type, or chosen fields of one, or a sensitivity class, to one named location (athenaeum#3166). A rule is `page_type` (or `sensitivity_class`), an optional `fields` list and `to`, a list of one location name (or none: see below). A field rule's target must be `sensitive: true`; a rule without `fields` is the long form of a `storage.mapping` entry, which stays; a `sensitivity_class` rule replaces the per-class lookup in value routing. Duplicate rules, a page type named in both `storage.routes` and `storage.mapping`, an unknown target and a non-sensitive field target raise `StorageConfigError`. Nothing is routed unless a rule says so, records already on disk are read through a rule without being moved, and `athenaeum init` writes a commented example and no active rule.
 
 - `storage.history: git | none` (default `git`) declares whether a knowledge
@@ -99,7 +100,30 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
-- **BREAKING:** with `sensitivity.routing.enabled` on, a sensitivity class that has a recogniser and is not switched `off` and has no `storage.routes` `sensitivity_class` rule (or `storage.mapping` entry) is refused at load (athenaeum#3168). A run refuses with a message naming the rule to write (`to: [<location>]` to keep the value, `to: []` to discard it). Before, such a class fell back to the built-in `excluded` location. It no longer does, and it is not discarded. Add a rule such as `- sensitivity_class: pii` with `to: [excluded]` to keep the old placement.
+- The flag that returns sensitive values is named `include_sensitive` on every
+  read (athenaeum#3163): the `recall`, `read_entity` and `enumerate_entities`
+  MCP tools, and `athenaeum recall`, `athenaeum entity` and `athenaeum
+  enumerate` (`--include-sensitive`). It replaces `with_pii` / `--with-pii` and
+  `include_excluded` / `--include-excluded`, which still work and behave
+  identically but print one notice naming the replacement (a
+  `deprecation_notice` in the tool result, a line on stderr for the command
+  line); passing an old and the new name with different values is an error.
+  The served ceiling is renamed the same way: `serve.sensitive_reads: on | off`
+  replaces `serve.excluded_fields` (same values, same default under each
+  profile), `athenaeum serve --sensitive-reads` replaces `--excluded-fields`,
+  and `ATHENAEUM_SERVE_SENSITIVE_READS` replaces
+  `ATHENAEUM_SERVE_EXCLUDED_FIELDS`. The old yaml key is refused at startup
+  with the replacement printed; the old flag and environment variable are
+  accepted with a notice. The `read_entity` payload key
+  `excluded_fields_withheld` is now `sensitive_reads_withheld`. The tool
+  descriptions and the served instructions use the new name. **The old names
+  (`with_pii`, `include_excluded`, `--with-pii`, `--include-excluded`,
+  `--excluded-fields`, `ATHENAEUM_SERVE_EXCLUDED_FIELDS`) are removed in the
+  next minor release.** With the flag set, `read_entity` and `athenaeum entity`
+  now also replace a routed-value pointer (`[sensitive:<class>:<id> ...]`) in
+  the page body with its value, under the class's own read policy; the
+  pointer text now names that read instead of an internal function.
+- **BREAKING:** with `sensitivity.routing.enabled` on, a sensitivity class that has a recogniser and is not switched `off` and has no `storage.routes` `sensitivity_class` rule (or `storage.mapping` entry) is refused at load (athenaeum#3168). A run refuses with a message naming the rule to write (`to: [<location>]` to keep the value, `to: []` to discard it). Before, such a class fell back to the built-in `excluded` location. It no longer does, and it is not discarded. Add a rule such as `- sensitivity_class: pii` with `to: [excluded]` to keep the old placement. Only writes are refused: a record already stored in `excluded` for a class with no rule still resolves.
 - A field correction is written to the location `storage.route_for(page_type,
   field)` returns, and in place on the page when it returns none (athenaeum#3162).
   Default behaviour change: where contact fields are kept on a separate

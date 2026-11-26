@@ -7,7 +7,7 @@ Searching and reading:
 - `recall(query=...)` ranks pages by relevance. Narrow it with `recall(type="person")` when you already know what kind of thing you are looking for.
 - `entity_schema` reports the kinds of things this deployment holds and the fields you can query on. Call it before guessing a type name.
 - `enumerate_entities(entity_type=..., predicates=...)` answers "every X that matches Y" exhaustively — no query text, no ranking. Use it instead of `recall` when you want a complete set rather than the best matches.
-- `read_entity(uid=...)` reads one page you already hold a uid for. It is also the sanctioned way to resolve that page's excluded fields — a person's contact data, and whatever else the operator routes off-corpus; `recall(with_pii=True)` is the same read while you are still searching. Never try to open an excluded surface any other way.
+- `read_entity(uid=...)` reads one page you already hold a uid for. Called as `read_entity(uid=..., include_sensitive=True)` it is also the sanctioned way to get that page's sensitive fields — a person's contact data, and whatever else the operator routes off-corpus; `recall(query=..., include_sensitive=True)` is the same flag and the same read while you are still searching. Never try to open an excluded surface any other way.
 
 Contributing back:
 
