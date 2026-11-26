@@ -188,6 +188,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "page_relations",
         "merge_rejected_with_targets",
         "removed_config_keys",
+        "unmarked_vault_locations",
         "storage_history",
     }
     failed = [r for r in results if r.status == "fail"]

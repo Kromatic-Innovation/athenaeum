@@ -1117,6 +1117,45 @@ def check_removed_config_keys(config: dict) -> CheckResult:
     )
 
 
+def check_unmarked_vault_locations(config: dict) -> CheckResult:
+    """WARN for each outside-the-corpus location that holds routed fields but is unmarked.
+
+    A custom location that ``storage.mapping`` routes a page type to, that has
+    no corpus capability, and that does not carry ``sensitive: true`` keeps
+    today's read behaviour (its values are still withheld unless the read flag
+    is set), but nothing a report or an access check can read says it is a
+    vault (athenaeum#3161). Never "fail": nothing is broken.
+    """
+    from athenaeum.config import resolve_storage_mapping
+    from athenaeum.storage import StorageConfigError, available_adapters
+
+    try:
+        adapters = available_adapters(config)
+        mapping = resolve_storage_mapping(config)
+    except StorageConfigError as exc:
+        return CheckResult("unmarked_vault_locations", "skip", f"storage config invalid: {exc}")
+    unmarked = sorted(
+        {
+            name
+            for name in mapping.values()
+            if name in adapters
+            and not adapters[name].corpus_policy.in_corpus
+            and not adapters[name].sensitive
+        }
+    )
+    if not unmarked:
+        return CheckResult(
+            "unmarked_vault_locations", "ok", "no unmarked off-corpus location holds routed fields"
+        )
+    return CheckResult(
+        "unmarked_vault_locations",
+        "warn",
+        "off-corpus location(s) holding routed fields are not marked sensitive: "
+        + ", ".join(unmarked),
+        fix="set sensitive: true on each listed storage.adapters entry in athenaeum.yaml",
+    )
+
+
 def check_storage_history(config: dict, knowledge_root: Path) -> CheckResult:
     """Report the declared ``storage.history`` and whether a repository backs it (athenaeum#3160).
 
@@ -1201,6 +1240,7 @@ def run_checks(
         check_page_relations(knowledge_root / "wiki"),
         check_merge_rejected_with_targets(knowledge_root / "wiki"),
         check_removed_config_keys(config),
+        check_unmarked_vault_locations(config),
         check_storage_history(config, knowledge_root),
     ]
 

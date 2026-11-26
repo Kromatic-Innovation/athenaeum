@@ -6809,6 +6809,19 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     on disk keep their names; commit messages and page bodies are untouched; it
     is not encryption.
 
+    An entry may set ``sensitive: true`` (athenaeum#3161; default ``false``; a
+    non-boolean is a ``StorageConfigError``), marking the location a vault. A
+    vault is a separate place with a read gate: a read of a value held there
+    returns a redaction marker unless the caller sets the read flag. It is not
+    encryption -- the files are plain text on disk, and anyone with file access
+    reads them. A sensitive location is never in the main index, so an entry
+    that sets ``sensitive: true`` with any ``corpus_policy`` capability true is
+    a ``StorageConfigError``. The built-in ``excluded`` location is sensitive;
+    the built-in wiki location is not and cannot be made so. A custom location
+    outside the corpus keeps its read behaviour whether or not it is marked;
+    ``athenaeum doctor`` warns for each one that holds routed fields but is
+    unmarked.
+
     An entry may set ``history: git`` or ``history: none`` (athenaeum#3160) to
     override ``storage.history`` (see :func:`resolve_storage_history`) for that
     one location: a location that is its own git repository keeps its own

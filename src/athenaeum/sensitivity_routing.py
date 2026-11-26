@@ -257,7 +257,10 @@ def _vault_root_for_class(
             f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
         ) from exc
     if adapter is not None:
-        if not decision.sensitive:
+        # Outside the corpus, NOT ``decision.sensitive``: a custom location
+        # that is outside the corpus but not marked sensitive keeps working
+        # exactly as before (athenaeum#3161).
+        if adapter.corpus_policy.in_corpus:
             raise SensitivityRoutingError(
                 f"storage.mapping routes sensitivity class {sensitivity_class!r} "
                 f"to adapter {adapter.name!r}, which participates in the "
