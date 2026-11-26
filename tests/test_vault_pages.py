@@ -267,6 +267,28 @@ class TestReadByUid:
             pii.read_entity(tmp_path, cfg, "ref-0001", surface_class="reference") is None
         )
 
+    def test_a_type_whose_surface_class_differs_is_read_from_its_vault(
+        self, tmp_path: Path
+    ) -> None:
+        # ``person`` is on the ``pii`` surface class; the rule names the type, so
+        # the read must find the page by the page's own type, not the class.
+        cfg = _cfg({"page_type": "person", "to": ["vault"]})
+        _compile(tmp_path, [_entity("person", "Dana Example", "per-0001")], cfg)
+        assert pii.surface_class_for_page_class("person", cfg) != "person"
+        surface = pii.surface_class_for_page_class("person", cfg)
+        got = pii.read_entity(
+            tmp_path, cfg, "per-0001", surface_class=surface, include_excluded=True
+        )
+        assert got is not None and MARKER in got.body
+        shut = pii.read_entity(tmp_path, cfg, "per-0001", surface_class=surface)
+        assert shut is not None and shut.withheld is True
+        via_mcp = json.loads(
+            entity_read(
+                tmp_path, "per-0001", page_class="person", include_excluded=True, config=cfg
+            )
+        )
+        assert MARKER in via_mcp["body"]
+
     def test_mcp_entity_read_reaches_a_vault_page(self, tmp_path: Path) -> None:
         self._seed(tmp_path)
         cfg = _cfg()

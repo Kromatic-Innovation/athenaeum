@@ -1151,10 +1151,9 @@ def entity_read(
             entity_index._by_uid[uid] = page_path
     # athenaeum#3174: a page of a type routed whole to a vault is in no index;
     # pii.read_entity finds it by uid in the vault itself.
-    _vault_read = page_path is None and (
-        pii.vault_route_for_page_type(pii.surface_class_for_page_class(page_class, config), config)
-        is not None
-    )
+    # Keyed on the vault page's own type, not on *page_class*'s surface class,
+    # which can differ from the type (``person`` is on ``pii``).
+    _vault_read = page_path is None and pii.vault_page_path(knowledge_root, config, uid) is not None
     if page_path is None and not _vault_read:
         return json.dumps(
             {"ok": False, "error": f"{not_found_label} not found: uid={uid!r}"}, indent=2

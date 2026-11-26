@@ -192,7 +192,11 @@ from athenaeum.models import (
     slugify,
     valid_until_expired,
 )
-from athenaeum.storage import surface_root_for_class, vault_route_for_page_type
+from athenaeum.storage import (
+    surface_root_for_class,
+    vault_page_roots,
+    vault_route_for_page_type,
+)
 from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
@@ -6174,27 +6178,51 @@ def read_entity(
         surface_class=surface_class,
         config=config,
     )
-    if read is None and record_path is not None:
-        return _vault_page_read(uid, record_path, include_excluded, surface_class, config)
+    if read is None:
+        return _vault_page_read(uid, knowledge_root, include_excluded, config)
     return read
+
+
+def vault_page_path(
+    knowledge_root: Path, config: dict[str, Any] | None, uid: str
+) -> Path | None:
+    """The file of the whole vault page with *uid*, else ``None`` (athenaeum#3174).
+
+    Looks in every vault a ``storage.routes`` rule sends whole pages to, and
+    accepts a file only when its own ``type:`` is routed to THAT vault. Keyed
+    on the page's type, never on a surface class: a type's surface class can
+    differ from the type itself (``person`` is on ``pii``), and the rule names
+    the type. With no such rule nothing is scanned.
+    """
+    for vault, root in vault_page_roots(config, knowledge_root).items():
+        path = resolve_contact_record_for_uid(root, uid)
+        if path is None:
+            continue
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if vault_route_for_page_type(str(meta.get("type") or ""), config) == vault:
+            return path
+    return None
 
 
 def _vault_page_read(
     uid: str,
-    page_path: Path,
+    knowledge_root: Path,
     include_excluded: bool,
-    surface_class: str,
     config: dict[str, Any] | None,
 ) -> EntityRead | None:
     """The read of a whole page held in a vault (athenaeum#3174).
 
-    Only for a page type a ``storage.routes`` rule sends whole to a vault; any
-    other record found by uid with no wiki page stays "not found". With
-    *include_excluded* the page's frontmatter and body are returned; without
-    it the result says the page exists and is withheld, and carries no field
-    value, no body and not the page's file name.
+    Only for a page type a ``storage.routes`` rule sends whole to a vault
+    (:func:`vault_page_path`); any other uid with no wiki page stays "not
+    found". With *include_excluded* the page's frontmatter and body are
+    returned; without it the result says the page exists and is withheld, and
+    carries no field value, no body and not the page's file name.
     """
-    if vault_route_for_page_type(surface_class, config) is None:
+    page_path = vault_page_path(knowledge_root, config, uid)
+    if page_path is None:
         return None
     if not include_excluded:
         return EntityRead(
@@ -6729,6 +6757,7 @@ __all__ = [
     "RedactionMarker",
     "EntityRead",
     "read_entity",
+    "vault_page_path",
     "read_entities",
     "CONTACT_CLASSIFICATION_FIELD",
     "USAGE_CLASS_OBSERVED",
