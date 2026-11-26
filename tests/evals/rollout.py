@@ -3135,7 +3135,9 @@ def _serve_read_entity(wiki_root: Path, tool_input: dict[str, Any]) -> str:
         wiki_root.parent,
         str(tool_input.get("uid", "")),
         page_class=str(tool_input.get("entity_class", "")),
-        include_excluded=bool(tool_input.get("include_excluded", False)),
+        include_excluded=bool(
+            tool_input.get("include_sensitive", tool_input.get("include_excluded", False))
+        ),
         usage_classes=list(usage_classes) if isinstance(usage_classes, list) else None,
     )
 
@@ -3823,7 +3825,7 @@ def run_pull_api(
             top_k=int(tool_input.get("top_k") or 5),
             search_backend=search_backend,
             cache_dir=cache_dir,
-            with_pii=bool(tool_input.get("with_pii", False)),
+            with_pii=bool(tool_input.get("include_sensitive", tool_input.get("with_pii", False))),
             history=bool(tool_input.get("history", False)),
             type_filter=tool_input.get("type"),
             config=config,
@@ -3910,7 +3912,7 @@ def run_push_breadcrumb_pull_api(
             top_k=int(tool_input.get("top_k") or 5),
             search_backend=search_backend,
             cache_dir=cache_dir,
-            with_pii=bool(tool_input.get("with_pii", False)),
+            with_pii=bool(tool_input.get("include_sensitive", tool_input.get("with_pii", False))),
             history=bool(tool_input.get("history", False)),
             type_filter=tool_input.get("type"),
             config=config,
@@ -4008,7 +4010,7 @@ def run_push_sections_pull_api(
             top_k=int(tool_input.get("top_k") or 5),
             search_backend=search_backend,
             cache_dir=cache_dir,
-            with_pii=bool(tool_input.get("with_pii", False)),
+            with_pii=bool(tool_input.get("include_sensitive", tool_input.get("with_pii", False))),
             history=bool(tool_input.get("history", False)),
             type_filter=tool_input.get("type"),
             config=config,
