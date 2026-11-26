@@ -98,7 +98,7 @@ from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
 from athenaeum.pending_merges import parse_pending_merges
 from athenaeum.session_recovery import SessionRecoverer
 from athenaeum.storage import open_store, require_writable_paths
-from athenaeum.store import Store
+from athenaeum.store import Store, note_no_restore_point
 from athenaeum.transcript_verify import default_projects_root, verify_user_stated
 from athenaeum.verdicts import get_verdict_status, make_pair_key, page_id_for_path
 
@@ -909,7 +909,10 @@ def run_retire_pass(
         return report
 
     store = store if store is not None else open_store(resolved_config, knowledge_root)
-    if not store.capabilities.versioned:
+    no_history = store.capabilities.declares_no_history
+    if no_history:
+        note_no_restore_point(log, knowledge_root, "retire")
+    elif not store.capabilities.versioned:
         # Recovery is git-only (design note §4.4 R1): refuse to retire
         # against a store that cannot produce a restore point.
         log.warning(
@@ -960,11 +963,12 @@ def run_retire_pass(
     snapshot_rel = [
         str(m.resolve().relative_to(kr)) for _e, members in retiring for m in members
     ]
-    _commit_paths_if_staged(
-        knowledge_root,
-        snapshot_rel + index_backup_rel,
-        "librarian: auto-memory raw intake provenance snapshot",
-    )
+    if not no_history:
+        _commit_paths_if_staged(
+            knowledge_root,
+            snapshot_rel + index_backup_rel,
+            "librarian: auto-memory raw intake provenance snapshot",
+        )
 
     # Move: enrich each retiring entry's wiki page (verified footnotes +
     # per-fact markers + retired flag) and overwrite it.
@@ -982,7 +986,12 @@ def run_retire_pass(
     del_rel = [
         str(m.resolve().relative_to(kr)) for _e, members in retiring for m in members
     ]
-    _git(knowledge_root, "rm", "--quiet", "--", *del_rel)
+    if no_history:
+        # Declared plain files (athenaeum#3164): a plain removal, no git.
+        for _m in (m for _e, members in retiring for m in members):
+            _m.unlink(missing_ok=True)
+    else:
+        _git(knowledge_root, "rm", "--quiet", "--", *del_rel)
     # Issue athenaeum#2736: ``git rm`` prunes every directory it leaves empty --
     # including the configured intake root itself (``raw/auto-memory``) once its
     # last scope is retired. A missing root then reads as a misconfiguration
@@ -1016,15 +1025,16 @@ def run_retire_pass(
     # recoverable commit). Scoped staging (Quine C2): the deletions are already
     # staged by ``git rm``; we add exactly the wiki entries and indexes we
     # rewrote, not ``-A``.
-    _git(knowledge_root, "add", "--", *wiki_rel, *index_rel)
-    _git(
-        knowledge_root,
-        "commit",
-        "-m",
-        f"librarian: move-then-retire ({len(report.moved)} moved, "
-        f"{len(report.held)} held)",
-    )
-    report.committed = True
+    if not no_history:
+        _git(knowledge_root, "add", "--", *wiki_rel, *index_rel)
+        _git(
+            knowledge_root,
+            "commit",
+            "-m",
+            f"librarian: move-then-retire ({len(report.moved)} moved, "
+            f"{len(report.held)} held)",
+        )
+        report.committed = True
     log.info(
         "retire: moved %d raw file(s) into %d wiki entr(y/ies); held %d; committed",
         len(report.moved),
