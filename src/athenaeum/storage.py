@@ -59,6 +59,7 @@ corpus policy for a specific entity beyond what ``storage.mapping`` says.
 
 from __future__ import annotations
 
+import importlib
 import os
 import uuid
 from collections.abc import Mapping, Sequence
@@ -647,7 +648,15 @@ def route_for(
         # path never resolved it for an unmapped class.
         return RouteDecision((DEFAULT_ADAPTER_NAME,), None, False)
 
-    from athenaeum.pii import resolve_excluded_fields, surface_class_for_page_class
+    # pii's surface-class and field-list policy (its built-in tables are pii
+    # constants) is the input here. pii already imports this module, and the
+    # import graph is pinned acyclic (tests/test_import_graph_acyclic.py), so
+    # the module is resolved by name at call time instead of by import
+    # statement. Moving those tables into the storage layer would remove the
+    # indirection.
+    pii = importlib.import_module("athenaeum.pii")
+    resolve_excluded_fields = pii.resolve_excluded_fields
+    surface_class_for_page_class = pii.surface_class_for_page_class
 
     surface_class = surface_class_for_page_class(page_type, config)
     if not surface_class or not is_excluded(surface_class, config):

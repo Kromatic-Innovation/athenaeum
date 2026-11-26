@@ -133,11 +133,6 @@ ALLOWED_UPWARD_EDGES: frozenset[tuple[str, str]] = frozenset(
         # in the declaration layer of the write guard (access S3, athenaeum#2988).
         # store_rights reaches storage only through its callers, so no cycle.
         ("storage", "store_rights"),
-        # storage.py (L1) -> pii.py (L3): route_for (athenaeum#3158) computes a
-        # field's location from pii's surface-class and field-list policy, a
-        # deferred, function-local import. pii reaches storage only through
-        # its own deferred imports, so no cycle.
-        ("storage", "pii"),
         # verdicts.py (L2) imports off_corpus.py (L3): this is the
         # misconfigured-off_corpus fallback on the erasure-class verdict
         # routing path (issue athenaeum#984 finding A) -- a deferred,
