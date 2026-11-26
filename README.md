@@ -238,11 +238,16 @@ minor release. → [design/witness-ledger](docs/design/witness-ledger.md)
 - **Security fixes** go to the latest release only; see [SECURITY.md](SECURITY.md)
   for supported versions and how to report a vulnerability.
 
-## Project status
+## Status
 
-Athenaeum is maintained by Kromatic. Security reports go to the mailbox named
-in [SECURITY.md](SECURITY.md). If the project is ever discontinued, the
-repository will be archived and this README will say so at the top.
+Athenaeum is a side project, owned by Kromatic. Development continues at an
+irregular cadence: releases happen when changes are ready, and issues are
+triaged on a best-effort basis, so expect replies in days or weeks, not hours.
+It is not in maintenance mode and it is not archived.
+
+Security reports go to the mailbox named in [SECURITY.md](SECURITY.md). If the
+project is ever discontinued, the repository will be archived and this README
+will say so at the top.
 
 ## Where to go next
 
