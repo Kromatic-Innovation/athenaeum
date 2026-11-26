@@ -6238,6 +6238,14 @@ outside the corpus keeps its read behaviour whether or not it is marked;
 ``athenaeum doctor`` warns for each one that holds routed fields but is
 unmarked.
 
+An entry may set ``history: git`` or ``history: none`` to
+override ``storage.history`` (see `resolve_storage_history`) for that
+one location: a location that is its own git repository keeps its own
+history and its own remote while the rest of the installation has none, or
+the reverse. Unset, it follows the installation; any other value is a
+``StorageConfigError``. Under ``none`` that location has no restore point,
+no undo, and no history-based commands.
+
 A per-type store that ``athenaeum storage move-type`` moves pages into
  is an entry with ``embedded: true`` whose ``surface_root``
 is a directory that is its OWN git repository (not the wiki's), e.g.:
@@ -6327,6 +6335,26 @@ shipped non-identity entry (``person: pii``) lives in
 resolver reports only what the OPERATOR configured —
 ``resolve_storage_mapping``'s precedent. Non-string keys/values and blank
 entries are dropped defensively.
+
+### `resolve_storage_history`
+
+- **YAML path:** `storage.history`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'git'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``storage.history``: whether the knowledge directory keeps history.
+
+``git`` (the default) means the installation keeps its history in a git
+repository: ``athenaeum init`` creates one, ``snapshot`` commits to it, and
+a destructive operation relies on it as the restore point. ``none`` declares
+plain files: ``athenaeum init --no-history`` writes it and creates no
+repository, and ``snapshot`` returns ``None`` without running git. Under
+``none`` there is no restore point, no undo, and no history-based command.
+Any other value raises `StorageConfigError`. A single location can
+override this with ``storage.adapters.<name>.history``; unset, it follows
+the installation. Not seeded in ``_DEFAULTS``.
 
 ### `resolve_storage_mapping`
 

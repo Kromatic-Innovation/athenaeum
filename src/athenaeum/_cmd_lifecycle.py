@@ -40,6 +40,14 @@ def add_lifecycle_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Target directory (default: ~/knowledge)",
     )
     init_parser.add_argument(
+        "--no-history",
+        action="store_true",
+        help="Keep plain files: write `storage.history: none` into the new "
+        "athenaeum.yaml and create no git repository (no git command runs). "
+        "Without a repository there is no restore point, no undo, and no "
+        "history-based commands.",
+    )
+    init_parser.add_argument(
         "--with-templates",
         action="store_true",
         help="Also copy bundled entity-author templates "
@@ -277,8 +285,24 @@ def cmd_init(args: argparse.Namespace) -> int:
     from athenaeum.init import copy_example_rules, copy_templates, init_knowledge_dir
     from athenaeum.provider import ProviderConfigError, resolve_provider
 
-    target = init_knowledge_dir(args.path)
+    no_history = bool(getattr(args, "no_history", False))
+    target = init_knowledge_dir(args.path, history="none" if no_history else "git")
     print(f"Initialized knowledge directory at {target}")
+    if no_history:
+        from athenaeum.config import StorageConfigError, resolve_storage_history
+
+        try:
+            declared = resolve_storage_history(load_config(target))
+        except StorageConfigError:
+            declared = "invalid"
+        if declared != "none":
+            print(
+                f"warning: {target / 'athenaeum.yaml'} already existed and was not "
+                "changed; set `storage.history: none` there to keep plain files.",
+                file=sys.stderr,
+            )
+        else:
+            print("History: none (plain files; no git repository was created).")
 
     if getattr(args, "owner_name", None):
         from athenaeum._cmd_owner import apply_owner_set

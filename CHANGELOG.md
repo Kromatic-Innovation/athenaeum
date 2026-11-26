@@ -64,6 +64,19 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Added
+
+- `storage.history: git | none` (default `git`) declares whether a knowledge
+  directory keeps history (athenaeum#3160). `athenaeum init --no-history`
+  writes `none` into the configuration it creates and creates no repository:
+  no git command runs. `StoreCapabilities` gains a declared `history` value;
+  `versioned` keeps meaning "the location is in fact a git working tree".
+  `storage.adapters.<name>.history` overrides the setting for one location.
+  Under `none`, `Store.snapshot` returns `None` without calling git, and
+  `athenaeum doctor` reports the declared value (and, under `git` with no
+  repository, that destructive operations will be refused). Under `none` there
+  is no restore point, no undo, and no history-based commands.
+
 ### Changed
 
 - One resolver now answers where a field or a page type is stored:

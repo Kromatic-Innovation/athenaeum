@@ -1060,6 +1060,7 @@ Initialize a new knowledge directory
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--force` | off (flag absent) | — | Overwrite existing template files at the destination; no backup is created (only applies with --with-templates and/or --with-rules). |
+| `--no-history` | off (flag absent) | — | Keep plain files: write `storage.history: none` into the new athenaeum.yaml and create no git repository (no git command runs). Without a repository there is no restore point, no undo, and no history-based commands. |
 | `--owner-name` | — | — | Also record the owner: create the owner's person page and write owner.uid into athenaeum.yaml -- the same code path as 'athenaeum owner set --name'. Omit to configure no owner. |
 | `--path` | `~/knowledge` | — | Target directory (default: ~/knowledge) |
 | `--rules-dest` | — | — | Override the shape-rules destination directory (default: <path>/rules). |

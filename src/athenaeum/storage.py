@@ -69,7 +69,9 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import (
+from athenaeum.config import (  # StorageConfigError is defined in config, re-exported here
+    HISTORY_VALUES,
+    StorageConfigError,
     load_config,
     resolve_corrections_sensitive_fields,
     resolve_excluded_fields_config,
@@ -77,6 +79,7 @@ from athenaeum.config import (
     resolve_extra_intake_roots,
     resolve_owner_asserter,
     resolve_storage_adapters,
+    resolve_storage_history,
     resolve_storage_mapping,
 )
 from athenaeum.store import FilesystemStore, ReadOnlySurfaceError, Store
@@ -86,17 +89,6 @@ from athenaeum.store import FilesystemStore, ReadOnlySurfaceError, Store
 # this module importing athenaeum.store here carries no cycle —
 # tests/test_import_graph_acyclic.py's zero-tolerance SCC guard (baseline
 # pinned to `[]` since issue athenaeum#640) would fail loudly if it did.
-
-
-class StorageConfigError(ValueError):
-    """Raised when the storage layer is misconfigured.
-
-    Loud by design (mirrors :class:`athenaeum.provider.ProviderConfigError`):
-    a mapping that names an adapter that does not exist, or a custom adapter
-    definition with a malformed policy, must never silently fall back to the
-    default surface — that would route a class the operator meant to *exclude*
-    straight into the recalled corpus.
-    """
 
 
 @dataclass(frozen=True)
@@ -188,6 +180,11 @@ class StorageAdapter:
     #: ``corpus_policy`` capability must be false. Default ``False``; the
     #: built-in :data:`EXCLUDED` location is sensitive.
     sensitive: bool = False
+    #: ``history: git | none`` in config overrides ``storage.history`` for this
+    #: one location (athenaeum#3160), so a location that is its own git
+    #: repository keeps its own history while the rest of the installation has
+    #: none, or the reverse. ``None`` (default) = follow the installation.
+    history: str | None = None
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -319,6 +316,13 @@ def _visibility_from_config(name: str, raw: Any) -> int:
     return raw
 
 
+def _validate_history(raw: Any, key: str) -> str:
+    """*raw* when it is a valid history value (``git`` / ``none``), else a loud error."""
+    if not isinstance(raw, str) or raw.strip() not in HISTORY_VALUES:
+        raise StorageConfigError(f"{key} must be 'git' or 'none', got {raw!r}")
+    return raw.strip()
+
+
 def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
     """Build a :class:`StorageAdapter` from one ``storage.adapters`` entry."""
     if not isinstance(raw, dict):
@@ -364,9 +368,13 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
             f"storage.adapters.{name}.sensitive must be a boolean (true/false), "
             f"got {sensitive!r}"
         )
+    history = raw.get("history")
+    if history is not None:
+        history = _validate_history(history, f"storage.adapters.{name}.history")
     adapter = StorageAdapter(
         name=name,
         read_only=read_only,
+        history=history,
         opaque_filenames=opaque_filenames,
         sensitive=sensitive,
         sync_mode=sync_mode,
@@ -923,11 +931,18 @@ def open_store(
         name for name, adapter in available_adapters(config).items() if not adapter.purgeable
     }
     read_only = {name for name, adapter in available_adapters(config).items() if adapter.read_only}
+    surface_history = {
+        name: adapter.history
+        for name, adapter in available_adapters(config).items()
+        if adapter.history is not None
+    }
     return FilesystemStore(
         knowledge_root,
         roots,
         non_purgeable_surfaces=non_purgeable,
         read_only_surfaces=read_only,
+        history=resolve_storage_history(config),
+        surface_history=surface_history,
         write_gate=lambda surface: declared_compile_refusal(surface, config, knowledge_root),
     )
 

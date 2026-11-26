@@ -1153,6 +1153,48 @@ def check_unmarked_vault_locations(config: dict) -> CheckResult:
         "off-corpus location(s) holding routed fields are not marked sensitive: "
         + ", ".join(unmarked),
         fix="set sensitive: true on each listed storage.adapters entry in athenaeum.yaml",
+def check_storage_history(config: dict, knowledge_root: Path) -> CheckResult:
+    """Report the declared ``storage.history`` and whether a repository backs it (athenaeum#3160).
+
+    ``none``: an operator's choice of plain files, reported as OK with what is
+    lost. ``git`` with no repository: WARN, because destructive operations
+    will be refused there (the restore point they rely on is missing). Read-only.
+    """
+    from athenaeum.config import StorageConfigError, resolve_storage_history
+
+    try:
+        history = resolve_storage_history(config)
+    except StorageConfigError as exc:
+        return CheckResult(
+            "storage_history",
+            "fail",
+            str(exc),
+            fix="set storage.history to 'git' or 'none' in athenaeum.yaml",
+        )
+    from athenaeum.config import HISTORY_VALUES, resolve_storage_adapters
+
+    overrides = [
+        f"{name}={raw['history']}"
+        for name, raw in sorted(resolve_storage_adapters(config).items())
+        if raw.get("history") in HISTORY_VALUES
+    ]
+    suffix = f"; per-location overrides: {', '.join(overrides)}" if overrides else ""
+    if history == "none":
+        return CheckResult(
+            "storage_history",
+            "ok",
+            "history: none (plain files; no restore point, no undo, no "
+            f"history-based commands){suffix}",
+        )
+    if (knowledge_root / ".git").exists():
+        return CheckResult("storage_history", "ok", f"history: git (repository present){suffix}")
+    return CheckResult(
+        "storage_history",
+        "warn",
+        "history: git, but there is no git repository at the knowledge root: "
+        f"destructive operations will be refused{suffix}",
+        fix=f"run `git init` in {knowledge_root}, or set storage.history: none "
+        "in athenaeum.yaml to keep plain files",
     )
 
 
@@ -1196,6 +1238,7 @@ def run_checks(
         check_merge_rejected_with_targets(knowledge_root / "wiki"),
         check_removed_config_keys(config),
         check_unmarked_vault_locations(config),
+        check_storage_history(config, knowledge_root),
     ]
 
 
