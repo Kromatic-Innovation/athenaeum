@@ -256,6 +256,7 @@ class StoreConformanceTests:
         caps = store.capabilities
         assert isinstance(caps, StoreCapabilities)
         assert isinstance(caps.versioned, bool)
+        assert caps.history in ("none", "git")  # the DECLARED history (athenaeum#3164)
         assert caps.leases is True
         assert caps.purgeable is True
         assert caps.compare_and_swap is True
