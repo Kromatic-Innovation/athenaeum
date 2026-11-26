@@ -6459,6 +6459,9 @@ search_backend: vector
 #   mapping:                       # entity `type` -> adapter name
 #     pii: excluded                # route the pii class to the built-in surface
 # storage:
+#   history: git                   # git (default) | none: plain files, no repository
+#                                  #   (`athenaeum init --no-history`); no restore point,
+#                                  #   no undo, no history-based commands
 #   mapping:
 #     pii: excluded
 
@@ -6534,8 +6537,13 @@ def default_llm_provider_for_new_config() -> str:
     return "api"
 
 
-def write_default_config(knowledge_root: Path) -> Path:
-    """Write the default config file if it doesn't exist. Returns the path."""
+def write_default_config(knowledge_root: Path, *, history: str = "git") -> Path:
+    """Write the default config file if it doesn't exist. Returns the path.
+
+    ``history="none"`` (``athenaeum init --no-history``, athenaeum#3160) also
+    writes an active ``storage.history: none`` block into the file it creates.
+    An existing file is never touched.
+    """
     config_path = knowledge_root / "athenaeum.yaml"
     if not config_path.exists():
         content = _DEFAULT_CONFIG_CONTENT.replace(
@@ -6549,6 +6557,8 @@ def write_default_config(knowledge_root: Path) -> Path:
                 "# llm:\n#   provider: api",
                 "llm:\n  provider: claude-cli",
             )
+        if history == "none":
+            content = content.rstrip("\n") + "\n\nstorage:\n  history: none\n"
         config_path.write_text(content, encoding="utf-8")
     return config_path
 
@@ -6680,6 +6690,47 @@ def resolve_authority_manifest_path(
     return knowledge_root / "authority-manifest.yaml"
 
 
+class StorageConfigError(ValueError):
+    """Raised when the storage layer is misconfigured.
+
+    Loud by design (mirrors :class:`athenaeum.provider.ProviderConfigError`):
+    a mapping that names an adapter that does not exist, or a custom adapter
+    definition with a malformed policy, must never silently fall back to the
+    default surface — that would route a class the operator meant to *exclude*
+    straight into the recalled corpus. Defined here (and re-exported by
+    :mod:`athenaeum.storage`) so the config resolvers can raise it without
+    importing the storage layer.
+    """
+
+
+#: The values ``storage.history`` (and a per-adapter ``history``) may take.
+HISTORY_VALUES = ("git", "none")
+
+
+def resolve_storage_history(config: dict[str, Any] | None) -> str:
+    """Resolve ``storage.history``: whether the knowledge directory keeps history (athenaeum#3160).
+
+    ``git`` (the default) means the installation keeps its history in a git
+    repository: ``athenaeum init`` creates one, ``snapshot`` commits to it, and
+    a destructive operation relies on it as the restore point. ``none`` declares
+    plain files: ``athenaeum init --no-history`` writes it and creates no
+    repository, and ``snapshot`` returns ``None`` without running git. Under
+    ``none`` there is no restore point, no undo, and no history-based command.
+    Any other value raises :class:`StorageConfigError`. A single location can
+    override this with ``storage.adapters.<name>.history``; unset, it follows
+    the installation. Not seeded in ``_DEFAULTS`` (issue athenaeum#187).
+    """
+    if not isinstance(config, dict):
+        return "git"
+    storage_cfg = config.get("storage")
+    if not isinstance(storage_cfg, dict) or "history" not in storage_cfg:
+        return "git"
+    raw = storage_cfg["history"]
+    if not isinstance(raw, str) or raw.strip() not in HISTORY_VALUES:
+        raise StorageConfigError(f"storage.history must be 'git' or 'none', got {raw!r}")
+    return raw.strip()
+
+
 def resolve_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
     """Resolve the ``storage.mapping`` entity-class → adapter-name table (athenaeum#429).
 
@@ -6755,6 +6806,14 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     store's file listing does not reveal whose records it holds. Pages already
     on disk keep their names; commit messages and page bodies are untouched; it
     is not encryption.
+
+    An entry may set ``history: git`` or ``history: none`` (athenaeum#3160) to
+    override ``storage.history`` (see :func:`resolve_storage_history`) for that
+    one location: a location that is its own git repository keeps its own
+    history and its own remote while the rest of the installation has none, or
+    the reverse. Unset, it follows the installation; any other value is a
+    ``StorageConfigError``. Under ``none`` that location has no restore point,
+    no undo, and no history-based commands.
 
     A per-type store that ``athenaeum storage move-type`` moves pages into
     (athenaeum#2620) is an entry with ``embedded: true`` whose ``surface_root``

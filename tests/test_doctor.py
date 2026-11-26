@@ -116,6 +116,7 @@ def healthy_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _pin_llm_provider_env(monkeypatch)
     knowledge_root = tmp_path / "knowledge"
     (knowledge_root / "wiki").mkdir(parents=True)
+    (knowledge_root / ".git").mkdir()  # a healthy install keeps its history (athenaeum#3160)
     (knowledge_root / "athenaeum.yaml").write_text(
         "search_backend: fts5\n", encoding="utf-8"
     )
@@ -187,6 +188,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "page_relations",
         "merge_rejected_with_targets",
         "removed_config_keys",
+        "storage_history",
     }
     failed = [r for r in results if r.status == "fail"]
     assert not failed, failed
@@ -1119,7 +1121,7 @@ def test_fresh_install_first_run_checks_are_pending_warn_not_fail(
     assert doctor.exit_code(results) == 0
     text = doctor.format_report(results)
     assert "[WARN] mcp" in text
-    assert "with 4 warning(s)" in text
+    assert "with 5 warning(s)" in text  # four first-run checks + storage_history (no repository)
 
 
 def test_corrupt_fts5_index_still_fails_search_index(healthy_install: dict) -> None:
