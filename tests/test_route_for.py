@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -171,3 +172,34 @@ def test_corrections_field_route() -> None:
             config={"librarian": {"corrections": {"sensitive_fields": {"phone": "x"}}},
                     "storage": {"mapping": {"x": "nope"}}},
         )
+
+
+def test_surface_class_form_ignores_the_exclusion_gate() -> None:
+    # The read path's form: a surface class that is NOT excluded still answers
+    # for its field list (callers gate; read_entity does not).
+    cfg = {"storage": {"excluded_fields": {"ledger": ["iban"]}}}
+    on = route_for(None, "iban", config=cfg, surface_class="ledger")
+    assert on.targets == ("wiki-markdown-embedded",) and on.sensitive is False
+    assert on.rule == "storage.excluded_fields.ledger"
+    assert route_for(None, "other", config=cfg, surface_class="ledger").targets == ()
+
+
+def test_assemble_excluded_read_consults_route_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str | None, str | None, str | None]] = []
+    real = storage.route_for
+
+    def spy(page_type, field=None, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((page_type, field, kwargs.get("surface_class")))
+        return real(page_type, field, **kwargs)
+
+    monkeypatch.setattr(storage, "route_for", spy)
+    fields, _, _ = pii.assemble_excluded_read(
+        Path("page.md"),
+        {},
+        {"uid": "u", "emails": ["a@example.com"], "nickname": "x"},
+        surface_class="pii",
+        config=PII_EXCLUDED,
+        include_excluded=True,
+    )
+    assert fields == {"emails": ["a@example.com"]}
+    assert (None, "emails", "pii") in calls and (None, "nickname", "pii") not in calls

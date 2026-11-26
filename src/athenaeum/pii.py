@@ -5921,7 +5921,19 @@ def assemble_excluded_read(
     fields: dict[str, list[str]] = {}
     classifications: dict[str, list[ContactClassification]] = {}
     redactions: list[RedactionMarker] = []
+    # athenaeum#3158: ``resolve_excluded_fields`` fixes the ORDER candidates are
+    # visited in (configured order, or the record's own for an unconfigured
+    # class); whether a field is stored on the excluded surface is
+    # ``route_for``'s decision. The surface class is already resolved here and
+    # every ungated caller (read_entity) joins regardless of ``is_excluded``, so
+    # the ``surface_class=`` form -- which applies no gate -- is used.
+    from athenaeum.storage import route_for
+
     for field_name in resolve_excluded_fields(surface_class, config, record_meta):
+        if not route_for(
+            None, field_name, config=config, record_meta=record_meta, surface_class=surface_class
+        ).targets:
+            continue
         raw = record_meta.get(field_name)
         if raw is None:
             continue
