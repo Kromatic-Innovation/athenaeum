@@ -55,6 +55,7 @@ from typing import Any
 from athenaeum import pii_attribution
 from athenaeum._cli_shared import (
     EXIT_PII_FOUND,
+    _no_history_declared,
     _resolve_knowledge_root,
 )
 from athenaeum.atomic_io import atomic_write_text
@@ -466,6 +467,8 @@ def _cmd_storage_move_type(args: argparse.Namespace) -> int:
 
     try:
         if args.undo:
+            if _no_history_declared(knowledge_root, "storage move-type --undo"):
+                return 0
             if args.entity_type or args.to_surface or args.apply:
                 print("error: --undo takes only a record (and --force).", file=sys.stderr)
                 return 2
