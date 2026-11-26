@@ -466,7 +466,7 @@ librarian:
 storage:
   adapters:
     mural-archive:
-      backing_store: filesystem
+      backing_store: markdown
       surface_root: /var/lib/athenaeum-archive   # absolute -- outside the repo
 ```
 
