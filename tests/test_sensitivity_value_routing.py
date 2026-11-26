@@ -42,7 +42,11 @@ from athenaeum.sensitivity_routing import (
 
 SYNTHETIC_EMAIL = "test.user.demo@example.invalid"
 SYNTHETIC_EMAIL_2 = "second.user.demo@example.invalid"
-ROUTING_ON = {"sensitivity": {"routing": {"enabled": True}}}
+ROUTING_ON = {
+    "sensitivity": {"routing": {"enabled": True}},
+    # athenaeum#3168: a class value routing would route needs a rule.
+    "storage": {"routes": [{"sensitivity_class": "pii", "to": ["excluded"]}]},
+}
 
 
 @pytest.fixture(autouse=True)
@@ -363,7 +367,13 @@ class TestRouteSensitiveValues:
                         "read_policy": {"access": "confidential"},
                     }
                 },
-            }
+            },
+            "storage": {
+                "routes": [
+                    {"sensitivity_class": "pii", "to": ["excluded"]},
+                    {"sensitivity_class": "secret", "to": ["excluded"]},
+                ]
+            },
         }
         with pytest.raises(SensitivityRoutingError) as excinfo:
             route_sensitive_values(
@@ -423,7 +433,13 @@ class TestRouteSensitiveValues:
                         "read_policy": {"access": "confidential"},
                     }
                 },
-            }
+            },
+            "storage": {
+                "routes": [
+                    {"sensitivity_class": "pii", "to": ["excluded"]},
+                    {"sensitivity_class": "zzz-alt", "to": ["excluded"]},
+                ]
+            },
         }
         text = f"Reach {SYNTHETIC_EMAIL} please."
         out = route_sensitive_values(
@@ -489,7 +505,13 @@ def _secret_class_config(
                     "read_policy": read_policy,
                 }
             },
-        }
+        },
+        "storage": {
+            "routes": [
+                {"sensitivity_class": "pii", "to": ["excluded"]},
+                {"sensitivity_class": "secret", "to": ["excluded"]},
+            ]
+        },
     }
 
 

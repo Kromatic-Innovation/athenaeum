@@ -5737,38 +5737,6 @@ authorization server never issues, and every tool call would fail for a
 reason the operator cannot see from the configuration. No seed in
 ``_DEFAULTS``.
 
-### `resolve_serve_excluded_fields`
-
-- **YAML path:** `serve.excluded_fields`
-- **Environment variable:** `ATHENAEUM_SERVE_EXCLUDED_FIELDS`
-- **CLI flag:** —
-- **Default:** `None`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve the serve-time excluded-fields pin.
-
-Returns ``True`` (excluded values are resolvable, the historical
-behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
-`athenaeum.remote_policy.build_remote_policy` fall back to the
-active profile's default (``off`` under ``remote``) and keeps a server
-with no serve-time pins at all unchanged. A plain ``bool`` could not
-express that third state.
-
-Precedence follows the repo convention CLI > env > yaml > default:
-
-- ``cli_value`` — the ``athenaeum serve --excluded-fields`` flag.
-- ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` — env var.
-- ``serve.excluded_fields`` — yaml string.
-- ``None`` — not set.
-
-The vocabulary is the words ``off`` / ``on``
-(`athenaeum.remote_policy.VALID_EXCLUDED_FIELDS_VALUES`), not a
-bool, so YAML's permissive truthiness cannot quietly pick a side on a
-PII-egress boundary; anything else raises
-`athenaeum.remote_policy.RemotePolicyError` and
-``athenaeum serve`` exits non-zero, exactly as
-`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
-
 ### `resolve_serve_host`
 
 - **YAML path:** `serve.host`
@@ -5855,6 +5823,46 @@ surface than the operator asked for — the same fail-loud posture
 the documented exception to this module's warn-and-fall-back policy for
 a knob whose silent default has a safety cost. No seed in ``_DEFAULTS``
 so the code default stays reachable.
+
+### `resolve_serve_sensitive_reads`
+
+- **YAML path:** `serve.sensitive_reads`
+- **Environment variable:** `ATHENAEUM_SERVE_SENSITIVE_READS`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the serve-time sensitive-reads pin.
+
+Returns ``True`` (sensitive values are resolvable, the historical
+behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
+`athenaeum.remote_policy.build_remote_policy` fall back to the
+active profile's default (``off`` under ``remote``) and keeps a server
+with no serve-time pins at all unchanged. A plain ``bool`` could not
+express that third state.
+
+Precedence follows the repo convention CLI > env > yaml > default:
+
+- ``cli_value`` — the ``athenaeum serve --sensitive-reads`` flag.
+- ``ATHENAEUM_SERVE_SENSITIVE_READS`` — env var.
+- ``serve.sensitive_reads`` — yaml string.
+- ``None`` — not set.
+
+The names this setting had before its rename are deprecated aliases for one minor
+release: ``legacy_cli_value`` (``--excluded-fields``) and the
+``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` env var resolve identically, and a
+notice naming the replacement goes to stderr. The old yaml key
+``serve.excluded_fields`` is NOT an alias: it is refused, with the
+replacement printed (see ``_REMOVED_CONFIG_KEYS``). Setting a deprecated
+and a current name to different values raises.
+
+The vocabulary is the words ``off`` / ``on``
+(`athenaeum.remote_policy.VALID_SENSITIVE_READS_VALUES`), not a
+bool, so YAML's permissive truthiness cannot quietly pick a side on a
+PII-egress boundary; anything else raises
+`athenaeum.remote_policy.RemotePolicyError` and
+``athenaeum serve`` exits non-zero, exactly as
+`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
 
 ### `resolve_serve_tools`
 
@@ -6408,8 +6416,8 @@ Resolve the ``storage.routes`` table of routing rules.
 
 Each rule is a mapping with ``page_type`` (or, in its place,
 ``sensitivity_class``), an optional ``fields`` list, and ``to``, a list of
-location names (``storage.adapters`` names plus the built-ins). This issue
-accepts a ``to`` list of exactly one name. A rule with ``fields`` sends those
+location names (``storage.adapters`` names plus the built-ins). A ``to`` list
+names one location, or is empty. A rule with ``fields`` sends those
 fields of that page type to the target, and the target must be a location
 marked ``sensitive: true``; a rule without ``fields`` sends the whole page
 type (the long form of a ``storage.mapping`` entry, which stays as the short
@@ -6418,14 +6426,38 @@ in free text and replaces the per-class lookup in ``sensitivity_routing``.
 A field named in a rule needs no value on any page: fields are declared by
 the operator and none is built in.
 
+**An empty ``to`` discards.** ``to: []`` marks what the rule names as private
+with nowhere to keep it, and the value is stored nowhere. A field rule with
+``to: []`` drops those fields at compile (the rest of the page is written),
+makes the contact write and a field correction write nothing for them (a
+correction ends with the outcome ``discarded``, never reaches the decision
+queue, and leaves no value or value-derived id in the corrections ledger,
+the handoff note or a log), and a ``sensitivity_class`` rule with ``to: []``
+replaces each value recognised in free text with a fixed marker naming the
+class and saying the value was not stored, with no record written. A page
+type rule with ``to: []`` is not captured: the intake decision drops it,
+naming the rule. Each discard is counted per rule in the run summary (the
+``discard`` phase), with no value and no hash of one. Only a rule discards:
+a field, page type or class that no rule names is ordinary content. **The
+limit:** this governs what the compile run writes. A value already in a raw
+file is not removed by it; that is the write-time screen and the screening
+phase.
+
+**A class with no rule is refused.** With ``sensitivity.routing.enabled`` on,
+every sensitivity class that has a recogniser and is not switched ``off``
+needs a ``sensitivity_class`` rule (or a ``storage.mapping`` entry), written
+as ``to: [<location>]`` or ``to: []``. Without one the run is refused at
+load with a message naming the rule to write. The built-in excluded
+location is no longer a fallback, and the value is not discarded.
+
 Returns the raw list (still primitive) or an EMPTY list when unset, the code
 default: nothing is routed unless a rule says so, so an unconfigured base is
 byte-identical. A value that is not a list is returned as is so that
 `athenaeum.storage.configured_routes` can refuse it loudly with the key
 in the message. The rules are validated there (duplicate rules, a page type
 in both ``storage.routes`` and ``storage.mapping``, an unknown ``to``, a
-field rule whose target is not sensitive, a ``to`` list whose length is not
-one) and each raises ``StorageConfigError``. Records already on disk are read
+field rule whose target is not sensitive, a ``to`` list of more than one name)
+and each raises ``StorageConfigError``. Records already on disk are read
 through a rule without being moved.
 
 ## `vector`
@@ -6590,6 +6622,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_RUN_TYPE` | `src/athenaeum/_cmd_index.py`, `src/athenaeum/_cmd_run.py`, `src/athenaeum/librarian.py`, `src/athenaeum/spend.py` |
 | `ATHENAEUM_SCOPE_SAMENESS_MAX_TOKENS` | `src/athenaeum/decision_answers.py` |
 | `ATHENAEUM_SCOPE_SAMENESS_THINKING` | `src/athenaeum/decision_answers.py` |
+| `ATHENAEUM_SERVE_EXCLUDED_FIELDS` | `src/athenaeum/_cmd_serve.py`, `src/athenaeum/config.py` |
 | `ATHENAEUM_SESSION_END_RUNTIME_MARGIN` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `src/athenaeum/librarian.py` |

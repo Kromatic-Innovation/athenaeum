@@ -342,6 +342,8 @@ def test_reason_codes_are_one_closed_set():
     refused = _policy(f"| route | | hr | | {STORE_C} |")
     seen.add(decide(Description(tags=("hr",)), refused, stores).reason)
     seen.add(decide(Description(tags=("hr",)), _policy(ROUTE_HR), {}).reason)
+    # The discard reason needs a discarded page type, which this grid has none of.
+    seen.add(decide(Description(type="secret"), policy, discarded={"secret": "r"}).reason)
     assert seen <= set(REASONS)
     assert set(REASONS) <= seen
     assert len(REASONS) == len(set(REASONS))

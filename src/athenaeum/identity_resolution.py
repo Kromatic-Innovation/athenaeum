@@ -691,7 +691,7 @@ def resolve_handle_query(
             ``storage`` call that needs it.
         with_pii: Whether to include real excluded values (with their facts)
             in the response, or their field-level redaction markers instead.
-            Same flag, same semantics, as ``recall(with_pii=...)``.
+            Same flag, same semantics, as ``recall(include_sensitive=...)``.
         usage_classes: Restrict resolved excluded values to these usage
             classes (issue athenaeum#866/#907), threaded to the join exactly
             as the similarity-search path already accepts it (see

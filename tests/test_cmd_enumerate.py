@@ -152,7 +152,7 @@ class TestCmdEnumerate:
         )
         rc = cmd_enumerate(args)
         assert rc == 1
-        assert "with_pii" in capsys.readouterr().err
+        assert "include_sensitive" in capsys.readouterr().err
 
     def test_do_not_email_field_without_flag_succeeds(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

@@ -43,6 +43,7 @@ import importlib.resources
 import json
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -61,6 +62,7 @@ from athenaeum.prompt_safety import fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.relevance_policy import (
     CONFIDENCE_HIGH,
+    DROP_REASON_DISCARD,
     DROP_REASON_PREFIX,
     DROP_REASON_UNSURE,
     RelevancePolicy,
@@ -231,14 +233,19 @@ def gate_classified_entities(
     client: Any,
     usage: Any | None = None,
     config: dict[str, Any] | None = None,
+    discarded: Mapping[str, str] | None = None,
 ) -> CategoryGateOutcome:
     """Enforce ``never`` rules on classified entities (see the module docstring).
 
     ``None`` / empty policy returns every entity untouched (a deployment with
-    no policy is byte-identical to before this gate existed).
+    no policy is byte-identical to before this gate existed). *discarded* maps
+    a page type to the ``storage.routes`` rule (``to: []``) that discards it
+    (athenaeum#3168): an entity of that type is dropped, reason naming the rule.
     """
-    if policy is None or not policy.rules:
+    if (policy is None or not policy.rules) and not discarded:
         return CategoryGateOutcome(kept=list(classified))
+    if policy is None:
+        policy = RelevancePolicy()
     explicit = raw_is_explicit_remember(raw_content, jsonl=jsonl)
     categories = policy_categories(policy)
     out = CategoryGateOutcome()
@@ -257,7 +264,18 @@ def gate_classified_entities(
                 classified=True,
             ),
             policy,
+            discarded=discarded,
         )
+        if decision.discard_rule is not None:
+            out.drops.append(
+                CategoryDrop(
+                    reason=f"{DROP_REASON_DISCARD}: {decision.discard_rule}",
+                    excerpt="",
+                    name="",
+                    existing_uid=c.existing_uid,
+                )
+            )
+            continue
         if decision.overridden is not None:
             log.info(
                 "relevance-explicit-override ref=%s name=%r rule=%s",
@@ -317,6 +335,7 @@ def gate_update_actions(
     raw_content: str,
     jsonl: bool = False,
     raw_ref: str = "",
+    discarded: Mapping[str, str] | None = None,
 ) -> tuple[list[EntityAction], list[CategoryDrop]]:
     """Drop ``update`` actions whose TARGET page a ``never`` rule covers.
 
@@ -324,10 +343,13 @@ def gate_update_actions(
     a covered fact is caught even when it reached the page by a Tier-1 name
     match and never carried a category. ``create`` actions pass through (the
     classify gate already judged them). Called by both transports ahead of
-    Tier-3.
+    Tier-3. *discarded* (athenaeum#3168) drops an update onto a page whose type a
+    ``storage.routes`` rule discards, reason naming the rule.
     """
-    if policy is None or not policy.rules:
+    if (policy is None or not policy.rules) and not discarded:
         return actions, []
+    if policy is None:
+        policy = RelevancePolicy()
     explicit = raw_is_explicit_remember(raw_content, jsonl=jsonl)
     kept: list[EntityAction] = []
     drops: list[CategoryDrop] = []
@@ -339,8 +361,20 @@ def gate_update_actions(
                 meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
                 type_, tags, uid = declared_facts({**meta, "uid": action.existing_uid})
                 decision = decide(
-                    Description(type_, tuple(tags), uid, explicit=explicit), policy
+                    Description(type_, tuple(tags), uid, explicit=explicit),
+                    policy,
+                    discarded=discarded,
                 )
+        if decision is not None and decision.discard_rule is not None:
+            drops.append(
+                CategoryDrop(
+                    reason=f"{DROP_REASON_DISCARD}: {decision.discard_rule}",
+                    excerpt="",
+                    name=action.name,
+                    existing_uid=action.existing_uid,
+                )
+            )
+            continue
         if decision is None or decision.capture != CAPTURE_DROP:
             if decision is not None and decision.overridden is not None:
                 log.info(

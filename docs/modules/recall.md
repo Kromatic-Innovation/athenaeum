@@ -296,9 +296,9 @@ present.
   storage surface that doesn't support a cheap local scan, it raises rather than silently
   paying an unbounded round-trip — an explicit "refuse and name what's missing" rule instead
   of a slow, quiet fallback.
-- **`enumerate_entities` refuses to touch a `with_pii`-gated field without the flag.**
+- **`enumerate_entities` refuses to touch an `include_sensitive`-gated field without the flag.**
   Referencing a contact-identifier-prefixed field as a predicate or requested output field
-  without `with_pii=True` raises `ValueError` naming exactly which fields require it — a
+  without `include_sensitive=True` raises `ValueError` naming exactly which fields require it — a
   caller who forgot the flag gets a loud error, never a silently incomplete row.
 - **An unrecognized `entity_type` is not an error** — `enumerate_entities` returns an empty
   hit set plus the sorted list of classes this deployment actually has, so a caller can
@@ -314,7 +314,7 @@ present.
   includes the caller's audience — a restricted caller's class list can never leak the
   existence of a page it isn't allowed to read, even through a cached response meant for a
   different caller.
-- **`recall(with_pii=True)`'s excluded-record join runs strictly after page authorization**,
+- **`recall(include_sensitive=True)`'s excluded-record join runs strictly after page authorization**,
   never before or inside the index. Moving it earlier would turn the flag into a timing
   side-channel for probing whether an excluded record exists behind a page the caller cannot
   read at all.
