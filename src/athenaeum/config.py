@@ -6727,7 +6727,7 @@ def resolve_storage_history(config: dict[str, Any] | None) -> str:
     storage_cfg = config.get("storage")
     if not isinstance(storage_cfg, dict) or "history" not in storage_cfg:
         return "git"
-    raw = storage_cfg["history"]
+    raw = storage_cfg.get("history")
     if not isinstance(raw, str) or raw.strip() not in HISTORY_VALUES:
         raise StorageConfigError(f"storage.history must be 'git' or 'none', got {raw!r}")
     return raw.strip()
