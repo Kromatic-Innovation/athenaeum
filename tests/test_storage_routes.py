@@ -126,8 +126,8 @@ def test_field_rule_needs_a_sensitive_target() -> None:
     configured_routes(_cfg([{"page_type": "p", "to": ["archive"]}]))
 
 
-@pytest.mark.parametrize("to", [["vault", "archive"], "vault", None])
-def test_to_must_name_at_most_one_location(to: Any) -> None:
+@pytest.mark.parametrize("to", ["vault", None])
+def test_to_must_be_a_list_of_locations(to: Any) -> None:
     with pytest.raises(StorageConfigError, match="to must"):
         configured_routes(_cfg([{"page_type": "p", "to": to}]))
 

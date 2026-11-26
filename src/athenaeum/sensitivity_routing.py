@@ -213,6 +213,8 @@ from athenaeum.sensitivity import (
 from athenaeum.storage import (
     RouteDecision,
     StorageConfigError,
+    StorageTargetError,
+    apply_to_targets,
     available_adapters,
     note_discard,
     route_for,
@@ -306,16 +308,17 @@ def refuse_unrouted_value_classes(config: dict[str, Any] | None) -> None:
         _class_decision(name, config)
 
 
-def _vault_root_for_class(
+def _vault_targets_for_class(
     sensitivity_class: str,
     config: dict[str, Any] | None,
     knowledge_root: Path,
-) -> Path:
-    """Resolve the on-disk vault root for *sensitivity_class* — fail closed.
+) -> list[tuple[str, Path]]:
+    """Resolve ``(name, vault root)`` for every target of *sensitivity_class* — fail closed.
 
     See this module's docstring, "Unsafe vault surface, fail closed." A class
     whose rule discards (``to: []``) has no vault: this raises, and the callers
-    that reach here never do for a discarded class (see :func:`_route_one`).
+    that reach here never do for a discarded class (see :func:`_route_one`). The
+    first entry is the primary (athenaeum#3169); a rule with one target yields one.
     """
     decision = _class_decision(sensitivity_class, config)
     if not decision.targets:
@@ -323,23 +326,36 @@ def _vault_root_for_class(
             f"sensitivity class {sensitivity_class!r} is discarded ({decision.rule}); "
             "there is no vault root"
         )
-    try:
-        adapter = available_adapters(config)[decision.targets[0]]
-    except StorageConfigError as exc:
-        raise SensitivityRoutingError(
-            f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
-        ) from exc
-    # Outside the corpus, NOT ``decision.sensitive``: a custom location
-    # that is outside the corpus but not marked sensitive keeps working
-    # exactly as before (athenaeum#3161).
-    if adapter.corpus_policy.in_corpus:
-        raise SensitivityRoutingError(
-            f"storage.mapping routes sensitivity class {sensitivity_class!r} "
-            f"to adapter {adapter.name!r}, which participates in the "
-            "corpus — refusing to write a routed sensitive value there "
-            "(fail closed)"
-        )
-    return adapter.resolve_root(knowledge_root) / "sensitivity" / sensitivity_class
+    roots: list[tuple[str, Path]] = []
+    for name in decision.targets:
+        try:
+            adapter = available_adapters(config)[name]
+        except (StorageConfigError, KeyError) as exc:
+            raise SensitivityRoutingError(
+                f"sensitivity class {sensitivity_class!r} storage.mapping is invalid: {exc}"
+            ) from exc
+        # Outside the corpus, NOT ``decision.sensitive``: a custom location
+        # that is outside the corpus but not marked sensitive keeps working
+        # exactly as before (athenaeum#3161).
+        if adapter.corpus_policy.in_corpus:
+            raise SensitivityRoutingError(
+                f"storage.mapping routes sensitivity class {sensitivity_class!r} "
+                f"to adapter {adapter.name!r}, which participates in the "
+                "corpus — refusing to write a routed sensitive value there "
+                "(fail closed)"
+            )
+        vault = adapter.resolve_root(knowledge_root) / "sensitivity" / sensitivity_class
+        roots.append((name, vault))
+    return roots
+
+
+def _vault_root_for_class(
+    sensitivity_class: str,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> Path:
+    """The primary target's vault root (the one reads resolve from)."""
+    return _vault_targets_for_class(sensitivity_class, config, knowledge_root)[0][1]
 
 
 def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -> str:
@@ -405,18 +421,25 @@ def _route_one(
         note_discard(decision.rule)
         return _discard_marker(sensitivity_class)
     record_id = _record_id_for(raw_ref, sensitivity_class, start, end)
-    vault_root = _vault_root_for_class(sensitivity_class, config, knowledge_root)
-    vault_root.mkdir(parents=True, exist_ok=True)
-    record_path = vault_root / f"{record_id}.md"
-    atomic_write_text(
-        record_path,
-        _render_vault_record(
-            record_id=record_id,
-            sensitivity_class=sensitivity_class,
-            source_ref=raw_ref,
-            value=value,
-        ),
+    # Every target in order, each write idempotent (the record id is derived from
+    # the span, the file is replaced whole); a failure names the target and
+    # raises (athenaeum#3169).
+    rendered = _render_vault_record(
+        record_id=record_id,
+        sensitivity_class=sensitivity_class,
+        source_ref=raw_ref,
+        value=value,
     )
+    vaults = dict(_vault_targets_for_class(sensitivity_class, config, knowledge_root))
+
+    def _write(name: str) -> None:
+        vaults[name].mkdir(parents=True, exist_ok=True)
+        atomic_write_text(vaults[name] / f"{record_id}.md", rendered)
+
+    try:
+        apply_to_targets(tuple(vaults), _write)
+    except StorageTargetError as exc:
+        raise SensitivityRoutingError(f"{raw_ref}: {exc}") from exc
     return _pointer_text(sensitivity_class, record_id)
 
 

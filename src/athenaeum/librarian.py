@@ -312,6 +312,7 @@ from athenaeum.sensitivity_routing import (
 from athenaeum.storage import (
     ReadOnlySurfaceError,
     StorageConfigError,
+    apply_to_targets,
     discard_counts,
     discarded_page_types,
     note_discard,
@@ -322,6 +323,7 @@ from athenaeum.storage import (
     resolve_indexed_surfaces,
     resolve_locator_surfaces,
     route_for,
+    target_root,
 )
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.store_access_evidence import record_fetch, record_push
@@ -2548,6 +2550,25 @@ def _record_correspondent_contact(
         )
         return
     if written.path is not None:
+        # athenaeum#3169: a rule with several vault targets has the address
+        # written to each; a failure raises naming the target, it is not logged
+        # and skipped. The target the write above already used is not repeated.
+        if _address_route is not None and len(_address_route.targets) > 1:
+            _done = contacts_root.resolve()
+
+            def _mirror(name: str) -> None:
+                _root = target_root(name, config, wiki_root.parent)
+                if _root.resolve() != _done:
+                    record_observed_contact_value(
+                        _root,
+                        ref.address,
+                        uid=entity.uid,
+                        name=entity.name,
+                        source=raw.ref,
+                        observed_at=ref.observed_at,
+                    )
+
+            apply_to_targets(_address_route.targets, _mirror)
         result.correspondent_contacts_recorded += 1
         log.info(
             "  Recorded correspondent address for %s (uid %s) from %s",

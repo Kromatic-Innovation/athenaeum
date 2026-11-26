@@ -735,8 +735,9 @@ class StorageRoute:
 
     Exactly one of ``page_type`` / ``sensitivity_class`` is set. ``fields`` is
     ``None`` for a whole-page-type rule. ``to`` holds the target location, or
-    nothing for a rule that discards (``to: []``, athenaeum#3168). ``index`` is
-    the rule's position in ``storage.routes``.
+    nothing for a rule that discards (``to: []``, athenaeum#3168). Several names
+    (athenaeum#3169) are vaults the value is written to in order; the first is the
+    primary. ``index`` is the rule's position in ``storage.routes``.
     """
 
     to: tuple[str, ...]
@@ -781,13 +782,9 @@ def _parse_route(index: int, raw: Any) -> StorageRoute:
     to = raw.get("to")
     if not isinstance(to, list) or not all(isinstance(t, str) and t.strip() for t in to):
         raise _route_error(index, f"to must be a list of location names, got {to!r}")
-    # The one place the number of targets is checked. An empty list discards.
-    if len(to) > 1:
-        raise _route_error(
-            index,
-            f"to must name at most one location, got {len(to)} "
-            "(several targets are not supported)",
-        )
+    # The one place the number of targets is read. An empty list discards; two
+    # or more name several vaults (athenaeum#3169), checked in configured_routes
+    # where the adapters are known.
     fields: tuple[str, ...] | None = None
     if "fields" in raw:
         if sens_class is not None:
@@ -811,14 +808,50 @@ def _parse_route(index: int, raw: Any) -> StorageRoute:
     )
 
 
+def _check_multi_target(route: StorageRoute, adapters: Mapping[str, StorageAdapter]) -> None:
+    """Refuse a ``to`` list of several names unless every one is a vault (athenaeum#3169).
+
+    A vault here is :func:`is_sensitive`'s notion: ``sensitive: true``, which
+    already requires every corpus capability off. A location in the index is
+    refused by name: two writable indexed copies of a page have no rule for which
+    one wins. A ``read_only`` target can never accept the write.
+    """
+    subject = route.page_type or route.sensitivity_class
+    if len(set(route.to)) != len(route.to):
+        raise StorageConfigError(
+            f"storage.routes rule for {subject!r} names a location more than once in `to`: "
+            f"{list(route.to)}"
+        )
+    for name in route.to:
+        adapter = adapters[name]
+        if adapter.corpus_policy.in_corpus:
+            raise StorageConfigError(
+                f"storage.routes rule for {subject!r} lists location {name!r}, which is in "
+                "the index, among several targets; a list of several targets takes vaults "
+                "only (two writable indexed copies of a page have no rule for which one wins)"
+            )
+        if not adapter.sensitive:
+            raise StorageConfigError(
+                f"storage.routes rule for {subject!r} lists location {name!r}, which is not "
+                "a vault (sensitive: true), among several targets; every target of a list "
+                "of several must be a vault"
+            )
+        if adapter.read_only:
+            raise StorageConfigError(
+                f"storage.routes rule for {subject!r} lists location {name!r}, which is "
+                "read_only, as a target; a read-only location can never accept the write"
+            )
+
+
 def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]:
     """The validated ``storage.routes`` rules (athenaeum#3166); empty when unset.
 
     A rule with ``to: []`` discards: what it names is stored nowhere
     (athenaeum#3168). Raises :class:`StorageConfigError` for: a malformed rule; a
-    ``to`` list longer than one; two rules naming the same page type and field, the same
-    whole page type, or the same sensitivity class (there is no ordering between
-    rules); a page type named both in ``storage.routes`` and in
+    ``to`` list of several names unless every one is a vault (``sensitive: true``,
+    outside the corpus, not ``read_only``, no name repeated; athenaeum#3169); two rules
+    naming the same page type and field, the same whole page type, or the same sensitivity
+    class (there is no ordering between rules); a page type named both in ``storage.routes`` and in
     ``storage.mapping``; a field rule on a page type that also has a
     ``storage.excluded_read_mapping`` or ``storage.excluded_fields`` entry; a
     ``to`` that is not a known location; a field rule whose target is not
@@ -852,7 +885,7 @@ def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]
     mapping = resolve_storage_mapping(config)
     read_mapping = resolve_excluded_read_mapping(config)
     excluded_fields = resolve_excluded_fields_config(config)
-    field_target: dict[str, str] = {}
+    field_target: dict[str, tuple[str, ...]] = {}
     adapters = available_adapters(config)
     for route in routes:
         for target in route.to:
@@ -861,6 +894,8 @@ def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]
                     f"storage.routes routes {route.page_type or route.sensitivity_class!r} to "
                     f"unknown location {target!r}; known locations: {sorted(adapters)}"
                 )
+        if len(route.to) > 1:
+            _check_multi_target(route, adapters)
         if route.page_type is None:
             continue
         if route.page_type in mapping:
@@ -870,14 +905,14 @@ def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]
             )
         if route.fields is None or route.discard:
             continue
-        target = route.to[0]
-        if not adapters[target].sensitive:
-            raise StorageConfigError(
-                f"storage.routes sends fields of {route.page_type!r} to location "
-                f"{target!r}, which is not marked sensitive: true; a field rule "
-                "needs a sensitive target"
-            )
-        if field_target.setdefault(route.page_type, target) != target:
+        for target in route.to:
+            if not adapters[target].sensitive:
+                raise StorageConfigError(
+                    f"storage.routes sends fields of {route.page_type!r} to location "
+                    f"{target!r}, which is not marked sensitive: true; a field rule "
+                    "needs a sensitive target"
+                )
+        if field_target.setdefault(route.page_type, route.to) != route.to:
             raise StorageConfigError(
                 f"storage.routes sends fields of {route.page_type!r} to more than one "
                 "location; a page type's field rules share one target"
@@ -1038,6 +1073,92 @@ def reset_discard_counts() -> None:
 
 
 
+# ---------------------------------------------------------------------------
+# Several targets (athenaeum#3169)
+# ---------------------------------------------------------------------------
+#
+# A rule whose ``to`` names several vaults has them written in the same call, in
+# order; the first is the primary and is the only one read. No replication
+# service: the loop lives at the one place each writer asks the resolver.
+
+
+class StorageTargetError(RuntimeError):
+    """A write, removal or erasure on one target of a multi-target rule failed.
+
+    Names the target and the failure class, never a value. Targets earlier in the
+    list may already hold the change; every operation is idempotent per target,
+    so re-running completes the rest.
+    """
+
+    def __init__(self, target: str, cause: BaseException | str, *, action: str = "write") -> None:
+        self.target = target
+        detail = cause if isinstance(cause, str) else type(cause).__name__
+        super().__init__(
+            f"{action} on storage target {target!r} failed ({detail}); targets before it "
+            "may already hold the change, re-run to complete the rest"
+        )
+
+
+def apply_to_targets(
+    targets: Sequence[str], apply_one: Callable[[str], None], *, action: str = "write"
+) -> None:
+    """Call *apply_one* for each target in order; the first failure raises, naming it.
+
+    Success means every target accepted the change. Nothing is logged and skipped.
+    """
+    for name in targets:
+        try:
+            apply_one(name)
+        except StorageTargetError:
+            raise
+        except Exception as exc:
+            raise StorageTargetError(name, exc, action=action) from exc
+
+
+def target_root(name: str, config: dict[str, Any] | None, knowledge_root: Path) -> Path:
+    """Absolute on-disk root of the location called *name*."""
+    adapters = available_adapters(config)
+    if name not in adapters:
+        raise StorageConfigError(
+            f"unknown storage location {name!r}; known locations: {sorted(adapters)}"
+        )
+    return adapters[name].resolve_root(knowledge_root)
+
+
+def inside_git_repository(path: Path) -> bool:
+    """Whether *path* (which need not exist yet) is inside a git working tree."""
+    for candidate in (path.resolve(), *path.resolve().parents):
+        if (candidate / ".git").exists():
+            return True
+    return False
+
+
+def route_target_summary(
+    config: dict[str, Any] | None, knowledge_root: Path
+) -> list[dict[str, Any]]:
+    """One row per ``storage.routes`` rule: its targets and which sit inside git.
+
+    ``in_git`` names the targets inside a git repository, where an erasure does
+    not reach history (athenaeum#3169). Read-only; no value is read.
+    """
+    rows: list[dict[str, Any]] = []
+    for route in configured_routes(config):
+        rows.append(
+            {
+                "rule": route.rule_name,
+                "subject": route.page_type or route.sensitivity_class,
+                "targets": list(route.to),
+                "target_count": len(route.to),
+                "in_git": [
+                    name
+                    for name in route.to
+                    if inside_git_repository(target_root(name, config, knowledge_root))
+                ],
+            }
+        )
+    return rows
+
+
 def _decision_for_adapter_names(
     names: Sequence[str], rule: str | None, config: dict[str, Any] | None
 ) -> RouteDecision:
@@ -1058,7 +1179,26 @@ def _decision_for_class(
     entity_class: str, rule: str | None, config: dict[str, Any] | None
 ) -> RouteDecision:
     adapter = resolve_adapter_for_class(entity_class, config)
-    return _decision_for_adapter_names((adapter.name,), rule, config)
+    # A rule with several vault targets answers with all of them, in order
+    # (athenaeum#3169); every other class has the one location it resolved to.
+    return _decision_for_adapter_names(
+        _multi_targets(entity_class, config) or (adapter.name,), rule, config
+    )
+
+
+def _multi_targets(entity_class: str, config: dict[str, Any] | None) -> tuple[str, ...]:
+    """The ordered targets of a ``storage.routes`` rule with several, else ``()``.
+
+    *entity_class* is a page type (a whole-type rule) or the derived surface
+    class a page type's field rules were folded into.
+    """
+    for route in configured_routes(config):
+        if len(route.to) < 2 or route.page_type is None:
+            continue
+        key = route.page_type if route.fields is None else _route_surface_class(route.page_type)
+        if key == entity_class:
+            return route.to
+    return ()
 
 
 def _pii_policy() -> Any:

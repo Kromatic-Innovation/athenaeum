@@ -297,6 +297,10 @@ class StatusInfo(TypedDict):
     # a misleading ``0`` for "drop logging is off" (see ``drop_log_enabled``
     # above for that distinction).
     recent_drop_count: int | None
+    # Issue athenaeum#3169: one row per ``storage.routes`` rule -- ``rule``,
+    # ``targets``, ``target_count`` and ``in_git`` (the targets inside a git
+    # repository, where an erasure does not reach history). Empty without routes.
+    storage_routes: list[dict[str, Any]]
 
 
 #: Printed for a :data:`StatusInfo` ``page_recompile`` field whose producer
@@ -996,6 +1000,16 @@ def status(knowledge_root: Path) -> StatusInfo:
     except Exception as exc:  # noqa: BLE001 — must never break status
         log.debug("status: drop-ledger read skipped (%s): %s", type(exc).__name__, exc)
 
+    # Issue athenaeum#3169: targets per storage rule, naming any inside git.
+    # Best-effort, same discipline as every other advisory read above.
+    storage_routes: list[dict[str, Any]] = []
+    try:
+        from athenaeum.storage import route_target_summary
+
+        storage_routes = route_target_summary(config, knowledge_root)
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug("status: storage-route summary skipped (%s): %s", type(exc).__name__, exc)
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -1024,6 +1038,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "page_recompile": page_recompile,
         "drop_log_enabled": drop_log_enabled,
         "recent_drop_count": recent_drop_count,
+        "storage_routes": storage_routes,
     }
 
 
@@ -1331,6 +1346,22 @@ def format_status(info: StatusInfo, *, verbose: bool = False) -> str:
             f"at {hook_degradation.get('ts', 'unknown')} — "
             f"{hook_degradation.get('detail', '')}"
         )
+
+    # Issue athenaeum#3169: targets per storage rule. ``.get`` keeps an older
+    # status dict formatting cleanly.
+    storage_routes = info.get("storage_routes") or []
+    if storage_routes:
+        lines.append("Storage routes:")
+        for row in storage_routes:
+            count = row["target_count"]
+            noun = "target" if count == 1 else "targets"
+            where = ", ".join(row["targets"]) if row["targets"] else "discarded"
+            lines.append(f"  {row['rule']} ({row['subject']}): {count} {noun} [{where}]")
+            for name in row["in_git"]:
+                lines.append(
+                    f"    [warn] target {name!r} is inside a git repository: an erasure "
+                    "does not reach its history"
+                )
 
     if info["last_commit_date"]:
         lines.append(f"Last commit:          {info['last_commit_date']}")

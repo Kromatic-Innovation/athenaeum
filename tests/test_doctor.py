@@ -190,6 +190,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "removed_config_keys",
         "unmarked_vault_locations",
         "storage_history",
+        "multi_target_divergence",
     }
     failed = [r for r in results if r.status == "fail"]
     assert not failed, failed
