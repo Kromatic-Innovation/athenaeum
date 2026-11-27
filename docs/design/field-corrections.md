@@ -364,8 +364,8 @@ from one written by the mail agent.
 Two operator-configuration consequences, both of which bite silently if missed.
 `identifier_validity` must be on §6.3's attribute allowlist as a `list` attribute
 with the submitter among its `writers`, or every such correction is rejected with
-"attribute not on the allowlist" and escalated forever. And it must carry a §7.1
-`sensitive_fields` mapping, or the close — which embeds an address — is written to
+"attribute not on the allowlist" and escalated forever. And it must be
+routed by the storage settings (§7.1: `storage.excluded_fields`), or the close — which embeds an address — is written to
 the public entity page instead of the excluded surface where the addresses live.
 
 `src/athenaeum/rule_examples/contact-sync-email-removal.yaml` is the worked example.
@@ -670,6 +670,15 @@ that marker as ordinary entity frontmatter is proposing the wrong destination, a
 router corrects it. A submitter cannot opt out by being specific.
 
 The sensitivity classification is deployment configuration, not a constant in this repo.
+There is one setting for it, the storage keys every other writer already uses: a correction
+goes to `storage.route_for(page_type, field)`, so a field on the page class's
+`storage.excluded_fields` list (the built-in contact fields for `pii`, unless an explicit
+list replaces them) is written to the separate location when that class is mapped outside
+the corpus by `storage.mapping`, and in place on the page otherwise. A correction to a
+contact field therefore follows the same destination as a read or any other write, with no
+corrections-only table to keep in step. The earlier `librarian.corrections.sensitive_fields`
+table was removed in athenaeum#3162; a configuration that still sets it is refused before
+any batch is read, with the complete replacement printed.
 
 **A contact value also carries a usage classification** (issue athenaeum#866): whether it
 was *observed in prior communication* or *supplied by a data provider*, plus the
@@ -946,7 +955,7 @@ Env names follow the pattern `ATHENAEUM_CORRECTIONS_<KEY>`.
 **empty by default**: with no allowlist entry, no correction is applied cheaply and every
 submission takes the reasoning path. A fresh deployment cannot have its wiki written by a
 mechanical writer until an operator opts in per-attribute. Sensitivity classification
-(§7.1) is likewise deployment config.
+(§7.1) is likewise deployment config, through the storage keys.
 
 The implementation adds these to `docs/reference/configuration.md` in the same change; a key in
 code and not in that table is drift.

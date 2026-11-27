@@ -52,8 +52,12 @@ the caller's audience clears the matched class's `read_policy`.
 - `sensitivity.classes.*` (`athenaeum.sensitivity.available_classes`) — the class
   vocabulary and each class's `read_policy.access`/`audience`, consumed unmodified;
   routing adds no new classification logic of its own.
-- `storage.mapping` — to resolve a routed class's vault root; with no explicit
-  entry the vault root defaults to the built-in `excluded` adapter.
+- `storage.routes` (a `sensitivity_class` rule) or `storage.mapping` — to resolve a
+  routed class's vault root. A class with routing on and no rule is refused at
+  load, naming the rule to write; `to: []` discards the value (a fixed marker
+  replaces it, no record is written). This governs what the compile run writes;
+  a value already in a raw file is handled by the write-time screen and the
+  screening phase.
 - `librarian.junk_match_stopwords` / `junk_match_allowlist`, `librarian.type_gate_allowed_types`
   / `type_gate_excluded_keys`, and `librarian.create_name_escalate_max_chars` — the
   entity-routing tuning knobs.
@@ -71,6 +75,68 @@ the caller's audience clears the matched class's `read_policy`.
   classification (ambiguous address, escalated short name, unknown-type collision,
   demoted-name re-mint attempt) so the underlying observation is not silently lost
   when its page is not.
+
+## Several targets
+
+A `storage.routes` rule's `to` list may name more than one location, for a
+sensitive value that has to live in two places under different custody (a working
+vault and an archive vault).
+
+- **Every target must be a vault**: `sensitive: true`, outside the index, and not
+  `read_only`. A list that includes a location in the index is refused at load,
+  because two writable indexed copies of a page have no rule for which one wins;
+  a `read_only` target raises `StorageConfigError`.
+- **Order is significant.** The first target is the primary and the only one read.
+- **A write goes to each target in order and succeeds only if all accept it.** A
+  failure raises, naming the target (`StorageTargetError`; for a routed free-text
+  value, `SensitivityRoutingError`); it is never logged and skipped. Each write
+  is idempotent per target, so running the same write again completes the
+  targets that were missed and leaves all of them holding the same value.
+- **A divergence is reported, not served.** A record or field value on a later
+  target that the primary lacks is reported by `athenaeum doctor`
+  (`multi_target_divergence`).
+- **Removing a value and `athenaeum retire` apply to every target.** A target
+  that cannot be reached is named and the command exits non-zero.
+- **`athenaeum status`** shows the number of targets per rule and names any target
+  inside a git repository, where an erasure does not reach history.
+
+Nothing keeps the targets in step after an out-of-band edit, and every target
+holds the same fields.
+
+## Whole pages in a vault
+
+A `storage.routes` rule with a `page_type`, no `fields`, and a vault as its first
+`to` target sends every page of that type to the vault: compile (entity creation,
+batch apply and page recompile) writes the new page there, not under `wiki/`.
+Some records are sensitive as a whole, not field by field.
+
+```yaml
+storage:
+  routes:
+    - page_type: reference
+      to: [vault]
+```
+
+- **Pages in a vault are not searchable.** They are outside the keyword and
+  vector indexes, outside merge discovery and outside name lookup in the main
+  store. Searching inside a vault is not supported.
+- **Read one by uid.** `read_entity` finds the page by its uid in the vault. With
+  the read flag set (`include_sensitive`) it returns the page; without it the
+  answer says a page exists and is withheld (`withheld: true`) and carries no field
+  value, no body and no file name.
+- **An update finds its page inside the vault only.** A name that matches a page
+  in the main store is not a match, and a vault page's name never matches in the
+  main store. A page whose name the vault already holds is not written a second
+  time; the raw note is kept.
+- **A link from the main store to a vault page is refused.** The write is parked
+  and logged by uid, as any other refused link. A page inside a vault may link
+  anywhere.
+- **The run summary counts pages written per vault** (`vault-pages`), and
+  logs neither a title nor any body text for them.
+- **Other routes are unchanged.** A page type routed to a location in the index
+  stays indexed and searchable. A `storage.mapping` entry, a field rule, or a
+  location that is outside the index but not a vault is still refused for compile
+  with `SurfaceNotIndexedError`.
 
 ## What it refuses
 

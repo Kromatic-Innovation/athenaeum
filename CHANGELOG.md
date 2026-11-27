@@ -64,8 +64,117 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING:** `librarian.corrections.sensitive_fields` and
+  `config.resolve_corrections_sensitive_fields` are removed (athenaeum#3162).
+  A correction now goes where the storage settings put the field, as for every
+  other writer. A configuration that still sets the key to a non-empty value is
+  refused by any run that processes corrections (the correction phase of
+  `athenaeum run`, `athenaeum corrections-trust-dryrun`, and ratifying an
+  escalated correction), before any batch is read and with no correction
+  applied. The message prints the complete replacement
+  `storage.excluded_fields.<class>` list, including the built-in contact fields
+  (`emails`, `phones`, `former_emails`, `alt_emails`) for `pii`, because an
+  explicit list replaces the built-in one. Commands that do not process
+  corrections keep running and print the removed-key notice. To upgrade:
+  delete the key and paste the printed `storage:` block into `athenaeum.yaml`.
+
+### Added
+
+- An `IdentityProvider` protocol turns a request into a principal (the identity key `access.can` takes), with two built-in providers: `local` returns the owner's key and `oidc` returns the key of an already-verified bearer token, matching `asserter_identity_key` for both the `(iss, sub)` and the Microsoft Entra tenant-scoped shapes and reading no role, group, audience or scope claim. `register_identity_provider` cannot shadow a built-in. A stdio server and the command line use `local`, the network server `oidc`, chosen at startup and never a tool parameter (athenaeum#3171).
+- `pii.record_placement(knowledge_root, config, subject_uid, *, field=None, texts=(), sensitive=False, retention_action=None)` answers where an engine-written record about an entity is kept: `ordinary`, `vault` (with targets), `nowhere` or `unplaceable` (athenaeum#3177). It applies the entity's own routes from `storage.route_for` to a field, the whole page type, and free text quoting a value the subject currently holds in a routed field (read through the entity read), and `sensitive=True` sends an otherwise ordinary record to the page type's primary vault. A retention action only tightens the answer. A caller given `nowhere` or `unplaceable` writes nothing and must not substitute a fallback. Text quoting another entity's routed value, or a discarded value, is not detected. No writer uses it yet.
+- `remember` and the new `storage.write_raw_intake_screened` route or discard a value before the raw note is written (athenaeum#3175). The same screen the compile run applies (free-text value routing, and the `storage.routes` field rules for the note's declared `type`) now runs at write time: a routed value is written to its vault first and the note carries the pointer, a discarded value becomes the fixed marker, a discarded field is dropped, and a routed field's value is replaced by a pointer. A failed vault write fails the call and writes nothing; record ids are deterministic, so a retry converges. The access-label screen still runs, and with no rule that applies the file written is byte-identical to before. Not covered: a file placed in raw intake by a program that does not call athenaeum, and a value that no recogniser or declared field identifies. `write_raw_intake` stays for content that is already screened.
+- `athenaeum.access.can(principal, location, right, *, config, knowledge_root)` answers whether an identity key holds `read`, `propose`, `compile` or `answer` on a named location (athenaeum#3167). It reads the location's store declaration with the existing parser and rights resolution, adds no right and no policy file, and returns a boolean. A location with no declaration belongs to the owner alone; an invalid declaration or a directory that cannot answer leaves the owner with read and nobody else. An unknown location or right raises. Resolution is held per process for any identity key, so the owner path is unchanged.
+- A `storage.routes` rule with `to: []` discards what it names (athenaeum#3168): the value is stored nowhere, not on a page, in a vault, a ledger, a queue or an index. `route_for` returns empty `targets` with the rule named (`RouteDecision.discarded`), which is not the same as no rule matching. A field rule drops those fields when a page is compiled, in both the synchronous and the batch transport (one shared first-read screen, which also runs free-text value routing in batch mode), and the rest of the page is written, and the contact write writes nothing for them. A field correction to a discarded field ends with the outcome `discarded`, is never escalated, and leaves no value or value-derived id in the corrections ledger, the handoff note or a log. A `sensitivity_class` rule replaces each recognised value in free text with a fixed marker naming the class and saying the value was not stored, and writes no record. A page type rule is not captured: the intake decision drops it with a reason naming the rule. The run summary gains a `discard` phase with one counter per rule (no value, no hash). Only a rule discards. This governs what the compile run writes; a value already in a raw file is handled by the write-time screen and the screening phase.
+- A `storage.routes` rule's `to` list may name several vaults (athenaeum#3169). A write goes to each target in order and succeeds only if every target accepts it; a failure raises naming the target and is never logged and skipped, and re-running completes the targets that were missed (each write is idempotent per target). Every target must be a vault (`sensitive: true`, outside the index, not `read_only`): a list that includes a location in the index is refused, and a `read_only` target raises `StorageConfigError`. The first target is the primary and the only one read; a record or value that a later target holds and the primary lacks is reported by `athenaeum doctor` (`multi_target_divergence`), not served. Removing a value and `athenaeum retire` apply to every target, and an unreachable target (one that exists but cannot be read or written) is named with a non-zero exit; a target root that does not exist yet holds no records. `athenaeum retire` applies the same store-rights check to every target before deleting anything, so one refusal refuses the run. `athenaeum status` counts targets per rule and names any target inside a git repository, where an erasure does not reach history. Nothing keeps targets in step after an out-of-band edit.
+- `storage.routes`: a list of rules that each send a page type, or chosen fields of one, or a sensitivity class, to one named location (athenaeum#3166). A rule is `page_type` (or `sensitivity_class`), an optional `fields` list and `to`, a list of one location name (or none: see below). A field rule's target must be `sensitive: true`; a rule without `fields` is the long form of a `storage.mapping` entry, which stays; a `sensitivity_class` rule replaces the per-class lookup in value routing. Duplicate rules, a page type named in both `storage.routes` and `storage.mapping`, an unknown target and a non-sensitive field target raise `StorageConfigError`. Nothing is routed unless a rule says so, records already on disk are read through a rule without being moved, and `athenaeum init` writes a commented example and no active rule.
+- A `storage.routes` rule that sends a whole page type to a vault now has compile write those pages there (athenaeum#3174). They stay out of the keyword and vector indexes, merge discovery and name lookup, so they are not searchable. `read_entity` returns one by uid with the read flag, and without it answers `withheld: true` with no value. A name already in the vault is an update there, a link from the main store to a vault page is refused, and the run summary counts pages per vault without logging a title. A non-indexed location that is not a vault still raises `SurfaceNotIndexedError`.
+
+- `storage.history: git | none` (default `git`) declares whether a knowledge
+  directory keeps history (athenaeum#3160). `athenaeum init --no-history`
+  writes `none` into the configuration it creates and creates no repository:
+  no git command runs. `StoreCapabilities` gains a declared `history` value;
+  `versioned` keeps meaning "the location is in fact a git working tree".
+  `storage.adapters.<name>.history` overrides the setting for one location.
+  Under `none`, `Store.snapshot` returns `None` without calling git, and
+  `athenaeum doctor` reports the declared value (and, under `git` with no
+  repository, that destructive operations will be refused). Under `none` there
+  is no restore point, no undo, and no history-based commands.
+- New guide, `docs/guides/shared-page-type.md` (athenaeum#3172): share one page type
+  with a second person through its own git repository. It walks the owner's side
+  (repository, location with its own root, routing rule, store declaration naming one
+  reader and one compiler) and the reader's read-only mount, and states what the git
+  host, the declaration and `read_only` each enforce, that the location is ordinary and
+  not a vault, and the limits (revoking read keeps a held copy; a second writer needs
+  `sync.mode: integrate`). Its configuration blocks are checked against fixtures by
+  `tests/test_shared_page_type_guide.py`, which also builds two installs around a local
+  bare repository.
+
 ### Changed
 
+- The flag that returns sensitive values is named `include_sensitive` on every
+  read (athenaeum#3163): the `recall`, `read_entity` and `enumerate_entities`
+  MCP tools, and `athenaeum recall`, `athenaeum entity` and `athenaeum
+  enumerate` (`--include-sensitive`). It replaces `with_pii` / `--with-pii` and
+  `include_excluded` / `--include-excluded`, which still work and behave
+  identically but print one notice naming the replacement (a
+  `deprecation_notice` in the tool result, a line on stderr for the command
+  line); passing an old and the new name with different values is an error.
+  The served ceiling is renamed the same way: `serve.sensitive_reads: on | off`
+  replaces `serve.excluded_fields` (same values, same default under each
+  profile), `athenaeum serve --sensitive-reads` replaces `--excluded-fields`,
+  and `ATHENAEUM_SERVE_SENSITIVE_READS` replaces
+  `ATHENAEUM_SERVE_EXCLUDED_FIELDS`. The old yaml key is refused at startup
+  with the replacement printed; the old flag and environment variable are
+  accepted with a notice. The `read_entity` payload key
+  `excluded_fields_withheld` is now `sensitive_reads_withheld`. The tool
+  descriptions and the served instructions use the new name. **The old names
+  (`with_pii`, `include_excluded`, `--with-pii`, `--include-excluded`,
+  `--excluded-fields`, `ATHENAEUM_SERVE_EXCLUDED_FIELDS`) are removed in the
+  next minor release.** With the flag set, `read_entity` and `athenaeum entity`
+  now also replace a routed-value pointer (`[sensitive:<class>:<id> ...]`) in
+  the page body with its value, under the class's own read policy; the
+  pointer text now names that read instead of an internal function.
+- **BREAKING:** with `sensitivity.routing.enabled` on, a sensitivity class that has a recogniser and is not switched `off` and has no `storage.routes` `sensitivity_class` rule (or `storage.mapping` entry) is refused at load (athenaeum#3168). A run refuses with a message naming the rule to write (`to: [<location>]` to keep the value, `to: []` to discard it). Before, such a class fell back to the built-in `excluded` location. It no longer does, and it is not discarded. Add a rule such as `- sensitivity_class: pii` with `to: [excluded]` to keep the old placement. Only writes are refused: a record already stored in `excluded` for a class with no rule still resolves.
+- A field correction is written to the location `storage.route_for(page_type,
+  field)` returns, and in place on the page when it returns none (athenaeum#3162).
+  Default behaviour change: where contact fields are kept on a separate
+  location (`storage.mapping` maps `pii` outside the corpus), a correction to
+  `emails` on a person is now written to that location's record and not to the
+  page, with no corrections-specific setting; previously the empty
+  corrections table left it on the page. Installations that keep contact
+  fields on the page are unchanged.
+- With `storage.history: none`, raw retirement (`athenaeum retire`), batch
+  retirement of processed correction batches and raw retirement by shape rules
+  remove the file and report success instead of refusing for lack of a restore
+  point (athenaeum#3164). Each logs once per run that no restore point exists.
+  It follows the declared value, not whether a `.git` exists. Under `git`
+  nothing changes, including the refusal when no repository is found.
+  `athenaeum storage move-type --undo`, `athenaeum recover-parked restore` and
+  `athenaeum pii-restore` print "no history" and exit 0 under `none`.
+- The four `access:` levels are defined once (`models.ACCESS_LEVELS`) and the
+  built-in contact field names once (`pii.BUILTIN_CONTACT_FIELDS`); the other
+  copies are computed from them, with no behaviour change (athenaeum#3159).
+- `backing_store` now names a registered store implementation (athenaeum#3165).
+  `markdown` and `wiki-markdown` resolve to the filesystem implementation; any
+  other value, which was previously accepted and built the same filesystem
+  store, now raises `StorageConfigError` naming the known values. If you wrote
+  a free-text value such as `files` or `sqlite`, change it to `markdown`.
+  `storage.register_store_backend(name, factory)` registers another
+  implementation, and `open_store` builds the store through that registry.
+- One resolver now answers where a field or a page type is stored:
+  `storage.route_for(page_type, field=None, *, config)` returns a frozen
+  `RouteDecision` (`targets`, `rule`, `sensitive`) computed from the existing
+  `storage.mapping`, `storage.excluded_fields`, `storage.excluded_read_mapping`
+  and `librarian.corrections.sensitive_fields` keys. The excluded-field read
+  path, `process_correction_record` and the free-text value-routing vault
+  location read those tables through it, and a test fails the build if another
+  module reads them. No behaviour change and no new configuration key
+  (athenaeum#3158).
+- The four `access:` levels are defined once (`models.ACCESS_LEVELS`) and the
+  built-in contact field names once (`pii.BUILTIN_CONTACT_FIELDS`); the other
+  copies are computed from them, with no behaviour change (athenaeum#3159).
 - `athenaeum retire-pages` is now `athenaeum retire` (athenaeum#3151).
   `retire-pages` still works for this release as a deprecated alias that
   prints a note, and is removed in the next one. The override for the
@@ -114,6 +223,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   longer be skipped by a path that resolves the destination and forgets to
   apply it. A new test fails if any module resolves a destination or sets the
   flag any other way. File names are unchanged (athenaeum#3126).
+- Docs: the README `## Status` section (formerly `## Project status`) now says
+  Athenaeum is a side project: development continues at an irregular cadence,
+  releases ship when changes are ready, and issues are triaged best-effort. It
+  is not in maintenance mode and not archived (athenaeum#3184).
 - Docs: the CHANGELOG preamble adds two conventions: a change the summary
   lists as a behaviour change goes at the head of `### Changed` even when it
   also fixes a bug, and a measurement entry is one or two sentences plus a
@@ -178,6 +291,15 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   after the candidates (athenaeum#3135).
 
 ### Added
+
+- A storage location can be marked `sensitive: true` (athenaeum#3161): a vault,
+  where reading a value needs the explicit read flag. The built-in excluded
+  location is sensitive; the wiki location cannot be. A sensitive location
+  whose `corpus_policy` has any capability true is refused with
+  `StorageConfigError`. `storage.is_sensitive(location, config)` is the one
+  predicate. A custom location outside the corpus keeps its read behaviour
+  whether or not it is marked, and `athenaeum doctor` warns for each such
+  location that holds routed fields but is unmarked.
 
 - `athenaeum retire` retires any information by uid, in whichever store holds
   it: a wiki page, a contact record or an off-corpus record (athenaeum#3151).

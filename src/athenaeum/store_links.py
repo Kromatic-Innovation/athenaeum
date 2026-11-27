@@ -40,7 +40,7 @@ from typing import Any
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import load_config
 from athenaeum.models import EntityIndex, PageLocator, parse_frontmatter
-from athenaeum.storage import resolve_locator_surfaces, surface_visibility
+from athenaeum.storage import resolve_locator_surfaces, surface_visibility, vault_page_roots
 from athenaeum.store import append_line_durable, now_iso
 from athenaeum.store_boundary import (
     StoreBoundaryLinkError,
@@ -227,7 +227,18 @@ def guard_entity_store_links(
     )
     if not violations:
         return True
+    _refuse_write(wiki_root, filename, rendered, violations, source)
+    return False
 
+
+def _refuse_write(
+    wiki_root: Path,
+    filename: str,
+    rendered: str,
+    violations: list[LinkViolation],
+    source: str,
+) -> None:
+    """Park *rendered*, ledger the *violations* and log them (the refusal's side effects)."""
     rejected_dir = wiki_root / STORE_LINK_REJECTED_DIR_NAME
     rejected_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_text(rejected_dir / filename, rendered)
@@ -253,7 +264,60 @@ def guard_entity_store_links(
         wiki_root / STORE_LINK_REJECTED_LEDGER_NAME,
         (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"),
     )
-    return False
+
+
+def _vault_link_violations(
+    page_path: Path,
+    meta: Mapping[str, Any],
+    body: str,
+    vault_roots: Mapping[str, Path],
+) -> list[LinkViolation]:
+    """Links from a page outside every vault to a page inside one (athenaeum#3174).
+
+    A vault page is outside every index, so the surface-rank rule never
+    resolves a link to it. The pull request for athenaeum#3174 chose to
+    REFUSE such a link rather than render the uid without a title: even a bare
+    uid tells every reader of the main store that a withheld record exists and
+    which one. A page inside a vault may link anywhere.
+    """
+    resolved = _resolved(page_path)
+    if any(_resolved(root) in resolved.parents for root in vault_roots.values()):
+        return []
+    found: list[LinkViolation] = []
+    refs = extract_link_refs(meta, body)
+    for name, root in vault_roots.items():
+        if not refs or not root.is_dir():
+            continue
+        index = EntityIndex(root)
+        for kind, ref in refs:
+            target = index.get_by_uid(ref)
+            if target is None:
+                entry = index.lookup(ref)
+                target = Path(entry.path) if entry is not None else None
+            if target is None:
+                target = next(
+                    (
+                        p
+                        for p in (root / ref, root / f"{PurePosixPath(ref).stem}.md")
+                        if p.is_file()
+                    ),
+                    None,
+                )
+            if target is None:
+                continue
+            found.append(
+                LinkViolation(
+                    source_uid=str(meta.get("uid") or ""),
+                    source_page=page_path.name,
+                    source_surface="wiki",
+                    target_uid=_page_uid(target),
+                    target_page=target.name,
+                    target_surface=name,
+                    kind=kind,
+                    ref=ref,
+                )
+            )
+    return found
 
 
 def admit_page_write(
@@ -281,6 +345,15 @@ def admit_page_write(
     surfaces = (
         index.locator.surfaces if index is not None and index.locator.surfaces else None
     )
+    vault_roots = vault_page_roots(cfg, knowledge_root)
+    if vault_roots:
+        _vmeta, _vbody = parse_frontmatter(content)
+        vault_violations = _vault_link_violations(
+            page_path, _vmeta if isinstance(_vmeta, dict) else {}, _vbody, vault_roots
+        )
+        if vault_violations:
+            _refuse_write(wiki_root, page_path.name, content, vault_violations, source)
+            return False
     specs = resolve_locator_surfaces(knowledge_root, cfg)
     if not specs:
         return True

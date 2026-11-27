@@ -297,11 +297,18 @@ def cmd_retire(args: argparse.Namespace) -> int:
             print(f"  retired {report.contact_records_retired} contact record(s); committed.")
         if report.off_corpus_erased:
             print(f"  erased {report.off_corpus_erased} off-corpus record(s).")
+        if report.secondary_erased:
+            print(f"  erased {report.secondary_erased} record(s) from later storage target(s).")
         if pages_done or report.contact_records_retired:
             print(f"  Recovery: {_RECOVERY_HINT}")
         if report.errors:
             return 1
-        if not (pages_done or report.contact_records_retired or report.off_corpus_erased):
+        if not (
+            pages_done
+            or report.contact_records_retired
+            or report.off_corpus_erased
+            or report.secondary_erased
+        ):
             print("\n  nothing retired.")
         return 0
     finally:

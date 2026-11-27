@@ -18,7 +18,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
+from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _no_history_declared
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 from athenaeum.runlock import RunLock
 
@@ -79,6 +79,8 @@ def cmd_recover_parked(args: argparse.Namespace) -> int:
     if not (knowledge_root / "wiki").is_dir():
         print(f"Wiki root not found: {knowledge_root / 'wiki'}", file=sys.stderr)
         return 1
+    if args.phase == "restore" and _no_history_declared(knowledge_root, "recover-parked restore"):
+        return 0
     manifest = args.manifest.expanduser()
     state = (args.state or manifest.parent / "recovery-state.json").expanduser()
 

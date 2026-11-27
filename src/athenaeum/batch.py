@@ -90,7 +90,7 @@ from athenaeum.compile_routing import (
 )
 from athenaeum.config import resolve_drop_log, resolve_page_size_threshold_chars
 from athenaeum.intake import tier0_passthrough
-from athenaeum.intake_destination import destination_for_new_entity
+from athenaeum.intake_destination import destination_for_new_entity, vault_page_exists
 from athenaeum.logconf import run_id_var
 from athenaeum.models import (
     SURFACE_SAME_PAGE_MULTI_MERGE,
@@ -126,7 +126,8 @@ from athenaeum.relevance_policy import RelevancePolicy, gate_raw_content, load_r
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
-from athenaeum.storage import refuse_read_only_write
+from athenaeum.sensitivity_routing import screen_raw_for_compile
+from athenaeum.storage import discarded_page_types, note_vault_page, refuse_read_only_write
 from athenaeum.store import ReadOnlySurfaceError
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (
@@ -1367,6 +1368,12 @@ def process_batch_run(
         states.append(st)
         log.info("Processing (batch): %s", raw.ref)
         try:
+            # Issue athenaeum#3168: the same first-read screen process_one runs
+            # (free-text value routing, then dropping fields a `to: []` rule
+            # discards), before any tier reads the raw. A routing error
+            # propagates to the handler below and leaves the raw on disk.
+            screen_raw_for_compile(raw, config=config, knowledge_root=wiki_root.parent)
+
             # Issue athenaeum#2363: the never-ingest class gate, entity tier --
             # mirrors athenaeum.librarian.process_one's own check (the only
             # other entity-tier call site of check_and_refuse) so the batch
@@ -1415,11 +1422,13 @@ def process_batch_run(
             # deleting the raw exactly as for any consumed raw); a MIXED raw
             # continues with only its uncovered items. Drop-ledger rows are
             # written here because this transport has no per-file drop loop.
-            if relevance_policy is not None and relevance_policy.rules:
+            _discarded_types = discarded_page_types(config)
+            if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
                 _rp_gate = gate_raw_content(
                     relevance_policy,
                     raw.content,
                     jsonl=raw.path.suffix.lower() == ".jsonl",
+                    discarded=_discarded_types,
                 )
                 if _rp_gate.drops:
                     _rp_rows = (
@@ -1850,7 +1859,8 @@ def process_batch_run(
         # same batch-wrapped client the name gate above uses.
         _rel_jsonl = st.raw.path.suffix.lower() == ".jsonl"
         _rel_drops: list[Any] = []
-        if relevance_policy is not None and relevance_policy.rules:
+        _discarded_types = discarded_page_types(config)
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             try:
                 _rel_outcome = gate_classified_entities(
                     classified,
@@ -1861,6 +1871,7 @@ def process_batch_run(
                     client=AnthropicBatchClientBackend(client),
                     usage=usage,
                     config=config,
+                    discarded=_discarded_types,
                 )
             except Exception:
                 # A failed reasoning-tier call is a per-file failure (raw kept,
@@ -1903,7 +1914,7 @@ def process_batch_run(
                 )
         # Issue athenaeum#2647: the Tier-3 relevance gate (updates onto a covered
         # page), shared with ``librarian.process_one``.
-        if relevance_policy is not None and relevance_policy.rules:
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             st.actions, _rel_update_drops = gate_update_actions(
                 st.actions,
                 relevance_policy,
@@ -1911,6 +1922,7 @@ def process_batch_run(
                 raw_content=st.raw.content,
                 jsonl=_rel_jsonl,
                 raw_ref=st.raw.ref,
+                discarded=_discarded_types,
             )
             _rel_drops.extend(_rel_update_drops)
         if _rel_drops and resolve_drop_log(config):
@@ -2628,15 +2640,28 @@ def process_batch_run(
             # A class mapped to a READ-ONLY surface (athenaeum#2621) is refused
             # per entity: nothing is written, the raw is retained (see below).
             _create_roots: list[Path | None] = []
+            _create_vaults: list[str | None] = []
             for _e in new_entities:
                 try:
                     _dest = destination_for_new_entity(_e, resolved_config, wiki_root.parent)
                     _create_roots.append(_dest.root)
+                    # athenaeum#3174: a name already held in the vault is an
+                    # update there, not a second page; keep the raw.
+                    if vault_page_exists(_dest, _e.name):
+                        log.warning("  Refused (page already in vault %s)", _dest.vault)
+                        _link_refused = True
+                        _create_roots[-1] = None
+                        _create_vaults.append(None)
+                    else:
+                        _create_vaults.append(_dest.vault)
                 except ReadOnlySurfaceError as _exc:
                     log.warning("  Refused (read-only surface): %s", _exc)
                     _ro_refused += 1
                     _create_roots.append(None)
-            for entity, _create_root in zip(new_entities, _create_roots):
+                    _create_vaults.append(None)
+            for entity, _create_root, _create_vault in zip(
+                new_entities, _create_roots, _create_vaults
+            ):
                 if _create_root is None:
                     continue
                 rendered = entity.render()
@@ -2674,9 +2699,15 @@ def process_batch_run(
                     _link_refused = True
                     continue
                 atomic_write_text(_create_root / entity.filename, rendered)
-                index.register(entity, root=_create_root)
+                if _create_vault is None:
+                    index.register(entity, root=_create_root)
+                else:
+                    note_vault_page(_create_vault)  # never in the main name index
                 written_entities.append(entity)
-                log.info("  Created: %s → %s", entity.name, entity.filename)
+                if _create_vault is None:
+                    log.info("  Created: %s → %s", entity.name, entity.filename)
+                else:  # athenaeum#3174: a vault page's title and file name are not logged
+                    log.info("  Created: 1 page in vault %s", _create_vault)
 
             if escalations:
                 tier4_escalate(
@@ -2898,6 +2929,7 @@ def _states_for_classify_handle(
     config: dict[str, object] | None,
     out: "BatchCollectResult",
     relevance_policy: RelevancePolicy | None = None,
+    knowledge_root: Path | None = None,
 ) -> tuple[list[_FileState], list[str]]:
     """Rebuild the per-file states a collected ``classify`` batch applies to.
 
@@ -2923,11 +2955,17 @@ def _states_for_classify_handle(
             out._count(reason or "raw-missing")
             dropped.append(record.ref)
             continue
-        if relevance_policy is not None and relevance_policy.rules:
+        if knowledge_root is not None:
+            # athenaeum#3168: the raw is re-read from disk, so re-apply the
+            # first-read screen the submitting run applied.
+            screen_raw_for_compile(raw, config=config, knowledge_root=knowledge_root)
+        _discarded_types = discarded_page_types(config)
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             _rp_gate = gate_raw_content(
                 relevance_policy,
                 raw.content,
                 jsonl=raw.path.suffix.lower() == ".jsonl",
+                discarded=_discarded_types,
             )
             if _rp_gate.fully_dropped:
                 _log_discard("relevance-policy", record.ref, handle.batch_id)
@@ -3288,7 +3326,12 @@ def collect_pending_batches(
                 # needs it; an invalid policy raises (fail closed), as at submit.
                 relevance_policy = load_relevance_policy(wiki_root)
             states, dropped = _states_for_classify_handle(
-                handle, index, config=config, out=out, relevance_policy=relevance_policy
+                handle,
+                index,
+                config=config,
+                out=out,
+                relevance_policy=relevance_policy,
+                knowledge_root=wiki_root.parent,
             )
         elif knob == "write":
             states, dropped = _states_for_write_handle(handle, out=out)

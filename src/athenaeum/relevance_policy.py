@@ -427,6 +427,10 @@ def render_policy(policy: RelevancePolicy) -> str:
 #: readers (and tests) can tell a policy drop from any other ``other`` drop.
 DROP_REASON_PREFIX = "relevance-policy"
 
+#: Prefix of the reason for a page type a ``storage.routes`` rule discards
+#: (athenaeum#3168). The reason names the rule and carries no content.
+DROP_REASON_DISCARD = "storage-discard"
+
 _EXCERPT_CHARS = 500
 
 #: Confidence value the classifier (and the reasoning tier) must emit for a
@@ -451,17 +455,24 @@ EXPLICIT_REMEMBER_KEY = "explicit_remember"
 class RelevanceDrop:
     """One item a ``never`` rule covered, and the rule that decided it."""
 
-    rule: RuleLike
+    rule: RuleLike | None
     item_index: int
     excerpt: str
+    #: Set instead of ``rule`` when a ``storage.routes`` rule with ``to: []``
+    #: discards the page type (athenaeum#3168); the excerpt is then empty.
+    discard_rule: str | None = None
 
     @property
     def label(self) -> str:
+        if self.discard_rule is not None:
+            return f"{self.discard_rule} (page type discarded: to is empty)"
+        assert self.rule is not None
         return f"{self.rule.describe()} (rule {self.rule.number}, line {self.rule.line})"
 
     @property
     def reason(self) -> str:
-        return f"{DROP_REASON_PREFIX}: {self.label}"
+        prefix = DROP_REASON_DISCARD if self.discard_rule is not None else DROP_REASON_PREFIX
+        return f"{prefix}: {self.label}"
 
 
 @dataclass(frozen=True)
@@ -608,16 +619,25 @@ def policy_categories(policy: RelevancePolicy | None) -> list[str]:
 
 
 def gate_raw_content(
-    policy: RelevancePolicy | None, content: str, *, jsonl: bool = False
+    policy: RelevancePolicy | None,
+    content: str,
+    *,
+    jsonl: bool = False,
+    discarded: Mapping[str, str] | None = None,
 ) -> RelevanceGateResult:
     """Decide, per item, which declared facts a ``never`` rule covers.
 
     Pure and deterministic: no I/O, no LLM, no clock. ``None`` or an empty
-    policy returns the no-op result immediately, so a deployment with no
-    policy file is byte-identical to before this gate existed.
+    policy, with no *discarded* page types, returns the no-op result
+    immediately, so a deployment with no policy file is byte-identical to
+    before this gate existed. *discarded* maps a page type to the
+    ``storage.routes`` rule (``to: []``) that discards it (athenaeum#3168): an
+    item of that type is dropped with a reason naming the rule.
     """
-    if policy is None or not policy.rules:
+    if (policy is None or not policy.rules) and not discarded:
         return RelevanceGateResult(kept_content=content)
+    if policy is None:
+        policy = RelevancePolicy()
     items = _split_jsonl(content) if jsonl else _split_markdown(content)
     # The explicit-remember marker on the raw note's own (top) frontmatter
     # covers every item in it: ``remember(explicit_request=True)`` stamps only
@@ -637,8 +657,12 @@ def gate_raw_content(
                 explicit=note_explicit or _is_explicit_remember(item.meta),
             ),
             policy,
+            discarded=discarded,
         )
-        if decision.overridden is not None:
+        if decision.discard_rule is not None:
+            # Nothing of the item is kept in the drop: no excerpt.
+            drops.append(RelevanceDrop(None, index, "", discard_rule=decision.discard_rule))
+        elif decision.overridden is not None:
             # explicit human request beats ``never``
             overrides.append(
                 RelevanceDrop(decision.overridden, index, item.text.strip()[:_EXCERPT_CHARS])

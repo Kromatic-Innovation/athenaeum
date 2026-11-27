@@ -78,7 +78,7 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 #: One check's outcome state (issue athenaeum#2298 AC2/AC5).
 Status = Literal["ok", "warn", "fail", "skip"]
@@ -1117,6 +1117,162 @@ def check_removed_config_keys(config: dict) -> CheckResult:
     )
 
 
+def check_unmarked_vault_locations(config: dict) -> CheckResult:
+    """WARN for each outside-the-corpus location that holds routed fields but is unmarked.
+
+    A custom location that ``storage.mapping`` routes a page type to, that has
+    no corpus capability, and that does not carry ``sensitive: true`` keeps
+    today's read behaviour (its values are still withheld unless the read flag
+    is set), but nothing a report or an access check can read says it is a
+    vault (athenaeum#3161). Never "fail": nothing is broken.
+    """
+    from athenaeum.storage import StorageConfigError, available_adapters, routed_storage_mapping
+
+    try:
+        adapters = available_adapters(config)
+        mapping = routed_storage_mapping(config)
+    except StorageConfigError as exc:
+        return CheckResult("unmarked_vault_locations", "skip", f"storage config invalid: {exc}")
+    unmarked = sorted(
+        {
+            name
+            for name in mapping.values()
+            if name in adapters
+            and not adapters[name].corpus_policy.in_corpus
+            and not adapters[name].sensitive
+        }
+    )
+    if not unmarked:
+        return CheckResult(
+            "unmarked_vault_locations", "ok", "no unmarked off-corpus location holds routed fields"
+        )
+    return CheckResult(
+        "unmarked_vault_locations",
+        "warn",
+        "off-corpus location(s) holding routed fields are not marked sensitive: "
+        + ", ".join(unmarked),
+        fix="set sensitive: true on each listed storage.adapters entry in athenaeum.yaml",
+    )
+
+
+def check_storage_history(config: dict, knowledge_root: Path) -> CheckResult:
+    """Report the declared ``storage.history`` and whether a repository backs it (athenaeum#3160).
+
+    ``none``: an operator's choice of plain files, reported as OK with what is
+    lost. ``git`` with no repository: WARN, because destructive operations
+    will be refused there (the restore point they rely on is missing). Read-only.
+    """
+    from athenaeum.config import StorageConfigError, resolve_storage_history
+
+    try:
+        history = resolve_storage_history(config)
+    except StorageConfigError as exc:
+        return CheckResult(
+            "storage_history",
+            "fail",
+            str(exc),
+            fix="set storage.history to 'git' or 'none' in athenaeum.yaml",
+        )
+    from athenaeum.config import HISTORY_VALUES, resolve_storage_adapters
+
+    overrides = [
+        f"{name}={raw['history']}"
+        for name, raw in sorted(resolve_storage_adapters(config).items())
+        if raw.get("history") in HISTORY_VALUES
+    ]
+    suffix = f"; per-location overrides: {', '.join(overrides)}" if overrides else ""
+    if history == "none":
+        return CheckResult(
+            "storage_history",
+            "ok",
+            "history: none (plain files; no restore point, no undo, no "
+            f"history-based commands){suffix}",
+        )
+    if (knowledge_root / ".git").exists():
+        return CheckResult("storage_history", "ok", f"history: git (repository present){suffix}")
+    return CheckResult(
+        "storage_history",
+        "warn",
+        "history: git, but there is no git repository at the knowledge root: "
+        f"destructive operations will be refused{suffix}",
+        fix=f"run `git init` in {knowledge_root}, or set storage.history: none "
+        "in athenaeum.yaml to keep plain files",
+    )
+
+
+def _vault_records(root: Path, scope: str | None) -> dict[str, dict[str, Any]]:
+    """Relative path -> frontmatter for each record under *root* (or its *scope* subdirectory)."""
+    from athenaeum.models import parse_frontmatter
+
+    base = root / scope if scope else root
+    records: dict[str, dict[str, Any]] = {}
+    if not base.is_dir():
+        return records
+    for path in sorted(base.rglob("*.md")):
+        try:
+            meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        records[str(path.relative_to(root))] = meta if isinstance(meta, dict) else {}
+    return records
+
+
+def _held(meta: dict[str, Any], field: str) -> set[str]:
+    raw = meta.get(field)
+    if raw is None:
+        return set()
+    return {str(v).strip() for v in (raw if isinstance(raw, list) else [raw])}
+
+
+def check_multi_target_divergence(config: dict, knowledge_root: Path) -> CheckResult:
+    """FAIL when a later target holds what the primary lacks (athenaeum#3169).
+
+    Reads resolve from the primary, so a record or field value present only on a
+    later target is never served; it is reported here instead. Compared: a record
+    (a file) missing from the primary, and, for a rule that names fields, a value
+    of a named field missing from the primary's copy of the record. Read-only.
+    """
+    from athenaeum.storage import StorageConfigError, configured_routes, target_root
+
+    try:
+        routes = [r for r in configured_routes(config) if len(r.to) > 1]
+    except StorageConfigError as exc:
+        return CheckResult("multi_target_divergence", "skip", f"storage config invalid: {exc}")
+    if not routes:
+        return CheckResult("multi_target_divergence", "ok", "no rule has more than one target")
+    problems: list[str] = []
+    for route in routes:
+        scope = f"sensitivity/{route.sensitivity_class}" if route.sensitivity_class else None
+        primary = _vault_records(target_root(route.to[0], config, knowledge_root), scope)
+        for name in route.to[1:]:
+            later = _vault_records(target_root(name, config, knowledge_root), scope)
+            for rel, meta in later.items():
+                if rel not in primary:
+                    problems.append(
+                        f"{route.rule_name}: record {rel} is on {name!r} but not on the "
+                        f"primary {route.to[0]!r}"
+                    )
+                    continue
+                for field in route.fields or ():
+                    missing = _held(meta, field) - _held(primary[rel], field)
+                    if missing:
+                        problems.append(
+                            f"{route.rule_name}: {len(missing)} value(s) of {field!r} in "
+                            f"{rel} are on {name!r} but not on the primary {route.to[0]!r}"
+                        )
+    if not problems:
+        return CheckResult(
+            "multi_target_divergence", "ok", "every later target holds only what its primary holds"
+        )
+    return CheckResult(
+        "multi_target_divergence",
+        "fail",
+        "; ".join(problems),
+        fix="re-run the write (it is idempotent per target) or repair the primary; reads "
+        "serve the primary only",
+    )
+
+
 def run_checks(
     knowledge_root: Path,
     *,
@@ -1156,6 +1312,9 @@ def run_checks(
         check_page_relations(knowledge_root / "wiki"),
         check_merge_rejected_with_targets(knowledge_root / "wiki"),
         check_removed_config_keys(config),
+        check_unmarked_vault_locations(config),
+        check_storage_history(config, knowledge_root),
+        check_multi_target_divergence(config, knowledge_root),
     ]
 
 

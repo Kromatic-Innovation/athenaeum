@@ -365,7 +365,7 @@ class TestUnclaimedPreserve:
             "storage": {
                 "adapters": {
                     adapter_name: {
-                        "backing_store": "filesystem",
+                        "backing_store": "markdown",
                         "surface_root": str(outside),
                     }
                 }
@@ -681,10 +681,14 @@ class TestFactCarriesSourcePointer:
                             "monotone": True,
                         }
                     },
-                    "sensitive_fields": {"bounced": "pii"},
                 },
             },
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "excluded_fields": {
+                    "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
+                },
+            },
         }
 
         assert _run(tmp_path, config=config)["dispositions"] == {"preserve": 1}
@@ -744,7 +748,7 @@ class TestPreservedLogAdapterRouting:
             "storage": {
                 "adapters": {
                     self.ADAPTER_NAME: {
-                        "backing_store": "filesystem",
+                        "backing_store": "markdown",
                         "surface_root": str(outside_root),
                     }
                 }
@@ -1082,7 +1086,7 @@ class TestPreservedLogAdapterRouting:
                 "adapters": {
                     # Missing the required `surface_root` -- malformed, and
                     # entirely unrelated to this run's dir-routed preserve.
-                    "broken": {"backing_store": "filesystem"}
+                    "broken": {"backing_store": "markdown"}
                 }
             },
         }

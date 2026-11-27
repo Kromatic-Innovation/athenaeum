@@ -39,6 +39,7 @@ from athenaeum.intake_decision import (
     StoreInfo,
     decide,
 )
+from athenaeum.models import EntityIndex
 from athenaeum.relevance_policy import RelevancePolicy
 from athenaeum.storage import (
     DEFAULT_ADAPTER_NAME,
@@ -49,6 +50,7 @@ from athenaeum.storage import (
     page_write_root_for_store,
     resolve_adapter_for_class,
     store_opaque_filenames,
+    vault_route_for_page_type,
 )
 
 if TYPE_CHECKING:
@@ -75,6 +77,10 @@ class Destination:
     fallback: str | None = None
     #: The store opted in to uid-only file names for NEW pages (athenaeum#3077).
     opaque_filenames: bool = False
+    #: The vault name when the page is a whole page of a type a ``storage.routes``
+    #: rule sends to a vault (athenaeum#3174): outside the main index and name
+    #: lookup, so callers scope lookups to it and keep it out of the main index.
+    vault: str | None = None
 
 
 def _store_word(adapter_name: str) -> str:
@@ -123,6 +129,7 @@ def resolve_destination(
             page_write_root_for_store(store, entity_type, config, knowledge_root),
             store,
             opaque_filenames=store_opaque_filenames(store, config),
+            vault=store if vault_route_for_page_type(entity_type, config) == store else None,
         )
     except (ReadOnlySurfaceError, SurfaceNotIndexedError, StorageConfigError) as exc:
         if store == PERSONAL or decision.reason == REASON_MAPPING:
@@ -176,3 +183,15 @@ def destination_for_new_entity(
     )
     entity.opaque_filename = dest.opaque_filenames
     return dest
+
+
+def vault_page_exists(dest: Destination, name: str) -> bool:
+    """Whether *dest*'s vault already holds a page named (or aliased) *name*.
+
+    The lookup for an update to a vault page runs inside the vault only
+    (athenaeum#3174): the index is built over the vault's own root, so a name
+    that matches a page in the main store or in another vault is not a match,
+    and a vault page's name never matches a lookup in the main store. ``False``
+    for a destination that is not a vault.
+    """
+    return dest.vault is not None and EntityIndex(dest.root).lookup(name) is not None

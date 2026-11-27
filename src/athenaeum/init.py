@@ -156,7 +156,7 @@ def _rollback(root: Path, created: list[Path]) -> None:
             pass
 
 
-def init_knowledge_dir(path: Path) -> Path:
+def init_knowledge_dir(path: Path, *, history: str = "git") -> Path:
     """Create and initialize a knowledge directory at *path*.
 
     The function is **idempotent**: calling it twice on the same directory
@@ -168,19 +168,23 @@ def init_knowledge_dir(path: Path) -> Path:
     removed (a pre-existing directory's content is never touched), so a retry
     starts clean.
 
+    ``history="none"`` (``athenaeum init --no-history``, athenaeum#3160) writes
+    ``storage.history: none`` into the new configuration and creates no
+    repository: no git command runs at all.
+
     Returns the resolved *path* for convenience.
     """
     path = path.expanduser().resolve()
     created: list[Path] = []
     try:
-        _scaffold(path, created)
+        _scaffold(path, created, history=history)
     except BaseException:
         _rollback(path, created)
         raise
     return path
 
 
-def _scaffold(path: Path, created: list[Path]) -> None:
+def _scaffold(path: Path, created: list[Path], *, history: str = "git") -> None:
     """Do the init work, appending every path this call creates to *created*."""
     # 1. Create directory tree (record each missing ancestor we create)
     for subdir in _SUBDIRS:
@@ -214,12 +218,12 @@ def _scaffold(path: Path, created: list[Path]) -> None:
     from athenaeum.config import write_default_config
 
     before = {p for p in path.iterdir()}
-    write_default_config(path)
+    write_default_config(path, history=history)
     created.extend(p for p in path.iterdir() if p not in before)
 
-    # 5. Initialize git repo and create initial commit
+    # 5. Initialize git repo and create initial commit (skipped under history=none)
     git_dir = path / ".git"
-    if not git_dir.exists():
+    if history == "git" and not git_dir.exists():
         created.append(git_dir)
         _git(["git", "init"], path)
         _git(["git", "add", "."], path)

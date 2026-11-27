@@ -59,21 +59,29 @@ corpus policy for a specific entity beyond what ``storage.mapping`` says.
 
 from __future__ import annotations
 
+import importlib
 import os
+import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import (
+from athenaeum.config import (  # StorageConfigError is defined in config, re-exported here
+    HISTORY_VALUES,
+    StorageConfigError,
     load_config,
+    resolve_excluded_fields_config,
+    resolve_excluded_read_mapping,
     resolve_extra_intake_roots,
     resolve_owner_asserter,
     resolve_storage_adapters,
+    resolve_storage_history,
     resolve_storage_mapping,
+    resolve_storage_routes,
 )
 from athenaeum.store import FilesystemStore, ReadOnlySurfaceError, Store
 
@@ -82,17 +90,6 @@ from athenaeum.store import FilesystemStore, ReadOnlySurfaceError, Store
 # this module importing athenaeum.store here carries no cycle —
 # tests/test_import_graph_acyclic.py's zero-tolerance SCC guard (baseline
 # pinned to `[]` since issue athenaeum#640) would fail loudly if it did.
-
-
-class StorageConfigError(ValueError):
-    """Raised when the storage layer is misconfigured.
-
-    Loud by design (mirrors :class:`athenaeum.provider.ProviderConfigError`):
-    a mapping that names an adapter that does not exist, or a custom adapter
-    definition with a malformed policy, must never silently fall back to the
-    default surface — that would route a class the operator meant to *exclude*
-    straight into the recalled corpus.
-    """
 
 
 @dataclass(frozen=True)
@@ -177,6 +174,18 @@ class StorageAdapter:
     #: records it holds (athenaeum#3077). Pages already on disk keep their names.
     #: Default ``False`` (today's names).
     opaque_filenames: bool = False
+    #: ``sensitive: true`` in config marks the location a vault: a read of a
+    #: value held here returns a redaction marker unless the caller sets the
+    #: read flag (athenaeum#3161). It is a separate place with a read gate, NOT
+    #: encryption. A sensitive location is never in the main index, so every
+    #: ``corpus_policy`` capability must be false. Default ``False``; the
+    #: built-in :data:`EXCLUDED` location is sensitive.
+    sensitive: bool = False
+    #: ``history: git | none`` in config overrides ``storage.history`` for this
+    #: one location (athenaeum#3160), so a location that is its own git
+    #: repository keeps its own history while the rest of the installation has
+    #: none, or the reverse. ``None`` (default) = follow the installation.
+    history: str | None = None
 
     def resolve_root(self, knowledge_root: Path) -> Path:
         """Absolute on-disk root for this surface under *knowledge_root*."""
@@ -210,6 +219,7 @@ EXCLUDED = StorageAdapter(
     backing_store="markdown",
     surface_root="excluded",
     corpus_policy=CorpusPolicy.none(),
+    sensitive=True,
 )
 
 _BUILTIN_ADAPTERS: dict[str, StorageAdapter] = {
@@ -221,6 +231,16 @@ _BUILTIN_ADAPTERS: dict[str, StorageAdapter] = {
 #: from builtins so :func:`register_adapter` can never clobber the default
 #: surface, and from config-defined adapters so precedence stays legible.
 _REGISTERED_ADAPTERS: dict[str, StorageAdapter] = {}
+
+
+def _require_vault_not_in_corpus(adapter: StorageAdapter) -> None:
+    """Refuse a sensitive location with any corpus capability: a vault is never indexed."""
+    if adapter.sensitive and adapter.corpus_policy.in_corpus:
+        raise StorageConfigError(
+            f"storage.adapters.{adapter.name} is sensitive but its corpus_policy "
+            "has a capability set to true; a sensitive location is never in the "
+            "main index -- set embedded, recallable and merge_eligible to false"
+        )
 
 
 def register_adapter(adapter: StorageAdapter, *, replace: bool = False) -> None:
@@ -236,6 +256,7 @@ def register_adapter(adapter: StorageAdapter, *, replace: bool = False) -> None:
     two consumers silently colliding on a name is a loud error, not a
     last-write-wins surprise.
     """
+    _require_vault_not_in_corpus(adapter)
     if adapter.name in _BUILTIN_ADAPTERS:
         raise StorageConfigError(
             f"cannot register adapter {adapter.name!r}: it shadows a built-in adapter"
@@ -296,6 +317,93 @@ def _visibility_from_config(name: str, raw: Any) -> int:
     return raw
 
 
+# ---------------------------------------------------------------------------
+# Store implementation registry (athenaeum#3165)
+# ---------------------------------------------------------------------------
+
+#: The ``backing_store`` names that resolve to the filesystem implementation.
+#: They cannot be shadowed by :func:`register_store_backend`.
+BUILTIN_BACKING_STORES: tuple[str, ...] = ("markdown", "wiki-markdown")
+
+
+@dataclass(frozen=True)
+class StoreBuildSpec:
+    """Everything :func:`open_store` hands a registered store factory.
+
+    One spec describes ONE store instance that addresses every location this
+    configuration makes available. *roots* maps surface name to resolved root
+    directory; implementations with no filesystem backing may ignore it.
+    """
+
+    config: dict[str, Any] | None
+    knowledge_root: Path
+    roots: Mapping[str, Path]
+    non_purgeable_surfaces: frozenset[str]
+    read_only_surfaces: frozenset[str]
+    history: str
+    surface_history: Mapping[str, str]
+    write_gate: Callable[[str], str | None]
+
+
+StoreFactory = Callable[[StoreBuildSpec], Store]
+
+#: Code-registered implementations, keyed by ``backing_store`` name. The
+#: built-in filesystem names are deliberately absent: they are handled inside
+#: :func:`open_store`, the one place ``FilesystemStore`` is constructed.
+_STORE_BACKENDS: dict[str, StoreFactory] = {}
+
+
+def register_store_backend(name: str, factory: StoreFactory) -> None:
+    """Register a store implementation under the ``backing_store`` value *name*.
+
+    *factory* receives a :class:`StoreBuildSpec` and returns a
+    :class:`~athenaeum.store.Store`. Adapters whose ``backing_store`` is *name*
+    then share the one instance :func:`open_store` builds through it. The
+    built-in names (``markdown``, ``wiki-markdown``) cannot be shadowed, and a
+    name already registered raises rather than being silently replaced.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise StorageConfigError("store backend name must be a non-empty string")
+    name = name.strip()
+    if name in BUILTIN_BACKING_STORES:
+        raise StorageConfigError(
+            f"cannot register store backend {name!r}: it shadows a built-in "
+            "filesystem implementation"
+        )
+    if name in _STORE_BACKENDS:
+        raise StorageConfigError(f"store backend {name!r} is already registered")
+    _STORE_BACKENDS[name] = factory
+
+
+def unregister_store_backend(name: str) -> None:
+    """Remove a registration made by :func:`register_store_backend` (no-op if absent)."""
+    _STORE_BACKENDS.pop(name, None)
+
+
+def known_backing_stores() -> tuple[str, ...]:
+    """Every ``backing_store`` value that currently resolves, built-ins first."""
+    return BUILTIN_BACKING_STORES + tuple(sorted(_STORE_BACKENDS))
+
+
+def _validate_backing_store(value: str, key: str) -> str:
+    """*value* (stripped) when it names a known implementation, else a loud error."""
+    value = value.strip()
+    if value not in BUILTIN_BACKING_STORES and value not in _STORE_BACKENDS:
+        known = ", ".join(repr(n) for n in known_backing_stores())
+        raise StorageConfigError(
+            f"{key} is {value!r}, which is not a known store implementation. "
+            f"Known values: {known}. Write 'markdown' for files on a filesystem."
+        )
+    return value
+
+
+def _validate_history(raw: Any, key: str) -> str:
+    """*raw* when it is a valid history value (``git`` / ``none``), else a loud error."""
+    if not isinstance(raw, str) or raw.strip() not in HISTORY_VALUES:
+        raise StorageConfigError(f"{key} must be 'git' or 'none', got {raw!r}")
+    return raw.strip()
+
+
 def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
     """Build a :class:`StorageAdapter` from one ``storage.adapters`` entry."""
     if not isinstance(raw, dict):
@@ -308,6 +416,9 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         raise StorageConfigError(
             f"storage.adapters.{name}.backing_store must be a non-empty string"
         )
+    backing_store = _validate_backing_store(
+        backing_store, f"storage.adapters.{name}.backing_store"
+    )
     if not isinstance(surface_root, str) or not surface_root.strip():
         raise StorageConfigError(
             f"storage.adapters.{name}.surface_root must be a non-empty string"
@@ -335,10 +446,21 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
             f"storage.adapters.{name}.opaque_filenames must be a boolean (true/false), "
             f"got {opaque_filenames!r}"
         )
-    return StorageAdapter(
+    sensitive = raw.get("sensitive", False)
+    if not isinstance(sensitive, bool):
+        raise StorageConfigError(
+            f"storage.adapters.{name}.sensitive must be a boolean (true/false), "
+            f"got {sensitive!r}"
+        )
+    history = raw.get("history")
+    if history is not None:
+        history = _validate_history(history, f"storage.adapters.{name}.history")
+    adapter = StorageAdapter(
         name=name,
         read_only=read_only,
+        history=history,
         opaque_filenames=opaque_filenames,
+        sensitive=sensitive,
         sync_mode=sync_mode,
         store_id=store_id.strip() if store_id else None,
         backing_store=backing_store.strip(),
@@ -347,6 +469,8 @@ def _adapter_from_config(name: str, raw: Any) -> StorageAdapter:
         purgeable=_coerce_bool(raw.get("purgeable"), default=True),
         visibility=_visibility_from_config(name, raw.get("visibility")),
     )
+    _require_vault_not_in_corpus(adapter)
+    return adapter
 
 
 def available_adapters(config: dict[str, Any] | None) -> dict[str, StorageAdapter]:
@@ -385,7 +509,7 @@ def resolve_adapter_for_class(
     an excluded class into the corpus).
     """
     cls = (entity_class or "").strip()
-    mapping = resolve_storage_mapping(config)
+    mapping = _full_storage_mapping(config)
     adapter_name = mapping.get(cls, DEFAULT_ADAPTER_NAME) if cls else DEFAULT_ADAPTER_NAME
     adapters = available_adapters(config)
     adapter = adapters.get(adapter_name)
@@ -432,7 +556,11 @@ def storage_policy_configured(config: dict[str, Any] | None) -> bool:
     """
     if not config:
         return False
-    return bool(resolve_storage_mapping(config) or resolve_storage_adapters(config))
+    return bool(
+        resolve_storage_mapping(config)
+        or resolve_storage_adapters(config)
+        or resolve_storage_routes(config)
+    )
 
 
 def corpus_policy_for_class(
@@ -502,6 +630,691 @@ def is_excluded(entity_class: str | None, config: dict[str, Any] | None) -> bool
     return not corpus_policy_for_class(entity_class, config).in_corpus
 
 
+def is_sensitive(location: str, config: dict[str, Any] | None) -> bool:
+    """Whether the storage *location* (adapter name) is marked sensitive.
+
+    THE one predicate for "is this location a vault" (athenaeum#3161);
+    :attr:`RouteDecision.sensitive` is computed from it.
+
+    Raises:
+        StorageConfigError: *location* is not a known adapter.
+    """
+    adapters = available_adapters(config)
+    if location not in adapters:
+        raise StorageConfigError(
+            f"unknown storage location {location!r}; known locations: {sorted(adapters)}"
+        )
+    return adapters[location].sensitive
+
+
+# ---------------------------------------------------------------------------
+# The one resolver for "where is this field / page type stored" (athenaeum#3158)
+# ---------------------------------------------------------------------------
+#
+# Four configuration tables answer that question: ``storage.excluded_fields``
+# with ``storage.excluded_read_mapping`` (which fields of a record are kept off
+# the page), ``storage.mapping`` (which class lives outside the corpus),
+# and the free-text value-routing class rule in ``sensitivity_routing``
+# (athenaeum#3162 removed the fourth, the corrections-only
+# ``librarian.corrections.sensitive_fields`` table; corrections route through
+# ``route_for(page_type, field)`` like every other writer). This section is the
+# ONLY module that calls the config resolvers ``resolve_excluded_fields_config``
+# and ``resolve_excluded_read_mapping``;
+# ``tests/test_route_for.py`` fails the build if another module does.
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    """Where a field or a whole page type is stored, as :func:`route_for` decides it.
+
+    Attributes:
+        targets: Ordered location (adapter) names the value is stored in. Empty
+            when a single field is kept on the page, or when a rule discards it
+            (see :attr:`discarded`).
+        rule: The configuration entry that decided (for example
+            ``"storage.mapping.pii"``; ``"storage.routes[2]"`` for a rule with
+            ``to: []``), or ``None`` when no entry did and a default applied.
+        sensitive: True when a target is a sensitive location
+            (:func:`is_sensitive`) -- a vault with a read gate. A location that
+            is merely outside the corpus (an archive) is not sensitive.
+    """
+
+    targets: tuple[str, ...]
+    rule: str | None
+    sensitive: bool
+
+    @property
+    def discarded(self) -> bool:
+        """True when a rule with ``to: []`` decided: the value is stored nowhere.
+
+        Distinct from "kept on the page", which is ``targets == ()`` with
+        ``rule is None`` (no rule matched). A discard names its rule.
+        """
+        return not self.targets and self.rule is not None
+
+
+def configured_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
+    """The operator's ``storage.excluded_read_mapping`` -- the resolver's input.
+
+    A pass-through so :func:`athenaeum.pii.surface_class_for_page_class` reads
+    the table through this module rather than from ``config`` directly.
+    """
+    return {**resolve_excluded_read_mapping(config), **_route_tables(config)[2]}
+
+
+def configured_excluded_fields(config: dict[str, Any] | None) -> dict[str, tuple[str, ...]]:
+    """The operator's ``storage.excluded_fields`` -- the resolver's input.
+
+    A pass-through so :func:`athenaeum.pii.resolve_excluded_fields` reads the
+    table through this module rather than from ``config`` directly.
+    """
+    return {**resolve_excluded_fields_config(config), **_route_tables(config)[1]}
+
+
+# ---------------------------------------------------------------------------
+# storage.routes -- one rule per "this goes there" (athenaeum#3166)
+# ---------------------------------------------------------------------------
+#
+# A rule names a page type (optionally a list of its fields) or a sensitivity
+# class, and one target location. ``storage.mapping`` stays as the short form of
+# a whole-page-type rule. The rules are folded into the same tables the older
+# keys fill (the page-type mapping, ``storage.excluded_fields`` and
+# ``storage.excluded_read_mapping``) so a configuration written with routes and
+# its equivalent written with the old keys take the same read and write paths.
+
+#: Prefix of the surface class a page type's field rules are folded into. A
+#: surface class is the name the older tables key a record collection by; a
+#: field rule has no such name, so it gets a derived one that no page type or
+#: operator-chosen class can collide with in practice.
+_ROUTE_SURFACE_PREFIX = "routes."
+
+
+@dataclass(frozen=True)
+class StorageRoute:
+    """One validated ``storage.routes`` rule.
+
+    Exactly one of ``page_type`` / ``sensitivity_class`` is set. ``fields`` is
+    ``None`` for a whole-page-type rule. ``to`` holds the target location, or
+    nothing for a rule that discards (``to: []``, athenaeum#3168). Several names
+    (athenaeum#3169) are vaults the value is written to in order; the first is the
+    primary. ``index`` is the rule's position in ``storage.routes``.
+    """
+
+    to: tuple[str, ...]
+    page_type: str | None = None
+    sensitivity_class: str | None = None
+    fields: tuple[str, ...] | None = None
+    index: int = 0
+
+    @property
+    def discard(self) -> bool:
+        return not self.to
+
+    @property
+    def rule_name(self) -> str:
+        """The name a discard decision and its counter carry."""
+        return f"storage.routes[{self.index}]"
+
+
+def _route_error(index: int, message: str) -> StorageConfigError:
+    return StorageConfigError(f"storage.routes[{index}] {message}")
+
+
+def _parse_route(index: int, raw: Any) -> StorageRoute:
+    if not isinstance(raw, dict):
+        raise _route_error(index, f"must be a mapping, got {type(raw).__name__}")
+    known = ("page_type", "sensitivity_class", "fields", "to")
+    unknown = sorted(str(k) for k in raw if k not in known)
+    if unknown:
+        raise _route_error(
+            index,
+            f"has unknown key(s) {unknown}; a rule takes page_type (or "
+            "sensitivity_class), fields and to",
+        )
+    page_type = raw.get("page_type")
+    sens_class = raw.get("sensitivity_class")
+    if (page_type is None) == (sens_class is None):
+        raise _route_error(index, "must name exactly one of page_type or sensitivity_class")
+    key_name = "page_type" if page_type is not None else "sensitivity_class"
+    key_value = page_type if page_type is not None else sens_class
+    if not isinstance(key_value, str) or not key_value.strip():
+        raise _route_error(index, f"{key_name} must be a non-empty string, got {key_value!r}")
+    to = raw.get("to")
+    if not isinstance(to, list) or not all(isinstance(t, str) and t.strip() for t in to):
+        raise _route_error(index, f"to must be a list of location names, got {to!r}")
+    # The one place the number of targets is read. An empty list discards; two
+    # or more name several vaults (athenaeum#3169), checked in configured_routes
+    # where the adapters are known.
+    fields: tuple[str, ...] | None = None
+    if "fields" in raw:
+        if sens_class is not None:
+            raise _route_error(index, "a sensitivity_class rule takes no fields")
+        raw_fields = raw["fields"]
+        if (
+            not isinstance(raw_fields, list)
+            or not raw_fields
+            or not all(isinstance(f, str) and f.strip() for f in raw_fields)
+        ):
+            raise _route_error(
+                index, f"fields must be a non-empty list of names, got {raw_fields!r}"
+            )
+        fields = tuple(f.strip() for f in raw_fields)
+    return StorageRoute(
+        to=tuple(t.strip() for t in to),
+        page_type=key_value.strip() if page_type is not None else None,
+        sensitivity_class=key_value.strip() if sens_class is not None else None,
+        fields=fields,
+        index=index,
+    )
+
+
+def _check_multi_target(route: StorageRoute, adapters: Mapping[str, StorageAdapter]) -> None:
+    """Refuse a ``to`` list of several names unless every one is a vault (athenaeum#3169).
+
+    A vault here is :func:`is_sensitive`'s notion: ``sensitive: true``, which
+    already requires every corpus capability off. A location in the index is
+    refused by name: two writable indexed copies of a page have no rule for which
+    one wins. A ``read_only`` target can never accept the write.
+    """
+    subject = route.page_type or route.sensitivity_class
+    if len(set(route.to)) != len(route.to):
+        raise StorageConfigError(
+            f"storage.routes rule for {subject!r} names a location more than once in `to`: "
+            f"{list(route.to)}"
+        )
+    for name in route.to:
+        adapter = adapters[name]
+        if adapter.corpus_policy.in_corpus:
+            raise StorageConfigError(
+                f"storage.routes rule for {subject!r} lists location {name!r}, which is in "
+                "the index, among several targets; a list of several targets takes vaults "
+                "only (two writable indexed copies of a page have no rule for which one wins)"
+            )
+        if not adapter.sensitive:
+            raise StorageConfigError(
+                f"storage.routes rule for {subject!r} lists location {name!r}, which is not "
+                "a vault (sensitive: true), among several targets; every target of a list "
+                "of several must be a vault"
+            )
+        if adapter.read_only:
+            raise StorageConfigError(
+                f"storage.routes rule for {subject!r} lists location {name!r}, which is "
+                "read_only, as a target; a read-only location can never accept the write"
+            )
+
+
+def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]:
+    """The validated ``storage.routes`` rules (athenaeum#3166); empty when unset.
+
+    A rule with ``to: []`` discards: what it names is stored nowhere
+    (athenaeum#3168). Raises :class:`StorageConfigError` for: a malformed rule; a
+    ``to`` list of several names unless every one is a vault (``sensitive: true``,
+    outside the corpus, not ``read_only``, no name repeated; athenaeum#3169); two rules
+    naming the same page type and field, the same whole page type, or the same sensitivity
+    class (there is no ordering between rules); a page type named both in ``storage.routes`` and in
+    ``storage.mapping``; a field rule on a page type that also has a
+    ``storage.excluded_read_mapping`` or ``storage.excluded_fields`` entry; a
+    ``to`` that is not a known location; a field rule whose target is not
+    ``sensitive`` (:func:`is_sensitive`); and field rules of one page type that
+    name different locations.
+    """
+    raw = resolve_storage_routes(config)
+    if not raw:
+        return ()
+    if not isinstance(raw, list):
+        raise StorageConfigError(
+            f"storage.routes must be a list of rules, got {type(raw).__name__}"
+        )
+    routes = tuple(_parse_route(i, item) for i, item in enumerate(raw))
+
+    seen: set[tuple[str, str, str | None]] = set()
+    for route in routes:
+        kind = "page_type" if route.page_type is not None else "sensitivity_class"
+        subject = route.page_type if route.page_type is not None else route.sensitivity_class
+        assert subject is not None
+        for name in route.fields if route.fields is not None else (None,):
+            key = (kind, subject, name)
+            if key in seen:
+                where = f"{kind} {subject!r}" + (f" field {name!r}" if name else "")
+                raise StorageConfigError(
+                    f"storage.routes names {where} more than once; there is no ordering "
+                    "between rules, so each page type (and field) takes one rule"
+                )
+            seen.add(key)
+
+    mapping = resolve_storage_mapping(config)
+    read_mapping = resolve_excluded_read_mapping(config)
+    excluded_fields = resolve_excluded_fields_config(config)
+    field_target: dict[str, tuple[str, ...]] = {}
+    adapters = available_adapters(config)
+    for route in routes:
+        for target in route.to:
+            if target not in adapters:
+                raise StorageConfigError(
+                    f"storage.routes routes {route.page_type or route.sensitivity_class!r} to "
+                    f"unknown location {target!r}; known locations: {sorted(adapters)}"
+                )
+        if len(route.to) > 1:
+            _check_multi_target(route, adapters)
+        if route.page_type is None:
+            continue
+        if route.page_type in mapping:
+            raise StorageConfigError(
+                f"page type {route.page_type!r} is named in both storage.routes and "
+                "storage.mapping; keep one"
+            )
+        if route.fields is None or route.discard:
+            continue
+        for target in route.to:
+            if not adapters[target].sensitive:
+                raise StorageConfigError(
+                    f"storage.routes sends fields of {route.page_type!r} to location "
+                    f"{target!r}, which is not marked sensitive: true; a field rule "
+                    "needs a sensitive target"
+                )
+        if field_target.setdefault(route.page_type, route.to) != route.to:
+            raise StorageConfigError(
+                f"storage.routes sends fields of {route.page_type!r} to more than one "
+                "location; a page type's field rules share one target"
+            )
+        old_surface = _pii_policy().surface_class_for_page_class(route.page_type, None)
+        if route.page_type in read_mapping or route.page_type in excluded_fields:
+            clash = "storage.excluded_read_mapping" if route.page_type in read_mapping else (
+                "storage.excluded_fields"
+            )
+            raise StorageConfigError(
+                f"page type {route.page_type!r} is named in both storage.routes and "
+                f"{clash}; keep one"
+            )
+        if old_surface in excluded_fields:
+            raise StorageConfigError(
+                f"page type {route.page_type!r} has field rules in storage.routes and its "
+                f"surface class {old_surface!r} is listed in storage.excluded_fields; keep one"
+            )
+    return routes
+
+
+def _route_surface_class(page_type: str) -> str:
+    return f"{_ROUTE_SURFACE_PREFIX}{page_type}"
+
+
+def _route_tables(
+    config: dict[str, Any] | None,
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]], dict[str, str]]:
+    """What the routes add to (mapping, excluded fields, excluded read mapping)."""
+    mapping: dict[str, str] = {}
+    fields: dict[str, tuple[str, ...]] = {}
+    read_mapping: dict[str, str] = {}
+    for route in configured_routes(config):
+        if route.page_type is None or route.discard:
+            continue
+        if route.fields is None:
+            mapping[route.page_type] = route.to[0]
+            continue
+        surface = _route_surface_class(route.page_type)
+        mapping[surface] = route.to[0]
+        fields[surface] = fields.get(surface, ()) + route.fields
+        read_mapping[route.page_type] = surface
+    return mapping, fields, read_mapping
+
+
+def _full_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
+    """``storage.mapping`` plus what the routes fold in (derived surface classes included)."""
+    return {**resolve_storage_mapping(config), **_route_tables(config)[0]}
+
+
+def routed_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
+    """Class -> location for every page type and sensitivity class that is routed whole.
+
+    ``storage.mapping`` entries plus the ``storage.routes`` rules without
+    ``fields`` and the ``sensitivity_class`` rules (a rule with ``to: []``
+    names no location and is left out). For the readers that report
+    on where a class goes (doctor, the sensitivity lint, ``storage move-type``);
+    the routing itself goes through :func:`route_for`.
+    """
+    merged = dict(resolve_storage_mapping(config))
+    for route in configured_routes(config):
+        if route.fields is None and not route.discard:
+            name = route.page_type if route.page_type is not None else route.sensitivity_class
+            assert name is not None
+            merged[name] = route.to[0]
+    return merged
+
+
+def route_for_sensitivity_class(
+    sensitivity_class: str, config: dict[str, Any] | None
+) -> RouteDecision | None:
+    """The ``storage.routes`` rule for a sensitivity class, or ``None`` when none names it.
+
+    ``None`` means "no rule": the caller keeps its own fallback, so a class with
+    no rule behaves as it did before ``storage.routes`` existed.
+    """
+    for route in configured_routes(config):
+        if route.sensitivity_class == sensitivity_class:
+            if route.discard:
+                return RouteDecision((), route.rule_name, False)
+            return _decision_for_adapter_names(
+                route.to, f"storage.routes.sensitivity_class.{sensitivity_class}", config
+            )
+    return None
+
+
+def _discard_rules(
+    config: dict[str, Any] | None,
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """``(page types discarded whole, page type -> {field -> rule})`` from ``to: []`` rules."""
+    whole: dict[str, str] = {}
+    fields: dict[str, dict[str, str]] = {}
+    for route in configured_routes(config):
+        if not route.discard or route.page_type is None:
+            continue
+        if route.fields is None:
+            whole[route.page_type] = route.rule_name
+        else:
+            for name in route.fields:
+                fields.setdefault(route.page_type, {})[name] = route.rule_name
+    return whole, fields
+
+
+def discard_rule_for_field_any_type(field: Any, config: dict[str, Any] | None) -> str | None:
+    """The first ``to: []`` rule that names *field* on any page type, else ``None``.
+
+    For a writer that has not yet resolved which page type a value belongs to
+    and must not let a value some rule discards reach a ledger or a handoff note
+    in the meantime. Not a routing answer: :func:`route_for` is.
+    """
+    if not isinstance(field, str):
+        return None
+    try:
+        discarded_fields = _discard_rules(config)[1]
+    except StorageConfigError:
+        # A bad table is reported where the write asks route_for; this probe
+        # must not raise from a writer that promises not to.
+        return None
+    for fields in discarded_fields.values():
+        if field in fields:
+            return fields[field]
+    return None
+
+
+def discarded_page_types(config: dict[str, Any] | None) -> dict[str, str]:
+    """Page type -> rule name for every page type a ``to: []`` rule discards whole.
+
+    The capture gates feed this to the intake decision (athenaeum#3168): a page
+    type listed here is not captured.
+    """
+    return dict(_discard_rules(config)[0])
+
+
+# Per-rule count of values discarded this run (athenaeum#3168). Rule names only:
+# never a value, and never anything computed from one.
+_DISCARD_COUNTS: dict[str, int] = {}
+_DISCARD_LOCK = threading.Lock()
+
+
+def note_discard(rule: str | None) -> None:
+    """Count one discarded value against *rule* (a rule name, never a value)."""
+    if not rule:
+        return
+    with _DISCARD_LOCK:
+        _DISCARD_COUNTS[rule] = _DISCARD_COUNTS.get(rule, 0) + 1
+
+
+def discard_counts() -> dict[str, int]:
+    """A snapshot of the per-rule discard counters, for the run summary."""
+    with _DISCARD_LOCK:
+        return dict(sorted(_DISCARD_COUNTS.items()))
+
+
+def reset_discard_counts() -> None:
+    """Zero the counters (the start of a run)."""
+    with _DISCARD_LOCK:
+        _DISCARD_COUNTS.clear()
+
+
+
+# ---------------------------------------------------------------------------
+# Several targets (athenaeum#3169)
+# ---------------------------------------------------------------------------
+#
+# A rule whose ``to`` names several vaults has them written in the same call, in
+# order; the first is the primary and is the only one read. No replication
+# service: the loop lives at the one place each writer asks the resolver.
+
+
+class StorageTargetError(RuntimeError):
+    """A write, removal or erasure on one target of a multi-target rule failed.
+
+    Names the target and the failure class, never a value. Targets earlier in the
+    list may already hold the change; every operation is idempotent per target,
+    so re-running completes the rest.
+    """
+
+    def __init__(self, target: str, cause: BaseException | str, *, action: str = "write") -> None:
+        self.target = target
+        detail = cause if isinstance(cause, str) else type(cause).__name__
+        super().__init__(
+            f"{action} on storage target {target!r} failed ({detail}); targets before it "
+            "may already hold the change, re-run to complete the rest"
+        )
+
+
+def apply_to_targets(
+    targets: Sequence[str], apply_one: Callable[[str], None], *, action: str = "write"
+) -> None:
+    """Call *apply_one* for each target in order; the first failure raises, naming it.
+
+    Success means every target accepted the change. Nothing is logged and skipped.
+    """
+    for name in targets:
+        try:
+            apply_one(name)
+        except StorageTargetError:
+            raise
+        except Exception as exc:
+            raise StorageTargetError(name, exc, action=action) from exc
+
+
+def target_root(name: str, config: dict[str, Any] | None, knowledge_root: Path) -> Path:
+    """Absolute on-disk root of the location called *name*."""
+    adapters = available_adapters(config)
+    if name not in adapters:
+        raise StorageConfigError(
+            f"unknown storage location {name!r}; known locations: {sorted(adapters)}"
+        )
+    return adapters[name].resolve_root(knowledge_root)
+
+
+def inside_git_repository(path: Path) -> bool:
+    """Whether *path* (which need not exist yet) is inside a git working tree."""
+    for candidate in (path.resolve(), *path.resolve().parents):
+        if (candidate / ".git").exists():
+            return True
+    return False
+
+
+def route_target_summary(
+    config: dict[str, Any] | None, knowledge_root: Path
+) -> list[dict[str, Any]]:
+    """One row per ``storage.routes`` rule: its targets and which sit inside git.
+
+    ``in_git`` names the targets inside a git repository, where an erasure does
+    not reach history (athenaeum#3169). Read-only; no value is read.
+    """
+    rows: list[dict[str, Any]] = []
+    for route in configured_routes(config):
+        rows.append(
+            {
+                "rule": route.rule_name,
+                "subject": route.page_type or route.sensitivity_class,
+                "targets": list(route.to),
+                "target_count": len(route.to),
+                "in_git": [
+                    name
+                    for name in route.to
+                    if inside_git_repository(target_root(name, config, knowledge_root))
+                ],
+            }
+        )
+    return rows
+
+
+def _decision_for_adapter_names(
+    names: Sequence[str], rule: str | None, config: dict[str, Any] | None
+) -> RouteDecision:
+    adapters = available_adapters(config)
+    for name in names:
+        if name not in adapters:
+            raise StorageConfigError(
+                f"unknown storage location {name!r}; known locations: {sorted(adapters)}"
+            )
+    return RouteDecision(
+        targets=tuple(names),
+        rule=rule,
+        sensitive=any(is_sensitive(name, config) for name in names),
+    )
+
+
+def _decision_for_class(
+    entity_class: str, rule: str | None, config: dict[str, Any] | None
+) -> RouteDecision:
+    adapter = resolve_adapter_for_class(entity_class, config)
+    # A rule with several vault targets answers with all of them, in order
+    # (athenaeum#3169); every other class has the one location it resolved to.
+    return _decision_for_adapter_names(
+        _multi_targets(entity_class, config) or (adapter.name,), rule, config
+    )
+
+
+def _multi_targets(entity_class: str, config: dict[str, Any] | None) -> tuple[str, ...]:
+    """The ordered targets of a ``storage.routes`` rule with several, else ``()``.
+
+    *entity_class* is a page type (a whole-type rule) or the derived surface
+    class a page type's field rules were folded into.
+    """
+    for route in configured_routes(config):
+        if len(route.to) < 2 or route.page_type is None:
+            continue
+        key = route.page_type if route.fields is None else _route_surface_class(route.page_type)
+        if key == entity_class:
+            return route.to
+    return ()
+
+
+def _pii_policy() -> Any:
+    # pii's surface-class and field-list policy (its built-in tables are pii
+    # constants) is the input here. pii already imports this module, and the
+    # import graph is pinned acyclic (tests/test_import_graph_acyclic.py), so
+    # the module is resolved by name at call time instead of by import
+    # statement. Moving those tables into the storage layer would remove the
+    # indirection.
+    return importlib.import_module("athenaeum.pii")
+
+
+def _excluded_field_names(
+    surface_class: str, config: dict[str, Any] | None, record_meta: Mapping[str, Any] | None
+) -> tuple[str, ...]:
+    return tuple(_pii_policy().resolve_excluded_fields(surface_class, config, record_meta))
+
+
+def _field_rule(surface_class: str, config: dict[str, Any] | None) -> str:
+    if surface_class.startswith(_ROUTE_SURFACE_PREFIX):
+        return f"storage.routes.{surface_class[len(_ROUTE_SURFACE_PREFIX):]}"
+    if surface_class in configured_excluded_fields(config):
+        return f"storage.excluded_fields.{surface_class}"
+    return f"storage.mapping.{surface_class}"
+
+
+def route_for(
+    page_type: str | None,
+    field: str | None = None,
+    *,
+    config: dict[str, Any] | None,
+    record_meta: Mapping[str, Any] | None = None,
+    surface_class: str | None = None,
+) -> RouteDecision:
+    """The ordered locations a field, or a whole page type, is stored in.
+
+    Pure: reads *config* (and the in-memory *record_meta*) only -- no file
+    access, no clock. It computes from the configuration keys that exist today
+    and adds none. Three questions, one function:
+
+    * ``route_for(page_type, config=...)`` -- a whole page type. The answer is
+      the ``storage.mapping`` entry, as :func:`resolve_adapter_for_class` gives
+      it; ``rule`` is ``"storage.mapping.<type>"``, or ``None`` when the type is
+      unmapped and the default wiki surface applies.
+    * ``route_for(page_type, field, config=...)`` -- one field of a page of that
+      type. The surface class comes from
+      :func:`athenaeum.pii.surface_class_for_page_class`, the field list from
+      :func:`athenaeum.pii.resolve_excluded_fields`, and the class must be
+      outside the corpus (:func:`is_excluded`). ``targets`` is empty when the
+      value is kept on the page. *record_meta* is only consulted for a class
+      with no configured or built-in field list, whose list is the record's own
+      frontmatter minus bookkeeping.
+    * ``route_for(None, field, config=..., surface_class=...)`` -- the read
+      path's form. The excluded-field join receives an ALREADY-RESOLVED surface
+      class (never a page type) and its callers decide whether a join should
+      happen at all, so this form skips both the page-class mapping and the
+      :func:`is_excluded` gate: it answers only "is *field* on this surface
+      class's field list", with ``targets`` the class's adapter when it is and
+      empty when it is not.
+    * ``route_for(None, field, config=...)`` -- no page type and no surface
+      class: nothing to route by, so the field is kept on the page.
+
+    **One fallback remains** (the second was removed by athenaeum#3168): the
+    FIELD path falls back to the WIKI: a field of a class that is not outside the
+    corpus, or not on its field list, is kept on the page (``targets == ()``,
+    ``rule is None``). ``sensitivity_routing`` (free-text values) used to fall
+    back to the built-in EXCLUDED location for a class with no rule; it now
+    refuses such a class at load instead, so there is no value-routing fallback.
+
+    **Discard (athenaeum#3168).** A ``storage.routes`` rule with ``to: []``
+    answers with empty ``targets`` AND its ``rule`` set (``discarded`` is
+    true): the page type, or the named fields of it, are stored nowhere. This
+    is not the "no rule matched" answer, which also has empty ``targets`` but
+    ``rule is None``. The read-path form (``surface_class=``) is not affected:
+    a discarded value was never stored.
+
+    Raises:
+        StorageConfigError: A mapping names a location that is not a known
+            adapter.
+    """
+    if surface_class is not None:
+        if field is None or field not in _excluded_field_names(surface_class, config, record_meta):
+            return RouteDecision((), None, False)
+        return _decision_for_class(surface_class, _field_rule(surface_class, config), config)
+
+    if page_type is None or not page_type.strip():
+        return RouteDecision((), None, False)
+
+    # A ``to: []`` rule decides first: its decision has no targets and names the
+    # rule (athenaeum#3168), which is what tells it apart from "no rule matched".
+    discarded_whole, discarded_fields = _discard_rules(config)
+    if page_type.strip() in discarded_whole:
+        return RouteDecision((), discarded_whole[page_type.strip()], False)
+    if field is not None and field in discarded_fields.get(page_type.strip(), {}):
+        return RouteDecision((), discarded_fields[page_type.strip()][field], False)
+
+    if field is None:
+        cls = page_type.strip()
+        if cls in resolve_storage_mapping(config):
+            return _decision_for_class(cls, f"storage.mapping.{cls}", config)
+        if cls in _route_tables(config)[0]:
+            return _decision_for_class(cls, f"storage.routes.{cls}", config)
+        # No mapping entry: the default wiki surface, in the corpus. Answered
+        # without resolving the adapter table, exactly as the value-routing
+        # path never resolved it for an unmapped class.
+        return RouteDecision((DEFAULT_ADAPTER_NAME,), None, False)
+
+    pii = _pii_policy()
+    surface_class = pii.surface_class_for_page_class(page_type, config)
+    if not surface_class or not is_excluded(surface_class, config):
+        return RouteDecision((), None, False)
+    if field not in _excluded_field_names(surface_class, config, record_meta):
+        return RouteDecision((), None, False)
+    return _decision_for_class(surface_class, _field_rule(surface_class, config), config)
+
+
 def surface_root_for_class(
     entity_class: str | None,
     config: dict[str, Any] | None,
@@ -544,9 +1357,80 @@ def page_write_root_for_class(
     declared ``read_only`` (athenaeum#2621), and :class:`StorageConfigError`
     for an unknown adapter.
     """
+    adapter = resolve_adapter_for_class(entity_class, config)
     return _write_root_for_adapter(
-        resolve_adapter_for_class(entity_class, config), entity_class, config, knowledge_root
+        adapter,
+        entity_class,
+        config,
+        knowledge_root,
+        vault_ok=vault_route_for_page_type(entity_class, config) == adapter.name,
     )
+
+
+def vault_route_for_page_type(page_type: str | None, config: dict[str, Any] | None) -> str | None:
+    """The vault a whole page type is written to by a ``storage.routes`` rule, else ``None``.
+
+    A rule with no ``fields`` for *page_type* whose primary target (the first
+    of ``to``) is sensitive (:func:`is_sensitive`) sends whole pages of the type
+    to that vault (athenaeum#3174). ``storage.mapping`` entries, field rules,
+    discards and a target that is merely outside the corpus are not vault
+    routes, so the compile write guard stays closed for them.
+    """
+    cls = (page_type or "").strip()
+    if not cls:
+        return None
+    for route in configured_routes(config):
+        if route.page_type != cls or route.fields is not None or route.discard:
+            continue
+        return route.to[0] if is_sensitive(route.to[0], config) else None
+    return None
+
+
+def vault_page_roots(config: dict[str, Any] | None, knowledge_root: Path) -> dict[str, Path]:
+    """Vault name -> root for every vault a whole page type is routed to (athenaeum#3174)."""
+    roots: dict[str, Path] = {}
+    for route in configured_routes(config):
+        if route.page_type is None or route.fields is not None or route.discard:
+            continue
+        name = route.to[0]
+        if name not in roots and is_sensitive(name, config):
+            roots[name] = available_adapters(config)[name].resolve_root(knowledge_root)
+    return roots
+
+
+def vault_for_path(path: Path, config: dict[str, Any] | None, knowledge_root: Path) -> str | None:
+    """The vault *path* is under, when a page-type rule sends whole pages there (athenaeum#3174)."""
+    resolved = path.resolve()
+    for name, root in vault_page_roots(config, knowledge_root).items():
+        if root.resolve() in resolved.parents:
+            return name
+    return None
+
+
+# Pages written to each vault this run (athenaeum#3174): vault names and counts
+# only -- never a title, a uid or any body text.
+_VAULT_PAGE_COUNTS: dict[str, int] = {}
+_VAULT_PAGE_LOCK = threading.Lock()
+
+
+def note_vault_page(vault: str | None) -> None:
+    """Count one page written to *vault* (a location name, never page content)."""
+    if not vault:
+        return
+    with _VAULT_PAGE_LOCK:
+        _VAULT_PAGE_COUNTS[vault] = _VAULT_PAGE_COUNTS.get(vault, 0) + 1
+
+
+def vault_page_counts() -> dict[str, int]:
+    """A snapshot of the per-vault page counts, for the run summary."""
+    with _VAULT_PAGE_LOCK:
+        return dict(sorted(_VAULT_PAGE_COUNTS.items()))
+
+
+def reset_vault_page_counts() -> None:
+    """Zero the per-vault counts (the start of a run)."""
+    with _VAULT_PAGE_LOCK:
+        _VAULT_PAGE_COUNTS.clear()
 
 
 def _write_root_for_adapter(
@@ -554,8 +1438,14 @@ def _write_root_for_adapter(
     entity_class: str | None,
     config: dict[str, Any] | None,
     knowledge_root: Path,
+    *,
+    vault_ok: bool = False,
 ) -> Path:
-    """The write-guard checks shared by the type-derived and store-named routes."""
+    """The write-guard checks shared by the type-derived and store-named routes.
+
+    *vault_ok* lifts only the not-indexed refusal, and only for a sensitive
+    adapter reached through a page-type rule (athenaeum#3174).
+    """
     if adapter.read_only:
         raise ReadOnlySurfaceError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
@@ -566,7 +1456,7 @@ def _write_root_for_adapter(
         raise ReadOnlySurfaceError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, but {declared}"
         )
-    if not adapter.corpus_policy.embedded:
+    if not adapter.corpus_policy.embedded and not (vault_ok and adapter.sensitive):
         raise SurfaceNotIndexedError(
             f"entity class {entity_class!r} maps to surface {adapter.name!r}, which is "
             "not indexed (embedded: false); compile cannot write pages there"
@@ -599,7 +1489,13 @@ def page_write_root_for_store(
         raise StorageConfigError(
             f"intake decision names store {store!r}, which this install does not hold"
         )
-    return _write_root_for_adapter(adapter, entity_class, config, knowledge_root)
+    return _write_root_for_adapter(
+        adapter,
+        entity_class,
+        config,
+        knowledge_root,
+        vault_ok=vault_route_for_page_type(entity_class, config) == adapter.name,
+    )
 
 
 def store_opaque_filenames(store: str, config: dict[str, Any] | None) -> bool:
@@ -686,12 +1582,66 @@ def open_store(
         name for name, adapter in available_adapters(config).items() if not adapter.purgeable
     }
     read_only = {name for name, adapter in available_adapters(config).items() if adapter.read_only}
-    return FilesystemStore(
-        knowledge_root,
-        roots,
-        non_purgeable_surfaces=non_purgeable,
-        read_only_surfaces=read_only,
+    surface_history = {
+        name: adapter.history
+        for name, adapter in available_adapters(config).items()
+        if adapter.history is not None
+    }
+    spec = StoreBuildSpec(
+        config=config,
+        knowledge_root=knowledge_root,
+        roots=roots,
+        non_purgeable_surfaces=frozenset(non_purgeable),
+        read_only_surfaces=frozenset(read_only),
+        history=resolve_storage_history(config),
+        surface_history=surface_history,
         write_gate=lambda surface: declared_compile_refusal(surface, config, knowledge_root),
+    )
+    # Declared FilesystemStore: existing callers use its extras (sync_repos,
+    # surface_repo, ...) that the ``Store`` protocol does not carry. A
+    # registered implementation reaches them only if it provides the same
+    # attributes; narrowing callers to the protocol is a separate change.
+    return cast(FilesystemStore, _store_factory_for(available_adapters(config))(spec))
+
+
+def _store_factory_for(adapters: Mapping[str, StorageAdapter]) -> StoreFactory:
+    """The factory that builds the one store addressing *adapters*' locations.
+
+    Adapters sharing an implementation share one instance. The built-in
+    surfaces are always present and are filesystem-backed, so a single
+    registered implementation takes over the whole store (it addresses every
+    location); two distinct registered implementations cannot share one store
+    and are refused (mixed implementations are out of scope).
+    """
+    used: set[str] = set()
+    for name, adapter in adapters.items():
+        used.add(
+            _validate_backing_store(
+                adapter.backing_store, f"storage adapter {name!r} backing_store"
+            )
+        )
+    custom = sorted(used - set(BUILTIN_BACKING_STORES))
+    if len(custom) > 1:
+        raise StorageConfigError(
+            f"storage adapters use more than one store implementation "
+            f"({', '.join(repr(n) for n in custom)}); one store addresses every "
+            "location, so every adapter must use the same non-filesystem "
+            "backing_store (or 'markdown')"
+        )
+    if custom:
+        return _STORE_BACKENDS[custom[0]]
+    return _filesystem_store_factory
+
+
+def _filesystem_store_factory(spec: StoreBuildSpec) -> Store:
+    return FilesystemStore(
+        spec.knowledge_root,
+        dict(spec.roots),
+        non_purgeable_surfaces=spec.non_purgeable_surfaces,
+        read_only_surfaces=spec.read_only_surfaces,
+        history=spec.history,
+        surface_history=spec.surface_history,
+        write_gate=spec.write_gate,
     )
 
 
@@ -1131,3 +2081,39 @@ def write_raw_intake(target_dir: Path, content: str) -> Path:
 
     atomic_write_text(filepath, content)
     return filepath
+
+
+def write_raw_intake_screened(
+    target_dir: Path,
+    content: str,
+    *,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    raw_ref: str | None = None,
+) -> Path:
+    """Screen *content*, then persist it as one raw-intake file (athenaeum#3175).
+
+    The entry point intake code uses for content that is not yet screened: any
+    value a ``storage.routes`` / ``sensitivity`` rule routes goes to its vault
+    first and the note carries a pointer; a discarded value is replaced by the
+    fixed marker (or the field is dropped). Only then is the raw note written
+    through :func:`write_raw_intake`. A failed vault write raises
+    :class:`athenaeum.sensitivity_routing.SensitivityRoutingError` and writes
+    nothing. *raw_ref* is a stable reference to the note (the same value on a
+    retry), used to derive the deterministic vault record ids.
+
+    With no rule that applies the bytes written are exactly those
+    :func:`write_raw_intake` would write. :func:`write_raw_intake` stays for
+    content that was already screened.
+    """
+    # sensitivity_routing imports this module at module scope and the import
+    # graph is pinned acyclic (tests/test_import_graph_acyclic.py), so it is
+    # resolved by name at call time, as :func:`_pii_policy` does for pii.
+    screen_intake_content = importlib.import_module(
+        "athenaeum.sensitivity_routing"
+    ).screen_intake_content
+
+    screened = screen_intake_content(
+        content, raw_ref=raw_ref, config=config, knowledge_root=knowledge_root
+    )
+    return write_raw_intake(target_dir, screened)

@@ -53,6 +53,7 @@ __all__ = [
     "READER_ONLY",
     "resolve_rights",
     "resolve_surface_rights",
+    "held_identity_rights",
     "record_run_start_rights",
     "declared_surface_rights",
     "reset_run_rights",
@@ -70,14 +71,26 @@ _STATIC = "static"
 
 #: Rights held for the process, keyed by (resolved surface root, identity key).
 #: Filled at run start and, for a write path with no run, on first write.
-_RUN_RIGHTS: dict[tuple[Path, tuple[str, ...] | None], frozenset[str] | None] = {}
+#: The value is ``(rights, narrowed)``: ``rights`` is ``None`` for no declaration,
+#: and ``narrowed`` is true when the declaration or directory could not answer.
+#: Any identity key may be held, not only the owner's (``athenaeum#3167``).
+_RUN_RIGHTS: dict[
+    tuple[Path, tuple[str, ...] | None], tuple[frozenset[str] | None, bool]
+] = {}
+
+
+def _identity_cache_key(
+    root: Path, identity: tuple[str, ...] | None
+) -> tuple[Path, tuple[str, ...] | None]:
+    return (Path(root).resolve(), tuple(identity) if identity else None)
 
 
 def _cache_key(
     root: Path, asserter: Mapping[str, object] | None
 ) -> tuple[Path, tuple[str, ...] | None]:
-    ident = asserter_identity_key(dict(asserter) if asserter else None)
-    return (Path(root).resolve(), tuple(ident) if ident else None)
+    return _identity_cache_key(
+        root, asserter_identity_key(dict(asserter) if asserter else None)
+    )
 
 
 def reset_run_rights() -> None:
@@ -133,13 +146,23 @@ def _resolve(
     adapters: Mapping[str, DirectoryAdapter] | None,
 ) -> tuple[frozenset[str], bool]:
     """:func:`resolve_rights` plus whether the directory could not answer."""
+    return _resolve_identity(
+        declaration, asserter_identity_key(dict(asserter) if asserter else None), adapters
+    )
+
+
+def _resolve_identity(
+    declaration: StoreDeclaration,
+    identity: tuple[str, ...] | None,
+    adapters: Mapping[str, DirectoryAdapter] | None,
+) -> tuple[frozenset[str], bool]:
+    """The rights an identity key holds, plus whether the directory could not answer."""
     directory: DirectoryAdapter | None
     if declaration.directory == _STATIC:
         directory = StaticDirectory(declaration)
     else:
         directory = (adapters or {}).get(declaration.directory)
 
-    identity = asserter_identity_key(dict(asserter) if asserter else None)
     granted: set[str] = set()
     for role in declaration.roles:
         for member in role.members:
@@ -165,18 +188,53 @@ def resolve_surface_rights(
     surface_root: Path,
     asserter: Mapping[str, object] | None,
     adapters: Mapping[str, DirectoryAdapter] | None = None,
+    *,
+    identity: tuple[str, ...] | None = None,
 ) -> frozenset[str] | None:
     """Resolve rights for the store at *surface_root*.
 
     ``None`` when the surface has no declaration (it behaves as it does today).
-    A declaration that is present but invalid resolves as a reader only.
+    A declaration that is present but invalid resolves as a reader only. Pass
+    *identity* (an identity key) to resolve for a principal other than the one
+    *asserter* names; it takes precedence over *asserter*.
+
+    A narrowed answer (invalid declaration, or a directory that cannot answer)
+    is the :data:`READER_ONLY` object itself; :func:`held_identity_rights` tells
+    it from a granted read by that identity.
     """
     declaration = load_store_declaration(surface_root)
     if declaration is None:
         return None
     if isinstance(declaration, StoreDeclarationInvalid):
         return READER_ONLY
-    return resolve_rights(declaration, asserter, adapters)
+    if identity is None:
+        identity = asserter_identity_key(dict(asserter) if asserter else None)
+    rights, narrowed = _resolve_identity(declaration, identity, adapters)
+    return READER_ONLY if narrowed else rights
+
+
+def held_identity_rights(
+    surface_root: Path,
+    identity: tuple[str, ...] | None,
+) -> tuple[frozenset[str] | None, bool]:
+    """``(rights, narrowed)`` held for *identity* on *surface_root*: resolved once.
+
+    ``rights`` is ``None`` when the surface has no declaration. ``narrowed`` is
+    true when the declaration is invalid, the directory cannot answer, or
+    resolution raised; ``rights`` is then :data:`READER_ONLY`. Held in the same
+    per-process table as the owner's rights, for any identity key.
+    """
+    key = _identity_cache_key(surface_root, identity)
+    if key not in _RUN_RIGHTS:
+        try:
+            rights = resolve_surface_rights(surface_root, None, identity=identity or ())
+            _RUN_RIGHTS[key] = (rights, rights is READER_ONLY)
+        except Exception as exc:  # noqa: BLE001 - fail closed, report why
+            log.warning(
+                "store rights: %s: resolution failed (%s)", surface_root, type(exc).__name__
+            )
+            _RUN_RIGHTS[key] = (READER_ONLY, True)
+    return _RUN_RIGHTS[key]
 
 
 def declared_surface_rights(
@@ -189,16 +247,9 @@ def declared_surface_rights(
     raises is held as :data:`READER_ONLY`, so the write guard refuses and a bad
     declaration never widens anything.
     """
-    key = _cache_key(surface_root, asserter)
-    if key not in _RUN_RIGHTS:
-        try:
-            _RUN_RIGHTS[key] = resolve_surface_rights(surface_root, asserter)
-        except Exception as exc:  # noqa: BLE001 - fail closed, report why
-            log.warning(
-                "store rights: %s: resolution failed (%s)", surface_root, type(exc).__name__
-            )
-            _RUN_RIGHTS[key] = READER_ONLY
-    return _RUN_RIGHTS[key]
+    return held_identity_rights(
+        surface_root, asserter_identity_key(dict(asserter) if asserter else None)
+    )[0]
 
 
 def record_run_start_rights(

@@ -4,7 +4,7 @@
 The acceptance criteria, one class each:
 
 - :class:`TestDefaultPathIsUnchanged` (AC1, AC5) — with no new settings the
-  served ``tools/list`` and a ``recall(with_pii=True)`` result are what they
+  served ``tools/list`` and a ``recall(include_sensitive=True)`` result are what they
   were BEFORE the pins existed. The "before" half is not a self-comparison:
   :data:`PRE_PIN_TOOL_INPUT_SCHEMAS` is the per-tool input-schema shape read
   off a server built from ``origin/develop`` at the merge base, checked in
@@ -18,7 +18,7 @@ The acceptance criteria, one class each:
   tool added to ``create_server`` tomorrow is covered with no edit here. The
   counter-example is its own test: an allowlist naming an unknown tool fails
   startup.
-- :class:`TestExcludedFieldsPinOff` / :class:`TestExcludedFieldsPinOn` (AC3)
+- :class:`TestSensitiveReadsPinOff` / :class:`TestExcludedFieldsPinOn` (AC3)
   — against a person page with excluded contact fields, asserting the LITERAL
   fixture values, not a flag.
 - :class:`TestPinsResolveCliOverEnvOverYaml` (AC4) — per-pin precedence, and
@@ -38,8 +38,8 @@ import pytest
 from athenaeum import pii
 from athenaeum.cli import main
 from athenaeum.config import (
-    resolve_serve_excluded_fields,
     resolve_serve_profile,
+    resolve_serve_sensitive_reads,
     resolve_serve_tools,
 )
 from athenaeum.remote_policy import (
@@ -71,8 +71,8 @@ PIN_PARAMETER_NAMES = frozenset(
         "tools",
         "serve_tools",
         "allowed_tools",
-        "excluded_fields",
-        "serve_excluded_fields",
+        "sensitive_reads",
+        "serve_sensitive_reads",
     }
 )
 
@@ -99,6 +99,7 @@ PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
             "descending",
             "entity_type",
             "fields",
+            "include_sensitive",
             "include_split",
             "limit",
             "predicates",
@@ -128,11 +129,17 @@ PRE_PIN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
         "required": [],
     },
     "read_entity": {
-        "properties": ["entity_class", "include_excluded", "uid", "usage_classes"],
+        "properties": [
+            "entity_class",
+            "include_excluded",
+            "include_sensitive",
+            "uid",
+            "usage_classes",
+        ],
         "required": ["entity_class", "uid"],
     },
     "recall": {
-        "properties": ["history", "query", "top_k", "type", "with_pii"],
+        "properties": ["history", "include_sensitive", "query", "top_k", "type", "with_pii"],
         "required": ["query"],
     },
     "remember": {
@@ -289,7 +296,7 @@ class TestDefaultPathIsUnchanged:
         )
 
     def test_recall_with_pii_still_returns_the_excluded_values(self, corpus: Path) -> None:
-        rendered = _call(_server(corpus), "recall", query="widget", with_pii=True)
+        rendered = _call(_server(corpus), "recall", query="widget", include_sensitive=True)
         for email in FIXTURE_EMAILS:
             assert email in rendered
 
@@ -298,9 +305,9 @@ class TestDefaultPathIsUnchanged:
     ) -> None:
         """AC1's "every tool's output" half: byte-identical, not merely
         'still contains the values'."""
-        without = _call(_server(corpus), "recall", query="widget", with_pii=True)
+        without = _call(_server(corpus), "recall", query="widget", include_sensitive=True)
         explicit_none = _call(
-            _server(corpus, remote_policy=None), "recall", query="widget", with_pii=True
+            _server(corpus, remote_policy=None), "recall", query="widget", include_sensitive=True
         )
         assert without == explicit_none
         # Not vacuous: both outputs really do carry the values, so this is an
@@ -314,10 +321,10 @@ class TestDefaultPathIsUnchanged:
                 "read_entity",
                 uid="alex",
                 entity_class="person",
-                include_excluded=True,
+                include_sensitive=True,
             )
         )
-        assert "excluded_fields_withheld" not in payload
+        assert "sensitive_reads_withheld" not in payload
         assert FIXTURE_EMAILS[0] in payload["contact"]["emails"]
 
     @pytest.mark.parametrize(
@@ -326,9 +333,9 @@ class TestDefaultPathIsUnchanged:
             {},
             {"remote_policy": None},
             {"remote_policy": build_remote_policy(profile=REMOTE_PROFILE)},
-            {"remote_policy": build_remote_policy(excluded_fields=False)},
+            {"remote_policy": build_remote_policy(sensitive_reads=False)},
         ],
-        ids=["omitted", "none", "remote-profile", "excluded-fields-off"],
+        ids=["omitted", "none", "remote-profile", "sensitive-reads-off"],
     )
     def test_no_tool_input_schema_carries_a_pin_parameter(
         self, corpus: Path, policy_kwargs: dict
@@ -411,35 +418,35 @@ class TestRemoteProfileToolAllowlist:
         assert asyncio.run(server.call_tool("entity_schema", {})) is not None
 
 
-class TestExcludedFieldsPinOff:
-    """AC3 with `excluded_fields: off`."""
+class TestSensitiveReadsPinOff:
+    """AC3 with `sensitive_reads: off`."""
 
     @pytest.fixture
     def server(self, corpus: Path):
         return _server(corpus, remote_policy=build_remote_policy(profile=REMOTE_PROFILE))
 
     def test_recall_with_pii_returns_none_of_the_excluded_values(self, server) -> None:
-        rendered = _call(server, "recall", query="widget", with_pii=True)
+        rendered = _call(server, "recall", query="widget", include_sensitive=True)
         # The hit itself is still returned -- this withholds values, not pages.
         assert "Alex Widget" in rendered
         for email in FIXTURE_EMAILS:
             assert email not in rendered
 
     def test_recall_says_the_values_were_withheld(self, server) -> None:
-        from athenaeum.mcp_server import EXCLUDED_FIELDS_WITHHELD_NOTICE
+        from athenaeum.mcp_server import SENSITIVE_READS_WITHHELD_NOTICE
 
-        rendered = _call(server, "recall", query="widget", with_pii=True)
-        assert EXCLUDED_FIELDS_WITHHELD_NOTICE in rendered
+        rendered = _call(server, "recall", query="widget", include_sensitive=True)
+        assert SENSITIVE_READS_WITHHELD_NOTICE in rendered
 
     def test_the_withheld_notice_discloses_no_value_and_no_length(self) -> None:
         """The notice is handed to the caller the pin exists to keep values
         away from, so it must not itself be a channel."""
-        from athenaeum.mcp_server import EXCLUDED_FIELDS_WITHHELD_NOTICE
+        from athenaeum.mcp_server import SENSITIVE_READS_WITHHELD_NOTICE
 
         for email in FIXTURE_EMAILS:
-            assert email not in EXCLUDED_FIELDS_WITHHELD_NOTICE
-            assert email.split("@")[1] not in EXCLUDED_FIELDS_WITHHELD_NOTICE
-        assert not any(ch.isdigit() for ch in EXCLUDED_FIELDS_WITHHELD_NOTICE)
+            assert email not in SENSITIVE_READS_WITHHELD_NOTICE
+            assert email.split("@")[1] not in SENSITIVE_READS_WITHHELD_NOTICE
+        assert not any(ch.isdigit() for ch in SENSITIVE_READS_WITHHELD_NOTICE)
 
     def test_a_handle_shaped_query_returns_none_of_the_excluded_values(self, server) -> None:
         """The reverse-lookup route, which a gate inside
@@ -447,7 +454,7 @@ class TestExcludedFieldsPinOff:
         handle-shaped query resolves through `identity_resolution` BEFORE any
         ranking. Asserted on the SECOND fixture value, which the caller did
         not supply as the query, so an echo of the query cannot pass this."""
-        rendered = _call(server, "recall", query=FIXTURE_EMAILS[0], with_pii=True)
+        rendered = _call(server, "recall", query=FIXTURE_EMAILS[0], include_sensitive=True)
         assert FIXTURE_EMAILS[1] not in rendered
 
     def test_a_handle_shaped_query_still_returns_parseable_json(self, server) -> None:
@@ -455,11 +462,11 @@ class TestExcludedFieldsPinOff:
         returns a strict JSON document, so the notice must go INSIDE the
         object. Appending a markdown line left trailing prose after the
         closing brace and broke every client that parses that payload."""
-        from athenaeum.mcp_server import EXCLUDED_FIELDS_WITHHELD_REASON
+        from athenaeum.mcp_server import SENSITIVE_READS_WITHHELD_REASON
 
-        rendered = _call(server, "recall", query=FIXTURE_EMAILS[0], with_pii=True)
+        rendered = _call(server, "recall", query=FIXTURE_EMAILS[0], include_sensitive=True)
         payload = json.loads(rendered)  # raises on trailing prose
-        assert payload["excluded_fields_withheld"] == EXCLUDED_FIELDS_WITHHELD_REASON
+        assert payload["sensitive_reads_withheld"] == SENSITIVE_READS_WITHHELD_REASON
         # The handle payload's own keys survive the round-trip.
         assert payload["uid"] == "alex"
         assert payload["contact_values"] == []
@@ -467,10 +474,10 @@ class TestExcludedFieldsPinOff:
     def test_the_similarity_path_still_gets_the_markdown_notice(self, server) -> None:
         """The other half of the same fix: markdown output is NOT turned into
         JSON, so the two media stay distinguishable."""
-        from athenaeum.mcp_server import EXCLUDED_FIELDS_WITHHELD_NOTICE
+        from athenaeum.mcp_server import SENSITIVE_READS_WITHHELD_NOTICE
 
-        rendered = _call(server, "recall", query="widget", with_pii=True)
-        assert rendered.endswith(EXCLUDED_FIELDS_WITHHELD_NOTICE)
+        rendered = _call(server, "recall", query="widget", include_sensitive=True)
+        assert rendered.endswith(SENSITIVE_READS_WITHHELD_NOTICE)
 
     def test_read_entity_returns_none_of_the_excluded_values(self, server) -> None:
         raw = _call(
@@ -478,7 +485,7 @@ class TestExcludedFieldsPinOff:
             "read_entity",
             uid="alex",
             entity_class="person",
-            include_excluded=True,
+            include_sensitive=True,
         )
         for email in FIXTURE_EMAILS:
             assert email not in raw
@@ -489,7 +496,7 @@ class TestExcludedFieldsPinOff:
     def test_read_entity_reports_the_pin_rather_than_looking_like_no_record(
         self, server
     ) -> None:
-        from athenaeum.mcp_server import EXCLUDED_FIELDS_WITHHELD_REASON
+        from athenaeum.mcp_server import SENSITIVE_READS_WITHHELD_REASON
 
         payload = json.loads(
             _call(
@@ -497,10 +504,10 @@ class TestExcludedFieldsPinOff:
                 "read_entity",
                 uid="alex",
                 entity_class="person",
-                include_excluded=True,
+                include_sensitive=True,
             )
         )
-        assert payload["excluded_fields_withheld"] == EXCLUDED_FIELDS_WITHHELD_REASON
+        assert payload["sensitive_reads_withheld"] == SENSITIVE_READS_WITHHELD_REASON
 
     def test_enumerate_entities_refuses_a_pii_scoped_predicate(self, server) -> None:
         result = _call(
@@ -510,7 +517,7 @@ class TestExcludedFieldsPinOff:
             predicates=[
                 {"fields": "google_contact_primary", "kind": "eq", "value": "x"}
             ],
-            with_pii=True,
+            include_sensitive=True,
         )
         assert result["hits"] == []
         assert "google_contact_primary" in (result["error"] or "")
@@ -521,7 +528,7 @@ class TestExcludedFieldsPinOff:
             "enumerate_entities",
             entity_type="person",
             fields=["google_contact_primary"],
-            with_pii=True,
+            include_sensitive=True,
         )
         assert result["hits"] == []
         assert "google_contact_primary" in (result["error"] or "")
@@ -542,22 +549,22 @@ class TestExcludedFieldsPinOn:
         return _server(
             corpus,
             remote_policy=build_remote_policy(
-                profile=REMOTE_PROFILE, excluded_fields=True
+                profile=REMOTE_PROFILE, sensitive_reads=True
             ),
         )
 
     def test_recall_with_pii_is_identical_to_the_unpinned_server(
         self, corpus: Path, server
     ) -> None:
-        pinned = _call(server, "recall", query="widget", with_pii=True)
-        unpinned = _call(_server(corpus), "recall", query="widget", with_pii=True)
+        pinned = _call(server, "recall", query="widget", include_sensitive=True)
+        unpinned = _call(_server(corpus), "recall", query="widget", include_sensitive=True)
         assert pinned == unpinned
         assert FIXTURE_EMAILS[0] in pinned
 
     def test_read_entity_is_identical_to_the_unpinned_server(
         self, corpus: Path, server
     ) -> None:
-        kwargs = {"uid": "alex", "entity_class": "person", "include_excluded": True}
+        kwargs = {"uid": "alex", "entity_class": "person", "include_sensitive": True}
         pinned = _call(server, "read_entity", **kwargs)
         unpinned = _call(_server(corpus), "read_entity", **kwargs)
         assert pinned == unpinned
@@ -569,7 +576,7 @@ class TestExcludedFieldsPinOn:
             "enumerate_entities",
             entity_type="person",
             fields=["google_contact_primary"],
-            with_pii=True,
+            include_sensitive=True,
         )
         assert result.get("error") is None
 
@@ -582,7 +589,7 @@ class TestPinsResolveCliOverEnvOverYaml:
         for name in (
             "ATHENAEUM_SERVE_PROFILE",
             "ATHENAEUM_SERVE_TOOLS",
-            "ATHENAEUM_SERVE_EXCLUDED_FIELDS",
+            "ATHENAEUM_SERVE_SENSITIVE_READS",
         ):
             monkeypatch.delenv(name, raising=False)
 
@@ -643,26 +650,26 @@ class TestPinsResolveCliOverEnvOverYaml:
         assert resolve_serve_tools({}, "") is None
 
     def test_excluded_fields_reads_yaml(self) -> None:
-        assert resolve_serve_excluded_fields({"serve": {"excluded_fields": "off"}}) is False
-        assert resolve_serve_excluded_fields({"serve": {"excluded_fields": "on"}}) is True
+        assert resolve_serve_sensitive_reads({"serve": {"sensitive_reads": "off"}}) is False
+        assert resolve_serve_sensitive_reads({"serve": {"sensitive_reads": "on"}}) is True
 
     def test_excluded_fields_env_beats_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ATHENAEUM_SERVE_EXCLUDED_FIELDS", "off")
-        assert resolve_serve_excluded_fields({"serve": {"excluded_fields": "on"}}) is False
+        monkeypatch.setenv("ATHENAEUM_SERVE_SENSITIVE_READS", "off")
+        assert resolve_serve_sensitive_reads({"serve": {"sensitive_reads": "on"}}) is False
 
     def test_excluded_fields_cli_beats_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ATHENAEUM_SERVE_EXCLUDED_FIELDS", "on")
+        monkeypatch.setenv("ATHENAEUM_SERVE_SENSITIVE_READS", "on")
         assert (
-            resolve_serve_excluded_fields({"serve": {"excluded_fields": "on"}}, "off") is False
+            resolve_serve_sensitive_reads({"serve": {"sensitive_reads": "on"}}, "off") is False
         )
 
     def test_excluded_fields_unset_is_none(self) -> None:
-        assert resolve_serve_excluded_fields(None) is None
-        assert resolve_serve_excluded_fields({}) is None
+        assert resolve_serve_sensitive_reads(None) is None
+        assert resolve_serve_sensitive_reads({}) is None
 
     def test_an_invalid_excluded_fields_value_raises(self) -> None:
         with pytest.raises(RemotePolicyError, match="maybe"):
-            resolve_serve_excluded_fields({"serve": {"excluded_fields": "maybe"}})
+            resolve_serve_sensitive_reads({"serve": {"sensitive_reads": "maybe"}})
 
     @pytest.mark.parametrize("value", [True, 7, ["remote"], {"name": "remote"}])
     def test_a_non_string_profile_value_raises_rather_than_falling_open(
@@ -687,16 +694,16 @@ class TestPinsResolveCliOverEnvOverYaml:
         assert resolve_serve_tools({"serve": {"tools": []}}) is None
 
     def test_a_yaml_boolean_excluded_fields_value_raises(self) -> None:
-        """`serve.excluded_fields: false` is YAML's bool, not this knob's
+        """`serve.sensitive_reads: false` is YAML's bool, not this knob's
         vocabulary. Guessing which of off/on it meant would be a guess on a
         PII-egress boundary."""
         with pytest.raises(RemotePolicyError, match="boolean"):
-            resolve_serve_excluded_fields({"serve": {"excluded_fields": False}})
+            resolve_serve_sensitive_reads({"serve": {"sensitive_reads": False}})
 
     def test_the_profile_supplies_the_excluded_fields_default(self) -> None:
-        assert build_remote_policy(profile=REMOTE_PROFILE).excluded_fields is False
+        assert build_remote_policy(profile=REMOTE_PROFILE).sensitive_reads is False
         assert (
-            build_remote_policy(profile=REMOTE_PROFILE, excluded_fields=True).excluded_fields
+            build_remote_policy(profile=REMOTE_PROFILE, sensitive_reads=True).sensitive_reads
             is True
         )
 
@@ -745,7 +752,7 @@ class TestServeExitsNonZeroOnAnInvalidPin:
     def test_an_invalid_excluded_fields_value_exits_non_zero(
         self, knowledge: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        (knowledge / "athenaeum.yaml").write_text("serve:\n  excluded_fields: maybe\n")
+        (knowledge / "athenaeum.yaml").write_text("serve:\n  sensitive_reads: maybe\n")
         assert main(["serve", "--path", str(knowledge)]) == 1
         assert "maybe" in capsys.readouterr().err
 

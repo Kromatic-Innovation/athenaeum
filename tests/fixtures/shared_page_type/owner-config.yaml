@@ -1,0 +1,11 @@
+owner:
+  asserter: {iss: "https://git.example.net", sub: "1001"}
+storage:
+  adapters:
+    recipes:
+      backing_store: markdown
+      surface_root: recipes
+      visibility: 1
+      corpus_policy: {embedded: true, recallable: true}
+  routes:
+    - {page_type: recipe, to: [recipes]}

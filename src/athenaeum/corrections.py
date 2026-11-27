@@ -132,7 +132,6 @@ from athenaeum.config import (
     resolve_corrections_max_records_per_run,
     resolve_corrections_retry_days,
     resolve_corrections_schema_slots,
-    resolve_corrections_sensitive_fields,
     resolve_source_trust_edges,
     resolve_source_trust_enabled,
 )
@@ -151,8 +150,18 @@ from athenaeum.precedence import source_rank
 from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
-from athenaeum.storage import open_store, surface_root_for_class
-from athenaeum.store import Store, append_line_durable
+from athenaeum.storage import (
+    StorageConfigError,
+    apply_to_targets,
+    available_adapters,
+    discard_rule_for_field_any_type,
+    is_excluded,
+    note_discard,
+    open_store,
+    route_for,
+    target_root,
+)
+from athenaeum.store import Store, append_line_durable, note_no_restore_point
 from athenaeum.trust_graph import (
     EQUAL,
     INCOMPARABLE,
@@ -190,6 +199,106 @@ KNOWN_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 #: escalation path. Any change to the message at its one call site below
 #: must update this constant too, or the two silently drift apart.
 ALLOWLIST_REJECTION_REASON = "attribute not on the allowlist"
+
+#: The removed corrections-only routing table (athenaeum#3162).
+REMOVED_SENSITIVE_FIELDS_KEY = "librarian.corrections.sensitive_fields"
+
+
+class RemovedCorrectionsConfigError(ValueError):
+    """``librarian.corrections.sensitive_fields`` is set to a non-empty value.
+
+    Raised by :func:`refuse_removed_sensitive_fields` before any correction
+    batch is read, so no correction is applied. The message carries the
+    complete replacement configuration.
+    """
+
+
+def _removed_sensitive_fields_entries(config: dict[str, Any] | None) -> tuple[bool, dict[str, str]]:
+    """``(is_set_non_empty, {field: class})`` read raw from the removed key."""
+    if not isinstance(config, dict):
+        return False, {}
+    librarian_cfg = config.get("librarian")
+    corrections_cfg = librarian_cfg.get("corrections") if isinstance(librarian_cfg, dict) else None
+    raw = corrections_cfg.get("sensitive_fields") if isinstance(corrections_cfg, dict) else None
+    if not raw:
+        return False, {}
+    entries: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for name, cls in raw.items():
+            if isinstance(name, str) and name.strip() and isinstance(cls, str) and cls.strip():
+                entries[name.strip()] = cls.strip()
+    return True, entries
+
+
+def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | None:
+    """The refusal text for a configuration still setting the removed key.
+
+    ``None`` when the key is absent or empty. The replacement is COMPLETE: an
+    explicit ``storage.excluded_fields.<class>`` list replaces the built-in one
+    (:func:`athenaeum.pii.resolve_excluded_fields`), so each class's list is
+    the fields it already carries (the built-in contact fields for ``pii``)
+    plus the fields the old key named for that class.
+    """
+    is_set, entries = _removed_sensitive_fields_entries(config)
+    if not is_set:
+        return None
+    from athenaeum import pii
+
+    lines = [
+        f"`{REMOVED_SENSITIVE_FIELDS_KEY}` was removed in athenaeum#3162: a "
+        "correction is now routed by the same storage settings as every other "
+        "writer. Refusing to process corrections; no correction was applied.",
+    ]
+    if not entries:
+        lines.append(
+            "The key holds no usable `<field>: <class>` entries; delete it from athenaeum.yaml."
+        )
+        return "\n".join(lines)
+    by_class: dict[str, list[str]] = {}
+    for field_name, cls in entries.items():
+        by_class.setdefault(cls, []).append(field_name)
+    lines.append(
+        "Delete that key and put this under `storage:` in athenaeum.yaml (merge it with "
+        "any `storage:` block you already have):"
+    )
+    lines.append("")
+    lines.append("storage:")
+    lines.append("  excluded_fields:")
+    for cls, names in by_class.items():
+        complete = list(pii.resolve_excluded_fields(cls, config, None))
+        complete.extend(n for n in names if n not in complete)
+        lines.append(f"    {json.dumps(cls)}: [{', '.join(json.dumps(n) for n in complete)}]")
+    lines.append("")
+    lines.append(
+        "An explicit `storage.excluded_fields.<class>` list replaces the built-in one, so "
+        "each list above already includes the built-in contact fields "
+        f"({', '.join(pii.BUILTIN_CONTACT_FIELDS)}) for `pii`."
+    )
+    outside = [c for c in by_class if not is_excluded(c, config)]
+    if outside:
+        lines.append(
+            "These classes are not mapped to a location outside the corpus, so their fields "
+            "would stay on the page: set `storage.mapping.<class>` to a location outside the "
+            f"corpus (for example `excluded`) for {', '.join(json.dumps(c) for c in outside)}."
+        )
+    lines.append(
+        "The old key applied to every page type; the storage settings apply to pages whose "
+        "class is the one named (a `person` page is class `pii`). Map any other page type "
+        "with `storage.excluded_read_mapping.<page type>: <class>`."
+    )
+    return "\n".join(lines)
+
+
+def refuse_removed_sensitive_fields(config: dict[str, Any] | None) -> None:
+    """Raise :class:`RemovedCorrectionsConfigError` if the removed key is set.
+
+    Called once, where a run first discovers correction batches
+    (:func:`run_correction_phase`, :func:`run_trust_dryrun`) and before the
+    ratified-answer apply path, ahead of any read or write of a correction.
+    """
+    message = removed_sensitive_fields_message(config)
+    if message is not None:
+        raise RemovedCorrectionsConfigError(message)
 
 
 def parse_batch_envelope(first_line: str) -> dict[str, Any] | None:
@@ -286,6 +395,9 @@ DISPOSITIONS: frozenset[str] = frozenset(
         "routed-elsewhere",
         "held-schema-proposal",
         "recorded-as-prose",
+        # athenaeum#3168: the field is discarded by a `storage.routes` rule with
+        # `to: []`. The record keeps no value and no id computed from one.
+        "discarded",
         # athenaeum#1988: a zero-match `handle: {email}` target, parked in
         # `_corrections_parked.json` for `corrections.retry_days` instead of
         # being handed off on first sight (§8.2). The ONE record shape this
@@ -306,6 +418,7 @@ _FIRST_PASS_TERMINAL: frozenset[str] = frozenset(
         "routed-elsewhere",
         "deferred-lower-precedence",
         "recorded-as-prose",
+        "discarded",
         "raised-tier",  # terminal for the BATCH once §8.1's handoff file is written
         "parked",  # terminal for the BATCH once the parked store owns the record (§8.2)
         "held-schema-proposal",  # terminal once the proposal is recorded
@@ -1560,7 +1673,33 @@ def process_correction_record(
         value=value,
     )
 
+    # athenaeum#3168: a field a `to: []` rule discards ends `discarded`. The
+    # result carries no value, no target (a handle can be the value) and no
+    # correction id (it is computed from the value): the ledger, the handoff
+    # note and the logs see only a count and the rule's name.
+    discard_rule: str | None = None
+    page_type_known = False
+    # Before the target resolves its page type is unknown. A field some rule
+    # discards for any page type must not reach a handoff note or the ledger
+    # with its value on a failure in that window, so such a failure discards.
+    discard_any_type = discard_rule_for_field_any_type(field_name, config)
+
+    def _discarded(rule: str) -> CorrectionRecordResult:
+        if not dry_run:
+            note_discard(rule)
+        return CorrectionRecordResult(
+            correction_id="",
+            disposition="discarded",
+            reason=f"field discarded by {rule}",
+            op=op if isinstance(op, str) else None,
+            field=field_name if isinstance(field_name, str) else None,
+        )
+
     def _raised(reason: str) -> CorrectionRecordResult:
+        if discard_rule is not None:
+            return _discarded(discard_rule)
+        if not page_type_known and discard_any_type is not None:
+            return _discarded(discard_any_type)
         return CorrectionRecordResult(
             correction_id=correction_id,
             disposition="raised-tier",
@@ -1580,6 +1719,8 @@ def process_correction_record(
         # store and a later handoff both need the full record, not just the
         # reason -- but a distinct disposition so the §8.1 handoff path and
         # idempotency bookkeeping never see it by accident.
+        if discard_any_type is not None and not page_type_known:
+            return _discarded(discard_any_type)
         return CorrectionRecordResult(
             correction_id=correction_id,
             disposition="parked",
@@ -1641,8 +1782,42 @@ def process_correction_record(
     if shape not in ("scalar", "list"):
         return _raised(f"unrecognized shape {shape!r} for attribute {field_name!r}")
 
-    sensitive_map = resolve_corrections_sensitive_fields(config)
-    surface_class = sensitive_map.get(field_name)
+    # athenaeum#3162: the destination comes from the one storage resolver,
+    # ``route_for(page_type, field)``. The page type is only known once the
+    # target is resolved (below), so ``surface_class`` is set there.
+    surface_class = False
+    route_error: StorageConfigError | None = None
+    surface_targets: tuple[str, ...] = ()
+
+    def _route_for_page(page_type: Any) -> None:
+        nonlocal surface_class, route_error, surface_targets, discard_rule, page_type_known
+        route_error, surface_targets = None, ()
+        page_type_known = True
+        if isinstance(page_type, str) and page_type.strip():
+            # An unknown adapter name surfaces as a StorageConfigError at the
+            # point the surface root is resolved (below), not here, so the
+            # order of side effects is unchanged.
+            try:
+                decision = route_for(page_type, field_name, config=config)
+                surface_targets = decision.targets
+                if decision.discarded:
+                    discard_rule = decision.rule
+            except StorageConfigError as exc:
+                route_error = exc
+        surface_class = route_error is not None or bool(surface_targets)
+
+    def _usage_class_routing_error() -> str | None:
+        if usage_class is None:
+            return None
+        from athenaeum import pii
+
+        if surface_class and op == "add" and field_name in pii.CONTACT_IDENTIFIER_FIELDS:
+            return None
+        return (
+            "usage_class is only valid for an add correction on a "
+            "contact-identifier field routed to an excluded surface "
+            f"(field={field_name!r}, op={op!r})"
+        )
 
     # athenaeum#872: a contact-value correction may declare the usage class the
     # value it writes should carry (`athenaeum.pii.USAGE_CLASSES`) — never
@@ -1665,12 +1840,9 @@ def process_correction_record(
                 f"invalid usage_class {usage_class!r}; expected one of "
                 f"{list(pii.USAGE_CLASSES)}"
             )
-        if not (surface_class and op == "add" and field_name in pii.CONTACT_IDENTIFIER_FIELDS):
-            return _raised(
-                "usage_class is only valid for an add correction on a "
-                "contact-identifier field routed to an excluded surface "
-                f"(field={field_name!r}, op={op!r})"
-            )
+        # Whether the field is routed to an excluded surface depends on the
+        # target's page type; checked right after the target resolves, before
+        # any create.
 
     # Issue athenaeum#904 (AC2): optional decay annotations, same "validate before
     # any side effect" discipline as usage_class above. Unlike usage_class,
@@ -1752,6 +1924,12 @@ def process_correction_record(
             existing_meta, existing_body = parse_frontmatter(existing_text)
             if not existing_meta:
                 return _raised("target page has no frontmatter")
+        _route_for_page(existing_meta.get("type"))
+        if discard_rule is not None:
+            return _discarded(discard_rule)
+        usage_error = _usage_class_routing_error()
+        if usage_error is not None:
+            return _raised(usage_error)
     else:  # "creatable" — athenaeum#865
         # Mint the page now so the ordinary apply path below (schema-slot
         # routing, sensitivity routing, the §5.1 delta gate) runs for a
@@ -1786,6 +1964,13 @@ def process_correction_record(
             return _raised(
                 f"unrecognized entity type on create: {resolution.entity_type!r}"
             )
+
+        _route_for_page(resolution.entity_type)
+        if discard_rule is not None:
+            return _discarded(discard_rule)
+        usage_error = _usage_class_routing_error()
+        if usage_error is not None:
+            return _raised(usage_error)
 
         today = date.today().isoformat()
         created_meta = _build_created_entity_meta(
@@ -1949,7 +2134,11 @@ def process_correction_record(
     surface_root: Path | None = None
     if surface_class:
         uid = str(existing_meta.get("uid", "") or entity_path.stem)
-        surface_root = surface_root_for_class(surface_class, config, knowledge_root)
+        if route_error is not None:
+            raise route_error
+        surface_root = (
+            available_adapters(config)[surface_targets[0]].resolve_root(knowledge_root)
+        )
         surface_path, surface_meta, surface_body = _read_surface_record(surface_root, uid)
         read_meta = dict(surface_meta)
         read_meta.setdefault("uid", uid)
@@ -2152,6 +2341,104 @@ def process_correction_record(
         # reason as the branch above.
         return _result("escalated", reason)
 
+    def _merge_into(base: dict[str, Any]) -> dict[str, Any]:
+        """The record *base* with this correction applied; idempotent (athenaeum#3169)."""
+        if shape == "scalar":
+            merged_read = dict(base)
+            merged_read[write_field] = value
+            fs = dict(merged_read.get("field_sources") or {})
+            fs[write_field] = source
+            merged_read["field_sources"] = fs
+        elif op == "add":
+            merged_list = list(base.get(write_field) or [])
+            merged_list.append(value)
+            merged_read = dict(base)
+            merged_read[write_field] = merged_list
+            fs = dict(merged_read.get("field_sources") or {})
+            fs_list = [e for e in (fs.get(write_field) or []) if isinstance(e, dict)]
+            fs_list.append({"value": value, "source": source})
+            fs[write_field] = fs_list
+            merged_read["field_sources"] = fs
+        else:  # remove
+            existing_list = list(base.get(write_field) or [])
+            merged_list = [v for v in existing_list if _value_key(v) != _value_key(value)]
+            merged_read = dict(base)
+            merged_read[write_field] = merged_list
+            fs = dict(merged_read.get("field_sources") or {})
+            fs_list = [
+                e
+                for e in (fs.get(write_field) or [])
+                if isinstance(e, dict) and _value_key(e.get("value")) != _value_key(value)
+            ]
+            if fs_list:
+                fs[write_field] = fs_list
+            else:
+                fs.pop(write_field, None)
+            merged_read["field_sources"] = fs
+
+            # Issue athenaeum#2196 (AC2): removing an address must not leave its
+            # per-address `contact_classification` / `identifier_validity`
+            # entries behind — the orphan these lines exist to prevent. Only for
+            # an address-identifier field (`pii.CONTACT_IDENTIFIER_FIELDS`:
+            # emails/former_emails/alt_emails), and only when no OTHER address
+            # field on this same record still lists the value — a shared
+            # address moved from `emails` to `alt_emails`, say, still deserves
+            # its classification. `merged_read` (not `base`) is checked and
+            # mutated here because it is what actually gets written below, on
+            # both the surface-record path (`surface_class`) and the wiki path.
+            from athenaeum import pii
+
+            if write_field in pii.CONTACT_IDENTIFIER_FIELDS and not pii.record_lists_identifier(
+                merged_read, str(value)
+            ):
+                removed_key = pii.normalize_identifier(str(value))
+                for fact_field in (pii.CONTACT_CLASSIFICATION_FIELD, pii.IDENTIFIER_VALIDITY_FIELD):
+                    fact_entries = merged_read.get(fact_field)
+                    if not isinstance(fact_entries, list):
+                        continue
+                    kept = [
+                        entry
+                        for entry in fact_entries
+                        if not (
+                            isinstance(entry, dict)
+                            and pii.normalize_identifier(str(entry.get("identifier", "") or ""))
+                            == removed_key
+                        )
+                    ]
+                    if len(kept) != len(fact_entries):
+                        if kept:
+                            merged_read[fact_field] = kept
+                        else:
+                            merged_read.pop(fact_field, None)
+        return merged_read
+
+    def _sync_secondary(name: str) -> bool:
+        """Bring one later target of a multi-target rule in step; True if it changed.
+
+        Idempotent: a value the target already holds (or, for a removal, already
+        lacks) is not written again, so a re-run after a partial failure
+        completes the rest (athenaeum#3169).
+        """
+        root = target_root(name, config, knowledge_root)
+        if op == "remove" and not root.is_dir():
+            raise FileNotFoundError(f"target root of {name!r} is not reachable")
+        path, meta, body = _read_surface_record(root, uid)
+        meta.setdefault("uid", uid)
+        held = meta.get(write_field)
+        listed = isinstance(held, list) and any(_value_key(v) == _value_key(value) for v in held)
+        if shape == "scalar":
+            in_step = held == value
+        else:
+            in_step = listed == (op == "add")
+        wrote = not in_step
+        if wrote:
+            _write_surface_record(path, _merge_into(meta), body=body)
+        if usage_class is not None:
+            _apply_usage_classification(
+                root, value, usage_class=usage_class, source=source, observed_at=observed_at
+            )
+        return wrote
+
     if just_created and verdict == "noop":
         # The record's own field/value happens to equal what the create
         # step already wrote (the common case: the handle key IS the
@@ -2170,6 +2457,16 @@ def process_correction_record(
         # verdict — a create-vs-update bookkeeping correction, not a
         # §6.2 precedence change.
         return _result("applied", "entity created; field already matches the handle-derived value")
+
+    healed: list[str] = []
+    if verdict == "noop" and surface_class and len(surface_targets) > 1 and not dry_run:
+        # The primary already holds the value; a later target may not (a write
+        # that failed part-way). Complete it rather than serve a divergence.
+        def _heal(name: str) -> None:
+            if _sync_secondary(name):
+                healed.append(name)
+
+        apply_to_targets(surface_targets[1:], _heal)
 
     if verdict == "noop":
         if usage_class is not None and not dry_run:
@@ -2191,6 +2488,10 @@ def process_correction_record(
                 source=source,
                 observed_at=observed_at,
             )
+        if healed:
+            # The primary's usage classification ran above, same as without
+            # multi-target (athenaeum#3169).
+            return _result("routed-elsewhere", f"{reason}; completed on target(s) {healed}")
         return _result("noop", reason)
     if verdict == "defer":
         return _result("deferred-lower-precedence", reason)
@@ -2199,73 +2500,7 @@ def process_correction_record(
 
     # verdict == "apply"
     monotone_apply = monotone and verdict == "apply"
-    if shape == "scalar":
-        merged_read = dict(read_meta)
-        merged_read[write_field] = value
-        fs = dict(merged_read.get("field_sources") or {})
-        fs[write_field] = source
-        merged_read["field_sources"] = fs
-    elif op == "add":
-        merged_list = list(read_meta.get(write_field) or [])
-        merged_list.append(value)
-        merged_read = dict(read_meta)
-        merged_read[write_field] = merged_list
-        fs = dict(merged_read.get("field_sources") or {})
-        fs_list = [e for e in (fs.get(write_field) or []) if isinstance(e, dict)]
-        fs_list.append({"value": value, "source": source})
-        fs[write_field] = fs_list
-        merged_read["field_sources"] = fs
-    else:  # remove
-        existing_list = list(read_meta.get(write_field) or [])
-        merged_list = [v for v in existing_list if _value_key(v) != _value_key(value)]
-        merged_read = dict(read_meta)
-        merged_read[write_field] = merged_list
-        fs = dict(merged_read.get("field_sources") or {})
-        fs_list = [
-            e
-            for e in (fs.get(write_field) or [])
-            if isinstance(e, dict) and _value_key(e.get("value")) != _value_key(value)
-        ]
-        if fs_list:
-            fs[write_field] = fs_list
-        else:
-            fs.pop(write_field, None)
-        merged_read["field_sources"] = fs
-
-        # Issue athenaeum#2196 (AC2): removing an address must not leave its
-        # per-address `contact_classification` / `identifier_validity`
-        # entries behind — the orphan these lines exist to prevent. Only for
-        # an address-identifier field (`pii.CONTACT_IDENTIFIER_FIELDS`:
-        # emails/former_emails/alt_emails), and only when no OTHER address
-        # field on this same record still lists the value — a shared
-        # address moved from `emails` to `alt_emails`, say, still deserves
-        # its classification. `merged_read` (not `read_meta`) is checked and
-        # mutated here because it is what actually gets written below, on
-        # both the surface-record path (`surface_class`) and the wiki path.
-        from athenaeum import pii
-
-        if write_field in pii.CONTACT_IDENTIFIER_FIELDS and not pii.record_lists_identifier(
-            merged_read, str(value)
-        ):
-            removed_key = pii.normalize_identifier(str(value))
-            for fact_field in (pii.CONTACT_CLASSIFICATION_FIELD, pii.IDENTIFIER_VALIDITY_FIELD):
-                fact_entries = merged_read.get(fact_field)
-                if not isinstance(fact_entries, list):
-                    continue
-                kept = [
-                    entry
-                    for entry in fact_entries
-                    if not (
-                        isinstance(entry, dict)
-                        and pii.normalize_identifier(str(entry.get("identifier", "") or ""))
-                        == removed_key
-                    )
-                ]
-                if len(kept) != len(fact_entries):
-                    if kept:
-                        merged_read[fact_field] = kept
-                    else:
-                        merged_read.pop(fact_field, None)
+    merged_read = _merge_into(read_meta)
 
     if dry_run:
         disposition = "routed-elsewhere" if surface_class else "applied"
@@ -2273,7 +2508,19 @@ def process_correction_record(
 
     if surface_class:
         assert surface_path is not None
-        _write_surface_record(surface_path, merged_read, body=surface_body)
+        if len(surface_targets) > 1:
+            # Every target in order; the first failure raises naming it, and a
+            # re-run completes the rest (athenaeum#3169).
+            def _write_target(name: str) -> None:
+                if name == surface_targets[0]:
+                    assert surface_path is not None
+                    _write_surface_record(surface_path, merged_read, body=surface_body)
+                else:
+                    _sync_secondary(name)
+
+            apply_to_targets(surface_targets, _write_target)
+        else:
+            _write_surface_record(surface_path, merged_read, body=surface_body)
         if usage_class is not None:
             # athenaeum#872: the value is now listed on the surface record (the
             # write just above), so `classify_contact_value` can resolve it —
@@ -2641,6 +2888,8 @@ def run_trust_dryrun(
         edge.domain.evidence_kind is not None for edge in edges
     )
 
+    # athenaeum#3162: same refusal as `run_correction_phase`, before any batch is read.
+    refuse_removed_sensitive_fields(config)
     baseline_outcomes = _dry_pass(
         raw_root=raw_root, wiki_root=wiki_root, knowledge_root=knowledge_root, config=config
     )
@@ -2835,7 +3084,7 @@ def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:
     redacted_payloads: list[dict[str, Any]] = []
     for r in outcome.results:
         counts[r.disposition] = counts.get(r.disposition, 0) + 1
-        if r.disposition not in ("applied", "noop"):
+        if r.disposition not in ("applied", "noop", "discarded"):
             non_trivial_ids.append(r.correction_id)
         if r.disposition == "raised-tier":
             raised_tier_ids.append(r.correction_id)
@@ -3246,6 +3495,14 @@ def retire_batch(
     if not batch_path.exists():
         return True
     store = store if store is not None else open_store(load_config(knowledge_root), knowledge_root)
+    if store.capabilities.declares_no_history:
+        note_no_restore_point(log, knowledge_root, "corrections")
+        try:
+            batch_path.unlink()
+        except OSError as exc:
+            log.warning("corrections: could not remove batch %s: %s", batch_path, exc)
+            return False
+        return True
     if not store.capabilities.versioned:
         log.warning(
             "corrections: store at %s is not versioned — refusing to "
@@ -3482,6 +3739,11 @@ def run_correction_phase(
     ``dispositions`` (disposition -> count, across every processed batch),
     ``records_total``.
     """
+    # athenaeum#3162: refuse a configuration still setting the removed
+    # `librarian.corrections.sensitive_fields` key BEFORE any batch is
+    # discovered or read (the parked-retry below writes too).
+    refuse_removed_sensitive_fields(config)
+
     max_batch_bytes = resolve_corrections_max_batch_bytes(config)
     max_records_per_batch = resolve_corrections_max_records_per_batch(config)
     max_records_per_run = resolve_corrections_max_records_per_run(config)

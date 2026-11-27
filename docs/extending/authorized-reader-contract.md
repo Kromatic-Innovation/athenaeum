@@ -19,8 +19,8 @@ this document does not reopen.
 The excluded read path is the same one §3 of
 [`docs/design/one-way-in-one-way-out.md`](../design/one-way-in-one-way-out.md) already names,
 now carrying strictly more of what a suppression consumer needs: `recall`
-with its excluded-field flag set (`with_pii=True` on the MCP tool,
-`--with-pii` on the CLI) when the caller is searching; `read_entity` /
+with its excluded-field flag set (`include_sensitive=True` on the MCP tool,
+`--include-sensitive` on the CLI) when the caller is searching; `read_entity` /
 `read_entities` when the caller already holds a uid; and, new for athenaeum#851,
 `read_identifier_facts` for the bulk by-address case — a campaign holding a
 list of email addresses and no uids at all.
@@ -59,14 +59,14 @@ email address on that excluded surface. That is a separate mechanism from
 the plain `do_not_email:` frontmatter field a wiki page carries as an
 ordinary field, which `athenaeum.enumeration` reads and predicates on like
 any other field (`current_company`, `warm_score`, ...). The latter was gated
-behind `enumerate_entities`'s `with_pii=True` since this module's own
+behind `enumerate_entities`'s `include_sensitive=True` since this module's own
 introduction (athenaeum#965 AC amendment 1) until athenaeum#1122, on the
 theory that anything email-suppression-shaped needed the same guard as the
 excluded-surface record; the operator ruled that
 theory wrong — the frontmatter boolean (and its `_reason`/`_date`
 companions) has no excluded-surface join and no durable identifier value,
 so `enumerate_entities` no longer gates it. This document's
-`with_pii=True`, everywhere it appears above and below, refers only to the
+`include_sensitive=True`, everywhere it appears above and below, refers only to the
 excluded-surface record join and is unaffected by that change; see
 `athenaeum/enumeration.py`'s "PII-gated fields" docstring section for the
 frontmatter-field gate's own rationale.
@@ -113,13 +113,13 @@ silently, for every caller who took the shortcut. A consumer that calls
 `read_identifier_facts` never notices the day the backend changes underneath
 it, because it was never touching the backend.
 
-None of this widens what a search can surface. `with_pii` is a strictly
+None of this widens what a search can surface. `include_sensitive` is a strictly
 render-layer join, not a search predicate: `_excluded_block_for_hit` in
 `src/athenaeum/mcp_server.py` runs only for a hit that has already survived
 audience scoping (the fail-closed read predicate, athenaeum#312/#538) and the
 `recallable` drop, and it is skipped entirely — costing zero scans — when the
 flag is unset. The `mcp_server` module docstring states the ordering
-explicitly: "`recall`'s `with_pii` join runs strictly AFTER that predicate, so
+explicitly: "`recall`'s `include_sensitive` join runs strictly AFTER that predicate, so
 it can never be used to probe whether a record exists behind a page the caller
 may not read." An authorized reader gets more FACTS about a hit already in
 scope; they never get a wider candidate set than an unauthorized-for-excluded

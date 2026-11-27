@@ -64,6 +64,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
@@ -272,6 +273,21 @@ _REMOVED_CONFIG_KEYS: dict[str, str] = {
         "footnote-targeted detection (athenaeum#262) made the knob moot, so "
         "Tier-4 decision-log suppression always uses the code default (0.83) "
         "now -- this key is no longer read and has no effect"
+    ),
+    "librarian.corrections.sensitive_fields": (
+        "removed in athenaeum#3162; a correction is now routed by the same "
+        "storage settings as every other writer, so a field kept on a separate "
+        "location is named once, under `storage.excluded_fields.<class>` (with "
+        "`storage.mapping.<class>` placing that class outside the corpus). A "
+        "run that processes corrections refuses to start while this key is "
+        "non-empty and prints the exact replacement; other commands only show "
+        "this notice"
+    ),
+    "serve.excluded_fields": (
+        "renamed in athenaeum#3163; use `serve.sensitive_reads: on | off` "
+        "(same values, same per-profile defaults) instead. `athenaeum serve` "
+        "refuses to start while this key is set, because ignoring it would "
+        "silently change what a served process returns"
     ),
     "librarian.page_split_proposals.heterogeneity_threshold": (
         "removed in athenaeum#2465; the page-split proposal decision type "
@@ -6458,7 +6474,21 @@ search_backend: vector
 #         merge_eligible: false
 #   mapping:                       # entity `type` -> adapter name
 #     pii: excluded                # route the pii class to the built-in surface
+#   # routes: nothing is routed unless a rule says so. One rule per page type
+#   # (or per page type + fields, or per sensitivity class); `to` is ONE location.
+#   # A field rule's target must be a location marked `sensitive: true`.
+#   #   routes:
+#   #     - page_type: person            # fields omitted = the whole page type
+#   #       to: [shared-notes]
+#   #     - page_type: person
+#   #       fields: [email, phone]       # these fields only, kept in a vault
+#   #       to: [contacts-vault]
+#   #     - sensitivity_class: secret    # where free-text values of this class go
+#   #       to: [contacts-vault]
 # storage:
+#   history: git                   # git (default) | none: plain files, no repository
+#                                  #   (`athenaeum init --no-history`); no restore point,
+#                                  #   no undo, no history-based commands
 #   mapping:
 #     pii: excluded
 
@@ -6534,8 +6564,13 @@ def default_llm_provider_for_new_config() -> str:
     return "api"
 
 
-def write_default_config(knowledge_root: Path) -> Path:
-    """Write the default config file if it doesn't exist. Returns the path."""
+def write_default_config(knowledge_root: Path, *, history: str = "git") -> Path:
+    """Write the default config file if it doesn't exist. Returns the path.
+
+    ``history="none"`` (``athenaeum init --no-history``, athenaeum#3160) also
+    writes an active ``storage.history: none`` block into the file it creates.
+    An existing file is never touched.
+    """
     config_path = knowledge_root / "athenaeum.yaml"
     if not config_path.exists():
         content = _DEFAULT_CONFIG_CONTENT.replace(
@@ -6549,6 +6584,8 @@ def write_default_config(knowledge_root: Path) -> Path:
                 "# llm:\n#   provider: api",
                 "llm:\n  provider: claude-cli",
             )
+        if history == "none":
+            content = content.rstrip("\n") + "\n\nstorage:\n  history: none\n"
         config_path.write_text(content, encoding="utf-8")
     return config_path
 
@@ -6680,6 +6717,49 @@ def resolve_authority_manifest_path(
     return knowledge_root / "authority-manifest.yaml"
 
 
+class StorageConfigError(ValueError):
+    """Raised when the storage layer is misconfigured.
+
+    Loud by design (mirrors :class:`athenaeum.provider.ProviderConfigError`):
+    a mapping that names an adapter that does not exist, or a custom adapter
+    definition with a malformed policy, must never silently fall back to the
+    default surface — that would route a class the operator meant to *exclude*
+    straight into the recalled corpus. Defined here (and re-exported by
+    :mod:`athenaeum.storage`) so the config resolvers can raise it without
+    importing the storage layer.
+    """
+
+
+#: The values ``storage.history`` (and a per-adapter ``history``) may take.
+# Ordered none-first on purpose: a ("git", ...) tuple literal reads as a git argv to
+# tests/test_no_git_shelling_outside_store.py.
+HISTORY_VALUES = ("none", "git")
+
+
+def resolve_storage_history(config: dict[str, Any] | None) -> str:
+    """Resolve ``storage.history``: whether the knowledge directory keeps history (athenaeum#3160).
+
+    ``git`` (the default) means the installation keeps its history in a git
+    repository: ``athenaeum init`` creates one, ``snapshot`` commits to it, and
+    a destructive operation relies on it as the restore point. ``none`` declares
+    plain files: ``athenaeum init --no-history`` writes it and creates no
+    repository, and ``snapshot`` returns ``None`` without running git. Under
+    ``none`` there is no restore point, no undo, and no history-based command.
+    Any other value raises :class:`StorageConfigError`. A single location can
+    override this with ``storage.adapters.<name>.history``; unset, it follows
+    the installation. Not seeded in ``_DEFAULTS`` (issue athenaeum#187).
+    """
+    if not isinstance(config, dict):
+        return "git"
+    storage_cfg = config.get("storage")
+    if not isinstance(storage_cfg, dict) or "history" not in storage_cfg:
+        return "git"
+    raw = storage_cfg.get("history")
+    if not isinstance(raw, str) or raw.strip() not in HISTORY_VALUES:
+        raise StorageConfigError(f"storage.history must be 'git' or 'none', got {raw!r}")
+    return raw.strip()
+
+
 def resolve_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
     """Resolve the ``storage.mapping`` entity-class → adapter-name table (athenaeum#429).
 
@@ -6716,6 +6796,81 @@ def resolve_storage_mapping(config: dict[str, Any] | None) -> dict[str, str]:
             continue
         mapping[cls.strip()] = adapter_name.strip()
     return mapping
+
+
+def resolve_storage_routes(config: dict[str, Any] | None) -> Any:
+    """Resolve the ``storage.routes`` table of routing rules (athenaeum#3166).
+
+    Each rule is a mapping with ``page_type`` (or, in its place,
+    ``sensitivity_class``), an optional ``fields`` list, and ``to``, a list of
+    location names (``storage.adapters`` names plus the built-ins). A ``to`` list
+    names one location, several vaults, or is empty. A rule with ``fields`` sends those
+    fields of that page type to the target, and the target must be a location
+    marked ``sensitive: true``; a rule without ``fields`` sends the whole page
+    type (the long form of a ``storage.mapping`` entry, which stays as the short
+    form); a ``sensitivity_class`` rule gives the location for values recognised
+    in free text and replaces the per-class lookup in ``sensitivity_routing``.
+    A field named in a rule needs no value on any page: fields are declared by
+    the operator and none is built in.
+
+    **An empty ``to`` discards.** ``to: []`` marks what the rule names as private
+    with nowhere to keep it, and the value is stored nowhere. A field rule with
+    ``to: []`` drops those fields at compile (the rest of the page is written),
+    makes the contact write and a field correction write nothing for them (a
+    correction ends with the outcome ``discarded``, never reaches the decision
+    queue, and leaves no value or value-derived id in the corrections ledger,
+    the handoff note or a log), and a ``sensitivity_class`` rule with ``to: []``
+    replaces each value recognised in free text with a fixed marker naming the
+    class and saying the value was not stored, with no record written. A page
+    type rule with ``to: []`` is not captured: the intake decision drops it,
+    naming the rule. Each discard is counted per rule in the run summary (the
+    ``discard`` phase), with no value and no hash of one. Only a rule discards:
+    a field, page type or class that no rule names is ordinary content. **The
+    limit:** this governs what the compile run writes. A value already in a raw
+    file is not removed by it; that is the write-time screen and the screening
+    phase.
+
+    **Several targets.** A ``to`` list of two or more names writes the value to
+    every one, in the same call. Every target must be a vault (``sensitive: true``,
+    outside the index, not ``read_only``); a list that includes a location in the
+    index is refused, because two writable indexed copies of a page have no rule
+    for which one wins. Order is significant: the first target is the primary, the
+    only one read. A write succeeds only if every target accepts it; a failure
+    raises naming the target, and re-running completes the rest (each write is
+    idempotent per target). A value on a later target that the primary lacks is
+    reported by ``athenaeum doctor``, not served. Removing a value and
+    ``athenaeum retire`` apply to every target; an unreachable target is named and
+    the command exits non-zero. ``athenaeum status`` counts the targets per rule
+    and names any inside a git repository, where an erasure does not reach
+    history. Nothing keeps targets in step after an out-of-band edit.
+
+    **A class with no rule is refused.** With ``sensitivity.routing.enabled`` on,
+    every sensitivity class that has a recogniser and is not switched ``off``
+    needs a ``sensitivity_class`` rule (or a ``storage.mapping`` entry), written
+    as ``to: [<location>]`` or ``to: []``. Without one the run is refused at
+    load with a message naming the rule to write. The built-in excluded
+    location is no longer a fallback, and the value is not discarded.
+
+    Returns the raw list (still primitive) or an EMPTY list when unset, the code
+    default: nothing is routed unless a rule says so, so an unconfigured base is
+    byte-identical. A value that is not a list is returned as is so that
+    :func:`athenaeum.storage.configured_routes` can refuse it loudly with the key
+    in the message. The rules are validated there (duplicate rules, a page type
+    in both ``storage.routes`` and ``storage.mapping``, an unknown ``to``, a
+    field rule whose target is not sensitive, a ``to`` list of several names that
+    are not all vaults)
+    and each raises ``StorageConfigError``. Records already on disk are read
+    through a rule without being moved.
+    """
+    if not isinstance(config, dict):
+        return []
+    storage_cfg = config.get("storage") or {}
+    if not isinstance(storage_cfg, dict):
+        return []
+    raw = storage_cfg.get("routes")
+    if raw is None:
+        return []
+    return raw
 
 
 def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -6756,6 +6911,27 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     on disk keep their names; commit messages and page bodies are untouched; it
     is not encryption.
 
+    An entry may set ``sensitive: true`` (athenaeum#3161; default ``false``; a
+    non-boolean is a ``StorageConfigError``), marking the location a vault. A
+    vault is a separate place with a read gate: a read of a value held there
+    returns a redaction marker unless the caller sets the read flag. It is not
+    encryption -- the files are plain text on disk, and anyone with file access
+    reads them. A sensitive location is never in the main index, so an entry
+    that sets ``sensitive: true`` with any ``corpus_policy`` capability true is
+    a ``StorageConfigError``. The built-in ``excluded`` location is sensitive;
+    the built-in wiki location is not and cannot be made so. A custom location
+    outside the corpus keeps its read behaviour whether or not it is marked;
+    ``athenaeum doctor`` warns for each one that holds routed fields but is
+    unmarked.
+
+    An entry may set ``history: git`` or ``history: none`` (athenaeum#3160) to
+    override ``storage.history`` (see :func:`resolve_storage_history`) for that
+    one location: a location that is its own git repository keeps its own
+    history and its own remote while the rest of the installation has none, or
+    the reverse. Unset, it follows the installation; any other value is a
+    ``StorageConfigError``. Under ``none`` that location has no restore point,
+    no undo, and no history-based commands.
+
     A per-type store that ``athenaeum storage move-type`` moves pages into
     (athenaeum#2620) is an entry with ``embedded: true`` whose ``surface_root``
     is a directory that is its OWN git repository (not the wiki's), e.g.::
@@ -6776,7 +6952,8 @@ def resolve_storage_adapters(config: dict[str, Any] | None) -> dict[str, dict[st
     ``surface_root`` is relative to the knowledge root; an absolute path (or one
     starting with ``~``) is used as-is, so a mount may live anywhere on disk. A
     second install that only READS a shared repository declares its clone
-    ``read_only`` (see ``docs/guides/shared-store-reader.md``)::
+    ``read_only`` (see ``docs/guides/shared-store-reader.md``; the whole setup from
+    both sides, with the store declaration, is ``docs/guides/shared-page-type.md``)::
 
         storage:
           adapters:
@@ -7213,7 +7390,7 @@ def resolve_excluded_fields_config(
 # ---------------------------------------------------------------------------
 #
 # Every key lives under ``librarian.corrections``. The two structural
-# (dict-shaped) keys below — ``fields`` and ``sensitive_fields`` — follow
+# (dict-shaped) keys below — ``fields`` and ``schema_slots`` — follow
 # ``resolve_storage_mapping``'s precedent: no ``ATHENAEUM_*`` env override
 # (a dict has no single scalar env encoding), EMPTY by default. The scalar
 # bound resolvers further down follow ``resolve_delta_max_affected_clusters``'s
@@ -7257,39 +7434,6 @@ def resolve_corrections_fields(config: dict[str, Any] | None) -> dict[str, dict[
     return fields
 
 
-def resolve_corrections_sensitive_fields(config: dict[str, Any] | None) -> dict[str, str]:
-    """Resolve ``librarian.corrections.sensitive_fields`` — the §7.1
-    sensitivity-routing table (`docs/design/field-corrections.md` §7.1).
-
-    Maps an attribute name to a :mod:`athenaeum.storage` entity-CLASS name
-    (resolved through the existing ``storage.mapping`` adapter layer, athenaeum#429
-    — reused rather than reinvented) that a fact bearing on that attribute
-    is routed to, REGARDLESS of the destination a correction named. Empty by
-    default: **sensitivity classification is deployment configuration**,
-    never shipped in this repo (docs/design/field-corrections.md §7.1, issue athenaeum#797
-    out-of-scope list).
-    """
-    if not isinstance(config, dict):
-        return {}
-    librarian_cfg = config.get("librarian") or {}
-    if not isinstance(librarian_cfg, dict):
-        return {}
-    corrections_cfg = librarian_cfg.get("corrections")
-    if not isinstance(corrections_cfg, dict):
-        return {}
-    raw = corrections_cfg.get("sensitive_fields")
-    if not isinstance(raw, dict):
-        return {}
-    mapping: dict[str, str] = {}
-    for field_name, surface_class in raw.items():
-        if not isinstance(field_name, str) or not field_name.strip():
-            continue
-        if not isinstance(surface_class, str) or not surface_class.strip():
-            continue
-        mapping[field_name.strip()] = surface_class.strip()
-    return mapping
-
-
 def resolve_corrections_schema_slots(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Resolve ``librarian.corrections.schema_slots`` — the §7.2 schema-
     evolution table (`docs/design/field-corrections.md` §7.2) for attributes that
@@ -7311,7 +7455,7 @@ def resolve_corrections_schema_slots(config: dict[str, Any] | None) -> dict[str,
     frontmatter (schemas.py's per-type models already tolerate unknown keys
     via ``extra="allow"``, the same mechanism source-handle keys use) — §7.2
     only fires when the deployment explicitly asks for non-default routing.
-    Empty by default, same rationale as :func:`resolve_corrections_sensitive_fields`.
+    Empty by default: a deployment opts in per attribute.
     """
     if not isinstance(config, dict):
         return {}
@@ -10125,7 +10269,7 @@ def resolve_serve_profile(
                     # list) must not fall through to "no profile": that would
                     # serve the FULL surface on a typo, the one direction a
                     # safety pin must never fail in. Same fail-loud rule as
-                    # `resolve_serve_excluded_fields` below. (Seer review on
+                    # `resolve_serve_sensitive_reads` below. (Seer review on
                     # PR athenaeum#2416.)
                     raise RemotePolicyError(
                         f"serve.profile={candidate!r} must be a string naming "
@@ -10206,13 +10350,14 @@ def resolve_serve_tools(
     return None
 
 
-def resolve_serve_excluded_fields(
+def resolve_serve_sensitive_reads(
     config: dict[str, Any] | None,
     cli_value: str | None = None,
+    legacy_cli_value: str | None = None,
 ) -> bool | None:
-    """Resolve the serve-time excluded-fields pin (issue athenaeum#2383).
+    """Resolve the serve-time sensitive-reads pin (issues athenaeum#2383, athenaeum#3163).
 
-    Returns ``True`` (excluded values are resolvable, the historical
+    Returns ``True`` (sensitive values are resolvable, the historical
     behaviour), ``False`` (withheld), or ``None`` for "not set" — which lets
     :func:`athenaeum.remote_policy.build_remote_policy` fall back to the
     active profile's default (``off`` under ``remote``) and keeps a server
@@ -10221,13 +10366,21 @@ def resolve_serve_excluded_fields(
 
     Precedence follows the repo convention CLI > env > yaml > default:
 
-    - ``cli_value`` — the ``athenaeum serve --excluded-fields`` flag.
-    - ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` — env var.
-    - ``serve.excluded_fields`` — yaml string.
+    - ``cli_value`` — the ``athenaeum serve --sensitive-reads`` flag.
+    - ``ATHENAEUM_SERVE_SENSITIVE_READS`` — env var.
+    - ``serve.sensitive_reads`` — yaml string.
     - ``None`` — not set.
 
+    The names this setting had before its rename are deprecated aliases for one minor
+    release: ``legacy_cli_value`` (``--excluded-fields``) and the
+    ``ATHENAEUM_SERVE_EXCLUDED_FIELDS`` env var resolve identically, and a
+    notice naming the replacement goes to stderr. The old yaml key
+    ``serve.excluded_fields`` is NOT an alias: it is refused, with the
+    replacement printed (see ``_REMOVED_CONFIG_KEYS``). Setting a deprecated
+    and a current name to different values raises.
+
     The vocabulary is the words ``off`` / ``on``
-    (:data:`athenaeum.remote_policy.VALID_EXCLUDED_FIELDS_VALUES`), not a
+    (:data:`athenaeum.remote_policy.VALID_SENSITIVE_READS_VALUES`), not a
     bool, so YAML's permissive truthiness cannot quietly pick a side on a
     PII-egress boundary; anything else raises
     :class:`athenaeum.remote_policy.RemotePolicyError` and
@@ -10235,49 +10388,87 @@ def resolve_serve_excluded_fields(
     :func:`resolve_serve_profile` does. No seed in ``_DEFAULTS``.
     """
     from athenaeum.remote_policy import (
-        VALID_EXCLUDED_FIELDS_VALUES,
+        VALID_SENSITIVE_READS_VALUES,
         RemotePolicyError,
     )
 
+    if isinstance(config, dict):
+        legacy_serve_cfg = config.get("serve")
+        if isinstance(legacy_serve_cfg, dict) and "excluded_fields" in legacy_serve_cfg:
+            raise RemotePolicyError(
+                _REMOVED_CONFIG_KEYS["serve.excluded_fields"]
+            )
+
+    def _deprecated(old: str, new: str) -> None:
+        print(
+            f"athenaeum serve: {old} is deprecated: use {new} instead. The old "
+            "name still works and is removed in the next minor release.",
+            file=sys.stderr,
+        )
+
     raw: str | None = None
-    source = "serve.excluded_fields"
+    source = "serve.sensitive_reads"
+    legacy_env = os.environ.get("ATHENAEUM_SERVE_EXCLUDED_FIELDS")
+    new_env = os.environ.get("ATHENAEUM_SERVE_SENSITIVE_READS")
+    if legacy_cli_value is not None:
+        _deprecated("--excluded-fields", "--sensitive-reads")
+        if cli_value is not None and cli_value.strip().lower() != legacy_cli_value.strip().lower():
+            raise RemotePolicyError(
+                "--excluded-fields and --sensitive-reads were passed different "
+                "values; pass --sensitive-reads alone."
+            )
+        cli_value = cli_value if cli_value is not None else legacy_cli_value
     if cli_value is not None:
         raw = cli_value
-        source = "--excluded-fields"
+        source = "--sensitive-reads"
     else:
-        env = os.environ.get("ATHENAEUM_SERVE_EXCLUDED_FIELDS")
+        if legacy_env is not None:
+            _deprecated("ATHENAEUM_SERVE_EXCLUDED_FIELDS", "ATHENAEUM_SERVE_SENSITIVE_READS")
+            if new_env is not None and new_env.strip().lower() != legacy_env.strip().lower():
+                raise RemotePolicyError(
+                    "ATHENAEUM_SERVE_EXCLUDED_FIELDS and "
+                    "ATHENAEUM_SERVE_SENSITIVE_READS are set to different "
+                    "values; set ATHENAEUM_SERVE_SENSITIVE_READS alone."
+                )
+        env = new_env if new_env is not None else legacy_env
         if env is not None:
             raw = env
-            source = "ATHENAEUM_SERVE_EXCLUDED_FIELDS"
+            source = (
+                "ATHENAEUM_SERVE_SENSITIVE_READS"
+                if new_env is not None
+                else "ATHENAEUM_SERVE_EXCLUDED_FIELDS"
+            )
         elif isinstance(config, dict):
             serve_cfg = config.get("serve")
             if isinstance(serve_cfg, dict):
-                candidate = serve_cfg.get("excluded_fields")
+                candidate = serve_cfg.get("sensitive_reads")
                 if isinstance(candidate, str):
                     raw = candidate
                 elif candidate is not None:
-                    # A bare `serve.excluded_fields: false` is YAML's bool, not
+                    # A bare `serve.sensitive_reads: false` is YAML's bool, not
                     # this knob's vocabulary. Reject it rather than guessing
                     # which of off/on the operator meant -- a wrong guess here
                     # is a PII egress.
                     raise RemotePolicyError(
-                        f"serve.excluded_fields={candidate!r} must be one of "
-                        f"{list(VALID_EXCLUDED_FIELDS_VALUES)} (as a quoted "
+                        f"serve.sensitive_reads={candidate!r} must be one of "
+                        f"{list(VALID_SENSITIVE_READS_VALUES)} (as a quoted "
                         "string), not a YAML boolean."
                     )
 
     if raw is None or not raw.strip():
         # An explicitly EMPTY value at any tier means "not set", matching
         # `resolve_serve_profile` and `resolve_audience` rather than erroring
-        # on the `ATHENAEUM_SERVE_EXCLUDED_FIELDS=` unset idiom.
+        # on the `ATHENAEUM_SERVE_SENSITIVE_READS=` unset idiom.
         return None
     value = raw.strip().lower()
-    if value not in VALID_EXCLUDED_FIELDS_VALUES:
+    if value not in VALID_SENSITIVE_READS_VALUES:
         raise RemotePolicyError(
-            f"{source}={raw!r} is not a valid excluded-fields setting; "
-            f"expected one of {list(VALID_EXCLUDED_FIELDS_VALUES)}."
+            f"{source}={raw!r} is not a valid sensitive-reads setting; "
+            f"expected one of {list(VALID_SENSITIVE_READS_VALUES)}."
         )
     return value == "on"
+
+
 # Issue athenaeum#2382: the `athenaeum serve` transport knobs. Appended at EOF
 # per this module's own convention, and each reads its nested yaml path INLINE
 # (`config.get("serve")` then `.get("<leaf>")`) rather than through a shared

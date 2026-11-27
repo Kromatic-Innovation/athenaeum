@@ -363,11 +363,11 @@ class TestWorkedExampleEndToEnd:
             "        shape: scalar\n"
             "        writers: [delivery-monitor]\n"
             "        monotone: true\n"
-            "    sensitive_fields:\n"
-            "      bounced: pii\n"
             "storage:\n"
             "  mapping:\n"
             "    pii: excluded\n"
+            "  excluded_fields:\n"
+            "    pii: [emails, phones, former_emails, alt_emails, bounced]\n"
         )
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -819,6 +819,87 @@ class TestRatifiedApplyRoundTrip:
 
         archive_text = (wiki / "_pending_questions_archive.md").read_text()
         assert "**Write-back**: applied" in archive_text
+
+
+    def test_removed_key_refuses_before_any_block_is_processed(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#3162: with the removed ``librarian.corrections.sensitive_fields``
+        key set, a run that would ratify a field correction is refused BEFORE
+        any block is written back or archived, even when an ordinary answered
+        block precedes the correction (no partial run to redo on the retry)."""
+        import pytest
+
+        from athenaeum.answers import ingest_answers
+        from athenaeum.corrections import RemovedCorrectionsConfigError
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        page = _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        page.write_text(
+            page.read_text().replace(
+                "name: A",
+                "name: A\ncurrent_title: CTO\nfield_sources:\n  current_title: 'api:apollo'",
+            )
+        )
+        raw = tmp_path / "raw" / "enrichment-service"
+        raw.mkdir(parents=True)
+        (raw / "20260806T030000Z-1a2b3c4d.jsonl").write_text(
+            _batch(
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T05:58:40Z",
+                },
+                submitter="enrichment-service",
+            )
+        )
+        config: dict = {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "current_title": {
+                            "shape": "scalar",
+                            "writers": ["enrichment-service"],
+                        }
+                    }
+                }
+            }
+        }
+        _run_correction_phase(_make_ctx(tmp_path, config))
+
+        pending = wiki / "_pending_questions.md"
+        pending_text = pending.read_text()
+        assert "field-correction" in pending_text
+        ordinary = (
+            '## [2026-04-20] Entity: "Acme Corp" '
+            "(from sessions/20240406T120000Z-aabb0011.md)\n"
+            "- [x] Is Acme still Series A after the 2026 recap?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: Wiki says Series A; new raw implies Series B.\n"
+            "\n"
+            "Series B, closed March 2026.\n"
+            "\n---\n\n"
+        )
+        head, sep, tail = pending_text.partition("## ")
+        answered = head + ordinary + sep + tail.replace("- [ ]", "- [x]", 1) + "\nratify\n"
+        pending.write_text(answered)
+
+        config["librarian"]["corrections"]["sensitive_fields"] = {"emails": "pii"}
+        with pytest.raises(RemovedCorrectionsConfigError):
+            ingest_answers(pending, tmp_path / "raw", config=config)
+
+        # Nothing was processed: the file is untouched, nothing archived, no
+        # answer intake written, and the page keeps its old value.
+        assert pending.read_text() == answered
+        assert not (wiki / "_pending_questions_archive.md").exists()
+        answers_dir = tmp_path / "raw" / "answers"
+        assert not answers_dir.exists() or not any(answers_dir.iterdir())
+        assert "current_title: CTO" in page.read_text()
 
 
 class TestSchemaAmendmentProposal:

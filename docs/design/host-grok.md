@@ -289,7 +289,7 @@ push.
     therefore be enforced server-side.** Default the Grok-facing tool set to
     read-only (`recall`, `read_entity`, `entity_schema`,
     `enumerate_entities`) until the operator opts in to writes.
-  - `recall(with_pii=True)` and `read_entity` expose excluded fields
+  - `recall(include_sensitive=True)` and `read_entity` expose excluded fields
     ([security posture §2](security-posture.md)). They must follow the
     authenticated audience and must never default open to a hosted
     connector.
@@ -302,7 +302,7 @@ The remote-mode children of athenaeum#2199 that this list feeds:
 
 - athenaeum#2382: transport;
 - athenaeum#2384: OAuth and identity-bound audience;
-- athenaeum#2383: tool allowlist and the `with_pii` pin.
+- athenaeum#2383: tool allowlist and the `include_sensitive` pin.
 
 1. **Challenge `initialize`.** Grok apps discover OAuth only when the
    initial handshake returns 401 (R). A design that allows anonymous

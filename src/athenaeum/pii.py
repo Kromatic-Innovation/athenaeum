@@ -141,7 +141,7 @@ Five pieces, in the order the issue settles them:
    its validity state including any valid-time close
    (:class:`IdentifierValidity`) — plus, per record, the do-not-email mark
    with provenance (:class:`DoNotEmailState`). Those ride the EXISTING read
-   path: ``recall(with_pii=True)`` and :func:`read_entity`, plus
+   path: ``recall(include_sensitive=True)`` and :func:`read_entity`, plus
    :func:`read_identifier_facts` for the bulk by-address case.
 
    **Explicit non-goal: no suppression/eligibility predicate ships here, and
@@ -174,6 +174,7 @@ import json
 import logging
 import os
 import re
+import sys
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -191,7 +192,14 @@ from athenaeum.models import (
     slugify,
     valid_until_expired,
 )
-from athenaeum.storage import surface_root_for_class
+from athenaeum.storage import (
+    inside_git_repository,
+    route_for,
+    surface_root_for_class,
+    target_root,
+    vault_page_roots,
+    vault_route_for_page_type,
+)
 from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
@@ -267,9 +275,9 @@ def surface_class_for_page_class(
     cls = (page_class or "").strip()
     if not cls:
         return ""
-    from athenaeum.config import resolve_excluded_read_mapping
+    from athenaeum.storage import configured_excluded_read_mapping
 
-    configured = resolve_excluded_read_mapping(config)
+    configured = configured_excluded_read_mapping(config)
     if cls in configured:
         return configured[cls]
     return DEFAULT_EXCLUDED_READ_MAPPING.get(cls, cls)
@@ -311,13 +319,20 @@ def is_pii_class_excluded(config: dict[str, Any] | None) -> bool:
 #: still stays in the corpus unless ALSO routed to an excluded surface).
 PII_FLAG = "pii"
 
+#: The contact field names the contact writers know how to handle, in read
+#: order. This lists field names the writers understand; it is NOT a statement
+#: of what is private or excluded. :data:`CONTACT_FRONTMATTER_FIELDS` (first two),
+#: :data:`CONTACT_DATA_FIELDS` (all) and :data:`RECORDABLE_CONTACT_FIELDS` are
+#: computed from it; :data:`CONTACT_IDENTIFIER_FIELDS` stays a separate definition.
+BUILTIN_CONTACT_FIELDS: tuple[str, ...] = ("emails", "phones", "former_emails", "alt_emails")
+
 #: Frontmatter (list-valued) fields that hold archival contact data directly,
 #: per the issue's entity-page rule: entity pages carry durable identifiers
 #: only (name, LinkedIn, record id, Google-Contact id); ``emails``/``phones``
 #: are the two contact-data fields that must not live inline going forward.
 #: Migrating pre-existing pages that already carry these is athenaeum#437 (out of
 #: scope) — this module only flags, never rewrites, a page.
-CONTACT_FRONTMATTER_FIELDS: tuple[str, ...] = ("emails", "phones")
+CONTACT_FRONTMATTER_FIELDS: tuple[str, ...] = BUILTIN_CONTACT_FIELDS[:2]
 
 #: Frontmatter fields whose values are DURABLE IDENTIFIERS (athenaeum#427) and are
 #: PRESERVED VERBATIM on an entity page even when a value is email/phone-shaped
@@ -4110,7 +4125,9 @@ def record_observed_contact_value(
 #: for an unknown ``usage_class``: a misspelled field would otherwise park the
 #: value in frontmatter no resolver on this surface ever looks at, which reads
 #: back as "the store never got it".
-RECORDABLE_CONTACT_FIELDS: tuple[str, ...] = (*CONTACT_IDENTIFIER_FIELDS, "phones")
+RECORDABLE_CONTACT_FIELDS: tuple[str, ...] = tuple(
+    dict.fromkeys((*CONTACT_IDENTIFIER_FIELDS, *BUILTIN_CONTACT_FIELDS))
+)
 
 
 def _minted_contact_record_body(identifier: str, *, usage_class: str, field: str) -> str:
@@ -5445,9 +5462,7 @@ def retire_contact_record(
 #: dedupes while preserving first-seen order, which is what keeps this the
 #: single ``("emails", "phones", "former_emails", "alt_emails")`` iteration
 #: order :func:`read_entity` relies on.
-CONTACT_DATA_FIELDS: tuple[str, ...] = tuple(
-    dict.fromkeys(CONTACT_FRONTMATTER_FIELDS + CONTACT_IDENTIFIER_FIELDS)
-)
+CONTACT_DATA_FIELDS: tuple[str, ...] = BUILTIN_CONTACT_FIELDS
 
 
 #: Frontmatter keys on an excluded record that are BOOKKEEPING — the record's
@@ -5494,7 +5509,8 @@ def resolve_excluded_fields(
 
     1. explicit operator config — ``storage.excluded_fields.<surface_class>``,
        a list of frontmatter field names (see
-       :func:`athenaeum.config.resolve_excluded_fields_config`);
+       :func:`athenaeum.config.resolve_excluded_fields_config`, read through
+       :func:`athenaeum.storage.configured_excluded_fields`);
     2. surface class ``pii`` — the built-in default stays
        :data:`CONTACT_DATA_FIELDS` VERBATIM, so a person read is byte-identical
        to what it returned before this function existed;
@@ -5516,9 +5532,9 @@ def resolve_excluded_fields(
     stable for a given record. Rules 1 and 2 return the configured/built-in
     order and ignore *record_meta* entirely.
     """
-    from athenaeum.config import resolve_excluded_fields_config
+    from athenaeum.storage import configured_excluded_fields
 
-    configured = resolve_excluded_fields_config(config).get(surface_class)
+    configured = configured_excluded_fields(config).get(surface_class)
     if configured is not None:
         return tuple(configured)
     if surface_class == PII_ENTITY_CLASS:
@@ -5692,7 +5708,7 @@ def json_date_default(obj: object) -> str:
     The ONE coercion point for every JSON-emitting read surface built over the
     sanctioned excluded-field read path — ``read_entity``
     (:meth:`EntityRead.to_dict` carries ``frontmatter`` unconverted) and
-    ``recall(with_pii=True)`` (:mod:`athenaeum.mcp_server`'s excluded-facts
+    ``recall(include_sensitive=True)`` (:mod:`athenaeum.mcp_server`'s excluded-facts
     render and handle-resolution join, both of which can carry a
     :class:`ContactClassification`'s ``source`` straight from record
     frontmatter). Passed as ``default=`` at each call site rather than
@@ -5795,6 +5811,10 @@ class EntityRead:
     do_not_email: DoNotEmailState = dataclass_field(
         default_factory=lambda: DoNotEmailState(marked=False)
     )
+    #: True for a whole page held in a vault that this read did not unlock
+    #: (athenaeum#3174): the page exists, nothing of it is returned. ``page_path``
+    #: is then the vault's directory, never the page's own file name.
+    withheld: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable dict: paths as ``str``, redactions as a list of dicts.
@@ -5832,6 +5852,7 @@ class EntityRead:
                 for name, values in self.validity.items()
             },
             "do_not_email": self.do_not_email.to_dict(),
+            **({"withheld": True} if self.withheld else {}),
         }
 
 
@@ -5913,7 +5934,19 @@ def assemble_excluded_read(
     fields: dict[str, list[str]] = {}
     classifications: dict[str, list[ContactClassification]] = {}
     redactions: list[RedactionMarker] = []
+    # athenaeum#3158: ``resolve_excluded_fields`` fixes the ORDER candidates are
+    # visited in (configured order, or the record's own for an unconfigured
+    # class); whether a field is stored on the excluded surface is
+    # ``route_for``'s decision. The surface class is already resolved here and
+    # every ungated caller (read_entity) joins regardless of ``is_excluded``, so
+    # the ``surface_class=`` form -- which applies no gate -- is used.
+    from athenaeum.storage import route_for
+
     for field_name in resolve_excluded_fields(surface_class, config, record_meta):
+        if not route_for(
+            None, field_name, config=config, record_meta=record_meta, surface_class=surface_class
+        ).targets:
+            continue
         raw = record_meta.get(field_name)
         if raw is None:
             continue
@@ -6013,6 +6046,211 @@ def _entity_read_from_indexes(
         # `frontmatter`, no extra read needed.
         do_not_email=do_not_email_state(record_meta, frontmatter),
     )
+
+
+@dataclass(frozen=True)
+class RecordPlacement:
+    """Where :func:`record_placement` says a record is kept.
+
+    Attributes:
+        kind: ``ordinary`` (the main store, where the record would go anyway),
+            ``vault`` (only the locations in *targets*), ``nowhere`` (the
+            record is not written at all) or ``unplaceable`` (the subject could
+            not be resolved, so no answer is safe).
+        targets: Location names, in order, for ``vault``; empty otherwise.
+        reason: Which rule decided, as a short label. Never a value.
+    """
+
+    kind: str
+    targets: tuple[str, ...] = ()
+    reason: str = ""
+
+
+#: Retention actions that narrow a placement (the full vocabulary is
+#: ``erasure.RETENTION_ACTIONS``; the others do not change where a record goes).
+_PLACEMENT_REFUSE = "refuse-write"
+_PLACEMENT_OFF_CORPUS = "store-off-corpus"
+
+
+def _placement_for_decision(decision: Any, label: str) -> RecordPlacement | None:
+    """A routed decision as a placement, or ``None`` when no rule decided."""
+    if decision.targets and decision.sensitive:
+        return RecordPlacement("vault", tuple(decision.targets), label)
+    if not decision.targets and decision.rule is not None:
+        return RecordPlacement("nowhere", (), label)
+    return None
+
+
+def _combine_placements(found: list[RecordPlacement]) -> RecordPlacement | None:
+    """The strictest of several placements: any ``nowhere`` wins, else the union."""
+    if not found:
+        return None
+    for item in found:
+        if item.kind == "nowhere":
+            return item
+    targets: list[str] = []
+    for item in found:
+        for name in item.targets:
+            if name not in targets:
+                targets.append(name)
+    return RecordPlacement("vault", tuple(targets), found[0].reason)
+
+
+def _apply_retention_action(
+    placement: RecordPlacement,
+    retention_action: str | None,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+) -> RecordPlacement:
+    """Make *placement* stricter for a retention action; never looser."""
+    if retention_action is None or placement.kind in ("nowhere", "unplaceable"):
+        return placement
+    if retention_action == _PLACEMENT_REFUSE:
+        return RecordPlacement("nowhere", (), f"retention:{_PLACEMENT_REFUSE}")
+    if retention_action == _PLACEMENT_OFF_CORPUS:
+        # An ordinary record is in the main store, which is inside the corpus.
+        kept = tuple(
+            name
+            for name in placement.targets
+            if not inside_git_repository(target_root(name, config, knowledge_root))
+        )
+        if not kept:
+            return RecordPlacement("nowhere", (), f"retention:{_PLACEMENT_OFF_CORPUS}")
+        return RecordPlacement("vault", kept, placement.reason)
+    return placement
+
+
+def record_placement(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    subject_uid: str | None,
+    *,
+    field: str | None = None,
+    texts: Iterable[str] = (),
+    sensitive: bool = False,
+    retention_action: str | None = None,
+) -> RecordPlacement:
+    """Where an engine-written record about one entity is kept.
+
+    A ledger line, a queue entry or a log about an entity's routed value must
+    not end up somewhere the value itself may not be. This applies the entity's
+    own field routes to such a record. Steps, first match wins:
+
+    1. No subject, no *field*, no *texts* and not *sensitive*: ``ordinary``.
+    2. A subject that does not resolve to exactly one entity: ``unplaceable``.
+    3. *field* given: that field's route from :func:`athenaeum.storage.route_for`
+       (targets give ``vault``; a rule with no target gives ``nowhere``; no
+       rule falls through).
+    4. The entity's whole page type, when routed: ``vault`` or ``nowhere``.
+    5. Any of *texts* containing a value currently held in a routed field of
+       the subject: that field's route. Values are read through
+       :func:`read_entity`; no vault is opened directly.
+    6. *sensitive*: the page type's primary vault (the first target of the
+       first rule for the page type that names one; rules are tried in field
+       name order), else ``nowhere``.
+    7. Otherwise ``ordinary``.
+
+    *retention_action* only makes the answer stricter: ``refuse-write`` gives
+    ``nowhere``; ``store-off-corpus`` keeps only targets outside every git
+    working tree, and gives ``nowhere`` when none is left (an ``ordinary``
+    record is in the main store, so it gives ``nowhere``). Other actions do not
+    change placement.
+
+    Limits:
+
+    * Text quoting a routed value that belongs to a DIFFERENT entity is not
+      detected; only the subject's own values are compared.
+    * A value that was discarded is not on file, so text containing it is not
+      detected.
+    * Matching is a case-insensitive substring test on whole values; a value
+      that is only partly quoted is not detected.
+
+    **A caller given ``nowhere`` or ``unplaceable`` writes nothing.** This
+    helper offers no fallback home, and a caller must not substitute one (the
+    main store, a different vault, a log): that is the leak it exists to stop.
+
+    Pure decision apart from the one read of the subject's routed values.
+    Configuration is read only through :func:`athenaeum.storage.route_for`.
+    """
+    text_list = [t for t in texts if isinstance(t, str) and t]
+    subject = (subject_uid or "").strip()
+    if not subject and field is None and not text_list and not sensitive:
+        return RecordPlacement("ordinary", (), "no-subject")
+    unplaceable = RecordPlacement("unplaceable", (), "subject-not-one-entity")
+    if not subject:
+        return unplaceable
+
+    from athenaeum.entity_index_cache import entity_index_for_uid
+
+    try:
+        index = entity_index_for_uid(knowledge_root / "wiki", subject)
+        page_path = index.get_by_uid(subject)
+        if page_path is None:
+            # A page of a type routed whole to a vault is in no index
+            # (athenaeum#3174); it is still exactly one entity.
+            page_path = vault_page_path(knowledge_root, config, subject)
+        if page_path is None:
+            return unplaceable
+        frontmatter, _ = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+        page_type = str(frontmatter.get("type") or "").strip()
+        if not page_type:
+            return unplaceable
+        surface = surface_class_for_page_class(page_type, config)
+        read = read_entity(
+            knowledge_root,
+            config,
+            subject,
+            surface_class=surface,
+            include_excluded=True,
+            entity_index=index,
+        )
+    except (ValueError, OSError):
+        return unplaceable
+    if read is None:
+        return unplaceable
+
+    def finish(placement: RecordPlacement) -> RecordPlacement:
+        return _apply_retention_action(placement, retention_action, config, knowledge_root)
+
+    if field is not None:
+        hit = _placement_for_decision(route_for(page_type, field, config=config), "field-route")
+        if hit is not None:
+            return finish(hit)
+
+    whole = _placement_for_decision(route_for(page_type, config=config), "page-type-route")
+    if whole is not None:
+        return finish(whole)
+
+    if text_list:
+        lowered = [t.casefold() for t in text_list]
+        found: list[RecordPlacement] = []
+        for name, values in read.contact.items():
+            quoted = any(
+                isinstance(v, str) and v.strip() and v.strip().casefold() in t
+                for v in values
+                for t in lowered
+            )
+            if not quoted:
+                continue
+            hit = _placement_for_decision(route_for(page_type, name, config=config), "text-route")
+            if hit is not None:
+                found.append(hit)
+        combined = _combine_placements(found)
+        if combined is not None:
+            return finish(combined)
+
+    if sensitive:
+        names = {*read.contact, *frontmatter, *resolve_excluded_fields(surface, config, None)}
+        # A YAML key need not be a string (``1:``, a date); only a string names a field.
+        for name in sorted(n for n in names if isinstance(n, str)):
+            primary = _placement_for_decision(
+                route_for(page_type, name, config=config), "sensitive-primary"
+            )
+            if primary is not None and primary.kind == "vault":
+                return finish(RecordPlacement("vault", primary.targets[:1], "sensitive-primary"))
+        return RecordPlacement("nowhere", (), "sensitive-no-vault")
+
+    return finish(RecordPlacement("ordinary", (), "no-rule"))
 
 
 def read_entity(
@@ -6139,7 +6377,7 @@ def read_entity(
         entity_index = entity_index_for_uid(
             knowledge_root / "wiki", uid, cache_dir=cache_dir
         )
-    return _entity_read_from_indexes(
+    read = _entity_read_from_indexes(
         uid,
         entity_index=entity_index,
         contact_records=contact_records,
@@ -6148,6 +6386,137 @@ def read_entity(
         surface_class=surface_class,
         config=config,
     )
+    if read is None:
+        return _vault_page_read(uid, knowledge_root, include_excluded, config)
+    return read
+
+
+def vault_page_path(
+    knowledge_root: Path, config: dict[str, Any] | None, uid: str
+) -> Path | None:
+    """The file of the whole vault page with *uid*, else ``None`` (athenaeum#3174).
+
+    Looks in every vault a ``storage.routes`` rule sends whole pages to, and
+    accepts a file only when its own ``type:`` is routed to THAT vault. Keyed
+    on the page's type, never on a surface class: a type's surface class can
+    differ from the type itself (``person`` is on ``pii``), and the rule names
+    the type. With no such rule nothing is scanned.
+    """
+    for vault, root in vault_page_roots(config, knowledge_root).items():
+        path = resolve_contact_record_for_uid(root, uid)
+        if path is None:
+            continue
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if vault_route_for_page_type(str(meta.get("type") or ""), config) == vault:
+            return path
+    return None
+
+
+def _vault_page_read(
+    uid: str,
+    knowledge_root: Path,
+    include_excluded: bool,
+    config: dict[str, Any] | None,
+) -> EntityRead | None:
+    """The read of a whole page held in a vault (athenaeum#3174).
+
+    Only for a page type a ``storage.routes`` rule sends whole to a vault
+    (:func:`vault_page_path`); any other uid with no wiki page stays "not
+    found". With *include_excluded* the page's frontmatter and body are
+    returned; without it the result says the page exists and is withheld, and
+    carries no field value, no body and not the page's file name.
+    """
+    page_path = vault_page_path(knowledge_root, config, uid)
+    if page_path is None:
+        return None
+    if not include_excluded:
+        return EntityRead(
+            uid=uid,
+            page_path=page_path.parent,
+            frontmatter={},
+            body="",
+            contact={},
+            redactions=(),
+            contact_included=False,
+            contact_record_path=None,
+            withheld=True,
+        )
+    frontmatter, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+    return EntityRead(
+        uid=uid,
+        page_path=page_path,
+        frontmatter=frontmatter,
+        body=body,
+        contact={},
+        redactions=(),
+        contact_included=True,
+        contact_record_path=page_path,
+    )
+
+
+def reconcile_sensitive_flag(
+    new_name: str,
+    new_value: bool | None,
+    legacy: Mapping[str, bool | None],
+) -> tuple[bool, list[str]]:
+    """Fold the deprecated spellings of the sensitive-read flag into the new one.
+
+    *new_name* is how the caller spells the new flag (``include_sensitive``
+    for a tool parameter, ``--include-sensitive`` on the command line);
+    *legacy* maps each deprecated spelling, in the same style, to the value
+    the caller passed (``None`` = not passed). Returns ``(value, notices)``:
+    one notice per deprecated name that was used, each naming the
+    replacement. A deprecated name behaves exactly like the new one.
+
+    Raises:
+        ValueError: a deprecated name and the new name (or two deprecated
+            names) were passed with different values.
+    """
+    passed: list[tuple[str, bool]] = []
+    if new_value is not None:
+        passed.append((new_name, bool(new_value)))
+    notices: list[str] = []
+    for old_name, old_value in legacy.items():
+        if old_value is None:
+            continue
+        passed.append((old_name, bool(old_value)))
+        notices.append(
+            f"`{old_name}` is deprecated: use `{new_name}` instead. The old "
+            "name still works and is removed in the next minor release."
+        )
+    values = {value for _, value in passed}
+    if len(values) > 1:
+        names = " and ".join(f"`{name}`" for name, _ in passed)
+        raise ValueError(
+            f"{names} name the same flag but were passed different values; "
+            f"pass `{new_name}` alone."
+        )
+    return (values.pop() if values else False), notices
+
+
+def cli_sensitive_flag(args: Any, legacy_dests: Mapping[str, str]) -> bool:
+    """The command line's ``--include-sensitive``, folding in the old spellings.
+
+    *legacy_dests* maps each deprecated option string to its argparse ``dest``
+    (``{"--with-pii": "with_pii"}``). These are ``store_true`` flags, so
+    "passed" means ``True``; each one passed prints one stderr notice naming
+    ``--include-sensitive`` and counts as the same flag.
+    """
+    legacy: dict[str, bool | None] = {
+        option: (True if getattr(args, dest, False) else None)
+        for option, dest in legacy_dests.items()
+    }
+    value, notices = reconcile_sensitive_flag(
+        "--include-sensitive",
+        True if getattr(args, "include_sensitive", False) else None,
+        legacy,
+    )
+    for notice in notices:
+        print(notice, file=sys.stderr)
+    return value
 
 
 class ExcludedSurfaceUnavailable(RuntimeError):
@@ -6520,6 +6889,7 @@ def read_entities(
 __all__ = [
     "PII_ENTITY_CLASS",
     "PII_FLAG",
+    "BUILTIN_CONTACT_FIELDS",
     "CONTACT_FRONTMATTER_FIELDS",
     "DURABLE_IDENTIFIER_FIELDS",
     "NAME_FIELDS",
@@ -6595,6 +6965,9 @@ __all__ = [
     "RedactionMarker",
     "EntityRead",
     "read_entity",
+    "vault_page_path",
+    "RecordPlacement",
+    "record_placement",
     "read_entities",
     "CONTACT_CLASSIFICATION_FIELD",
     "USAGE_CLASS_OBSERVED",
@@ -6628,6 +7001,8 @@ __all__ = [
     "IdentifierValidity",
     "validity_for_value",
     "assemble_excluded_validity",
+    "reconcile_sensitive_flag",
+    "cli_sensitive_flag",
     "ExcludedSurfaceUnavailable",
     "IdentifierFacts",
     "read_identifier_facts",

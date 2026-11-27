@@ -71,7 +71,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum drops list`](#athenaeum-drops-list) (command) — List recorded drops, newest first.
 - [`athenaeum drops restore`](#athenaeum-drops-restore) (command) — Re-queue a dropped raw file's recorded content as fresh raw intake.
 - [`athenaeum enable`](#athenaeum-enable) (command) — Undo 'athenaeum disable' — restore all background work.
-- [`athenaeum entity`](#athenaeum-entity) (group) — One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-excluded flag (default off). The generic form of `person`; prints the same JSON object shape.
+- [`athenaeum entity`](#athenaeum-entity) (group) — One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-sensitive flag (default off). The generic form of `person`; prints the same JSON object shape.
 - [`athenaeum entity rename`](#athenaeum-entity-rename) (command) — Rename a wiki page by uid: sets name:, records the previous name in aliases: (deduplicated), refreshes the recall index, and writes a provenance record. Dry-run by default; --apply writes.
 - [`athenaeum enumerate`](#athenaeum-enumerate) (command) — Enumerate every entity of a declared type matching field predicates — no query text. The generalized form of the former `athenaeum people` (removed) — see docs/design/recall-architecture.md's capability-parity table.
 - [`athenaeum explain-routing`](#athenaeum-explain-routing) (command) — Read-only preview: resolved provider/model/batch/price per model knob. Prints what 'athenaeum run' would actually use for this athenaeum.yaml + environment -- no LLM call, no file processed, no routing behavior changed.
@@ -928,12 +928,13 @@ Undo 'athenaeum disable' — restore all background work.
 
 ## `athenaeum entity`
 
-One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-excluded flag (default off). The generic form of `person`; prints the same JSON object shape.
+One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-sensitive flag (default off). The generic form of `person`; prints the same JSON object shape.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--class` | `person` | — | The page's `type:` (person, vendor, …). Selects which excluded SURFACE is read — a `person` page's record lives on the `pii` surface — while the page itself is resolved by uid whatever its type. Default: person. |
-| `--include-excluded` | off (flag absent) | — | Include the actual excluded values (default: off — withheld fields carry a redaction marker instead). |
+| `--include-excluded` | off (flag absent) | — | Deprecated name for --include-sensitive: behaves the same, prints a notice, and is removed in the next minor release. |
+| `--include-sensitive` | off (flag absent) | — | Include the actual sensitive values (default: off — withheld fields carry a redaction marker instead). The same flag, under the same name, as `recall --include-sensitive`. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--uid` | — | — | The entity's durable uid. Required for the default read mode (enforced in cmd_entity, not by argparse —: a nested `rename` sub-action below needs its OWN, independently required `--uid`, and argparse's PARSER-nargs subparsers action swallows every token after the sub-action name, including any `--uid` meant for THIS parser — so this one can no longer be `required=True` at the argparse level without breaking `entity rename --uid...`). |
 | `--usage-class` | `[]` | observed, provider, unclassified | Return only values of this usage class (repeatable; one of observed, provider, unclassified). Default: every value, each carrying its class. |
@@ -971,13 +972,14 @@ Enumerate every entity of a declared type matching field predicates — no query
 | `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
 | `--cursor` | — | — | Opaque continuation token from a prior call's `next_cursor`. |
 | `--field` | `[]` | — | Additional declared field to include per hit (repeatable), beyond the always-present uid/type/name. |
+| `--include-sensitive` | off (flag absent) | — | Required to predicate or select `google_contact_*` fields (AC amendment 1). The same flag, under the same name, as `recall --include-sensitive`. NOT required for `do_not_email` (ungated by). |
 | `--include-split` | off (flag absent) | — | Include split-created sub-pages (`via: split`) — excluded by default since they inherit their parent's type. Pages attached via attach/fold/manual are always listed. |
 | `--limit` | `50` | — | Max rows to return (default: 50; 0 = unlimited). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--sort` | `name` | — | Frontmatter field to sort by (default: name). |
 | `--type` | — | — | Declared entity type (a page's `type:`). Call `athenaeum query entity-schema`-equivalent (the MCP `entity_schema` tool) to discover this deployment's classes. An unrecognized value does not error — the response's `known_classes` names what this deployment DOES have. |
 | `--where` | `[]` | — | Field predicate, AND-combined, repeatable. KIND is one of eq, ne, substring, regex (eq/substring/regex all compare case-insensitively). FIELD may be a comma-separated ORDERED fallback list, OR-combined (e.g. current_company,linkedin_company_at_connect:substring:Acme). |
-| `--with-pii` | off (flag absent) | — | Required to predicate or select `google_contact_*` fields (AC amendment 1). Same flag contract `recall --with-pii` already uses. NOT required for `do_not_email` (ungated by). |
+| `--with-pii` | off (flag absent) | — | Deprecated name for --include-sensitive: behaves the same, prints a notice, and is removed in the next minor release. |
 
 ## `athenaeum explain-routing`
 
@@ -1060,6 +1062,7 @@ Initialize a new knowledge directory
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--force` | off (flag absent) | — | Overwrite existing template files at the destination; no backup is created (only applies with --with-templates and/or --with-rules). |
+| `--no-history` | off (flag absent) | — | Keep plain files: write `storage.history: none` into the new athenaeum.yaml and create no git repository (no git command runs). Without a repository there is no restore point, no undo, and no history-based commands. |
 | `--owner-name` | — | — | Also record the owner: create the owner's person page and write owner.uid into athenaeum.yaml -- the same code path as 'athenaeum owner set --name'. Omit to configure no owner. |
 | `--path` | `~/knowledge` | — | Target directory (default: ~/knowledge) |
 | `--rules-dest` | — | — | Override the shape-rules destination directory (default: <path>/rules). |
@@ -1463,11 +1466,12 @@ Search the wiki from the shell (one tab-separated hit per line)
 | `--audience` | — | — | : run recall under a restricted read scope. Comma-separated role/group ids; only pages tagged for one of these roles (or 'access: open') are returned. Unset = owner = full access. Exercises the identical filter path as `serve --audience`. |
 | `--backend` | — | keyword, fts5, vector | Override configured backend (default: read from athenaeum.yaml) |
 | `--cache-dir` | — | — | Cache directory (default: ~/.cache/athenaeum) |
+| `--include-sensitive` | off (flag absent) | — | : also resolve each matching entity's SENSITIVE fields — contact data for a person, and whatever else the operator routes off-corpus for any other class. Appended to each hit line as tab-separated `field=value` pairs; a withheld field appears as `field=[redacted:N]` so withheld never looks like absent. Default off, and free when off: no excluded surface is scanned at all. The join runs strictly AFTER the audience and recallable filters, so it can never widen what this command returns. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--top-k` | `5` | — | Maximum results to return (default: 5) |
 | `--type` | `[]` | — | : narrow to one or more entity classes (a page's `type:`), repeatable (OR semantics). Opaque, NOT validated against wiki/_schema/types.md — see the MCP `entity_schema` tool for the declared/observed registry. Unset = every class (default, unchanged behavior). An unrecognized value prints the deployment's known classes instead of a bare 'no results'. |
-| `--usage-class` | `[]` | observed, provider, unclassified | With --with-pii, return only excluded values of this usage class (repeatable; one of observed, provider, unclassified). Matches `entity --usage-class`. Default: every value. |
-| `--with-pii` | off (flag absent) | — | : also resolve each matching entity's EXCLUDED fields — contact data for a person, and whatever else the operator routes off-corpus for any other class. Appended to each hit line as tab-separated `field=value` pairs; a withheld field appears as `field=[redacted:N]` so withheld never looks like absent. Default off, and free when off: no excluded surface is scanned at all. The join runs strictly AFTER the audience and recallable filters, so it can never widen what this command returns. |
+| `--usage-class` | `[]` | observed, provider, unclassified | With --include-sensitive, return only sensitive values of this usage class (repeatable; one of observed, provider, unclassified). Matches `entity --usage-class`. Default: every value. |
+| `--with-pii` | off (flag absent) | — | Deprecated name for --include-sensitive: behaves the same, prints a notice, and is removed in the next minor release. |
 
 ## `athenaeum receipts`
 
@@ -1867,12 +1871,13 @@ Start the MCP memory server
 | `--auth-resource` | — | — | This server's canonical public URL -- the ONE audience this process serves. Every token's `aud` claim must equal it, it is the `resource` advertised in the RFC 9728 protected resource metadata, and it is what a client passes as the `resource` parameter when requesting a token. Never read back from a token claim or a request parameter: one process, one audience. Required with --auth-issuer. Overrides ATHENAEUM_SERVE_AUTH_RESOURCE and serve.auth.resource in athenaeum.yaml. |
 | `--auth-scopes` | — | — | Rename the two OAuth scopes this server requires, as `read=<name>,write=<name>`. A read tool call must carry the read scope and a write tool call the write scope, where read/write is each tool's own readOnlyHint annotation. Both roles are required and must differ. Overrides ATHENAEUM_SERVE_AUTH_SCOPES and serve.auth.scopes in athenaeum.yaml. Unset = athenaeum:read / athenaeum:write. |
 | `--cache-dir` | — | — | Cache directory holding the compiled index (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum).: serve previously hardcoded ~/.cache/athenaeum and ignored ATHENAEUM_CACHE_DIR, so recall could serve a stale/empty index when the compiler wrote elsewhere. |
-| `--excluded-fields` | — | off, on | Whether this server may resolve excluded (off-corpus) fields such as a person's contact data. 'on' is the historical behaviour -- recall(with_pii=True) and read_entity(include_excluded=True) return the values. 'off' withholds them: recall returns a withheld notice instead, read_entity returns none, and enumerate_entities refuses a PII-scoped predicate or output field. Defaults to 'off' under --profile remote, otherwise 'on'. Overrides ATHENAEUM_SERVE_EXCLUDED_FIELDS and serve.excluded_fields in athenaeum.yaml. |
+| `--excluded-fields` | — | off, on | Deprecated name for --sensitive-reads (and ATHENAEUM_SERVE_EXCLUDED_FIELDS for ATHENAEUM_SERVE_SENSITIVE_READS): behaves the same, prints a notice, and is removed in the next minor release. The yaml key serve.excluded_fields is refused; use serve.sensitive_reads. |
 | `--host` | — | — | Bind address for --transport http (default: 127.0.0.1). While no auth issuer is configured only a loopback address literal is accepted: any 127.0.0.0/8 address, the IPv6 loopback [::1] (brackets optional), or an IPv4-mapped IPv6 loopback. Every other address, and every hostname (names are never resolved), is refused with a non-zero exit before anything binds. Ignored under stdio. Overrides ATHENAEUM_SERVE_HOST and serve.host in athenaeum.yaml. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). The raw/wiki roots default to <path>/raw and <path>/wiki; the KNOWLEDGE_RAW_PATH / KNOWLEDGE_WIKI_PATH environment variables override them individually (drop-in parity with the legacy knowledge-mcp server). |
 | `--path-prefix` | `/mcp` | — | URL path the streamable HTTP endpoint is mounted at (default: /mcp). Ignored under stdio. CLI-only: unlike --transport, --host and --port this knob has no environment variable and no athenaeum.yaml key. |
 | `--port` | — | — | TCP port for --transport http (default: 8000, FastMCP's own default). Ignored under stdio. Overrides ATHENAEUM_SERVE_PORT and serve.port in athenaeum.yaml. |
-| `--profile` | — | — | Apply a serve-time profile preset. 'remote' pins this server for exposure to a third-party host: the three owner-only decision-queue mutators (resolve_question, resolve_merge, review_audit_item) are not registered at all, while remember and raise_decision stay available, and excluded fields are withheld (see --excluded-fields). Overrides ATHENAEUM_SERVE_PROFILE and serve.profile in athenaeum.yaml. Unset = no preset = unchanged behaviour. |
+| `--profile` | — | — | Apply a serve-time profile preset. 'remote' pins this server for exposure to a third-party host: the three owner-only decision-queue mutators (resolve_question, resolve_merge, review_audit_item) are not registered at all, while remember and raise_decision stay available, and sensitive fields are withheld (see --sensitive-reads). Overrides ATHENAEUM_SERVE_PROFILE and serve.profile in athenaeum.yaml. Unset = no preset = unchanged behaviour. |
+| `--sensitive-reads` | — | off, on | Whether this server may resolve sensitive (off-corpus) fields such as a person's contact data. 'on' is the historical behaviour -- recall(include_sensitive=True) and read_entity(include_sensitive=True) return the values. 'off' withholds them: recall returns a withheld notice instead, read_entity returns none, and enumerate_entities refuses a PII-scoped predicate or output field. Defaults to 'off' under --profile remote, otherwise 'on'. Overrides ATHENAEUM_SERVE_SENSITIVE_READS and serve.sensitive_reads in athenaeum.yaml. |
 | `--tools` | — | — | Pin this server to an ALLOWLIST of MCP tools. Comma-separated tool names (e.g. 'recall,read_entity'). A tool outside the list is never registered, so it is absent from tools/list rather than refusing when called; a name that is not a tool of this deployment fails startup. Composes with --profile (a tool must clear both). Overrides ATHENAEUM_SERVE_TOOLS and serve.tools in athenaeum.yaml. Unset = no allowlist. |
 | `--transport` | — | stdio, http | MCP transport (default: stdio). 'stdio' speaks MCP over this process's own stdin/stdout and binds no socket -- the historical, unchanged behaviour. 'http' serves FastMCP's streamable HTTP transport on --host/--port under --path-prefix. HTTP is opt-in because it binds a listening socket, and while no auth issuer is configured it refuses any non-loopback --host before binding. Overrides ATHENAEUM_SERVE_TRANSPORT and serve.transport in athenaeum.yaml. |
 

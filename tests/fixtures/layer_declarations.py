@@ -104,6 +104,8 @@ MODULE_LAYER: dict[str, int] = {
     "store_boundary": 2,  # issue athenaeum#2619: surface/rank predicates
     "store_decisions": 2,  # issue athenaeum#2934: per-store decision queue; imports L1, L2
     "store_reviews": 2,  # issue athenaeum#2992: reviews block state; imports L1, L2
+    "identity_provider": 3,  # issue athenaeum#3171: request -> principal; imports L2, L1, L0
+    "access": 3,  # issue athenaeum#3167: can(); imports store_rights, config (L2)
     "store_rights": 2,  # issue athenaeum#2933: directory adapter + rights; imports L1, L2
     "store_intake": 2,  # issue athenaeum#2936: pure intake accept check
     "store_access_evidence": 2,  # issue athenaeum#2991: last fetch/push outcome per location

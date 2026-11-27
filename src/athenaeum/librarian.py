@@ -197,7 +197,7 @@ from athenaeum.intake_audit import (
     discover_unclaimed_shape_rule_candidates,
     run_intake_audit,
 )
-from athenaeum.intake_destination import destination_for_new_entity
+from athenaeum.intake_destination import destination_for_new_entity, vault_page_exists
 from athenaeum.logconf import run_id_var
 from athenaeum.merge import (
     RunDeadlineExceeded,
@@ -206,6 +206,7 @@ from athenaeum.merge import (
     read_cluster_rows,
 )
 from athenaeum.models import (
+    ACCESS_LEVELS,
     AutoMemoryFile,
     EntityAction,
     EntityIndex,
@@ -303,14 +304,29 @@ from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home 
 from athenaeum.schema_amendment_proposals import record_field_group_misfits
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.self_resolving import flag_self_resolving_claims
-from athenaeum.sensitivity_routing import route_sensitive_values
+from athenaeum.sensitivity_routing import (
+    SensitivityRoutingError,
+    refuse_unrouted_value_classes,
+    screen_raw_for_compile,
+)
 from athenaeum.storage import (
     ReadOnlySurfaceError,
+    StorageConfigError,
+    apply_to_targets,
+    discard_counts,
+    discarded_page_types,
+    note_discard,
+    note_vault_page,
     open_store,
     refuse_read_only_write,
     require_writable_path,
+    reset_discard_counts,
+    reset_vault_page_counts,
     resolve_indexed_surfaces,
     resolve_locator_surfaces,
+    route_for,
+    target_root,
+    vault_page_counts,
 )
 from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.store_access_evidence import record_fetch, record_push
@@ -665,7 +681,7 @@ DEFAULT_PUSH_FAILURE_ALERT_THRESHOLD = 3
 # below — this module no longer defines its own copy. Widens what a
 # ``types.md``-missing fallback accepts (12 known types instead of 9) rather
 # than narrowing it, so no previously-valid write is newly rejected.
-FALLBACK_ACCESS = ["open", "internal", "confidential", "personal"]
+FALLBACK_ACCESS = list(ACCESS_LEVELS)
 FALLBACK_TAGS = [
     "active",
     "archived",
@@ -2415,6 +2431,19 @@ def _record_correspondent_contact(
         )
         return
 
+    # athenaeum#3168: the one point this writer asks where the address goes. A
+    # rule with `to: []` discards it: no record, no attribution log row, no
+    # parked suspect, nothing derived from the address. The page is unchanged.
+    # A routing misconfiguration is not handled here: it surfaces at the write
+    # below exactly as it did.
+    try:
+        _address_route = route_for(entity.type, "emails", config=config)
+    except StorageConfigError:
+        _address_route = None
+    if _address_route is not None and _address_route.discarded:
+        note_discard(_address_route.rule)
+        return
+
     contacts_root = contacts_surface_root(wiki_root.parent, config)
     try:
         # Issue athenaeum#2210: the attribution seam runs HERE, in the
@@ -2524,6 +2553,25 @@ def _record_correspondent_contact(
         )
         return
     if written.path is not None:
+        # athenaeum#3169: a rule with several vault targets has the address
+        # written to each; a failure raises naming the target, it is not logged
+        # and skipped. The target the write above already used is not repeated.
+        if _address_route is not None and len(_address_route.targets) > 1:
+            _done = contacts_root.resolve()
+
+            def _mirror(name: str) -> None:
+                _root = target_root(name, config, wiki_root.parent)
+                if _root.resolve() != _done:
+                    record_observed_contact_value(
+                        _root,
+                        ref.address,
+                        uid=entity.uid,
+                        name=entity.name,
+                        source=raw.ref,
+                        observed_at=ref.observed_at,
+                    )
+
+            apply_to_targets(_address_route.targets, _mirror)
         result.correspondent_contacts_recorded += 1
         log.info(
             "  Recorded correspondent address for %s (uid %s) from %s",
@@ -2758,15 +2806,27 @@ def _apply_tier3_results(
     # entity instead: nothing is written for it, the raw is retained and the
     # refusal counted; the other entities in the file are unaffected.
     _create_roots: list[Path | None] = []
+    _create_vaults: list[str | None] = []
     for _e in new_entities:
         try:
             _dest = destination_for_new_entity(_e, _page_config, wiki_root.parent)
             _create_roots.append(_dest.root)
+            # athenaeum#3174: a page of a type routed to a vault is looked up
+            # in that vault only; a name already held there is an update, not
+            # a second page, so nothing is created and the raw is kept.
+            if vault_page_exists(_dest, _e.name):
+                log.warning("  Refused (page already in vault %s)", _dest.vault)
+                result.retain_raw = True
+                _create_vaults.append(None)
+                _create_roots[-1] = None
+            else:
+                _create_vaults.append(_dest.vault)
         except ReadOnlySurfaceError as _exc:
             _retain_raw_on_read_only(result, _exc)
             _create_roots.append(None)
+            _create_vaults.append(None)
 
-    for entity, _create_root in zip(new_entities, _create_roots):
+    for entity, _create_root, _create_vault in zip(new_entities, _create_roots, _create_vaults):
         if _create_root is None:
             continue
         page_path = _create_root / entity.filename
@@ -2813,7 +2873,7 @@ def _apply_tier3_results(
             result.field_constraint_rejected += 1
             log.info(
                 "  Refused (field constraint): %s -- %d violation(s)",
-                entity.name,
+                "a vault page" if _create_vault else entity.name,
                 len(_create_violations),
             )
             continue
@@ -2832,12 +2892,18 @@ def _apply_tier3_results(
             result.retain_raw = True  # a refused page must not consume its raw
             continue
         atomic_write_text(page_path, rendered)
-        index.register(entity, root=_create_root)
+        if _create_vault is None:
+            index.register(entity, root=_create_root)
+        else:
+            note_vault_page(_create_vault)  # never in the main name index
         result.created.append(entity)
         _written_uids.append(entity.uid)
         if str(entity.type).strip().casefold() == PERSON_ENTITY_TYPE:
             _created_people.append(entity)
-        log.info("  Created: %s → %s", entity.name, entity.filename)
+        if _create_vault is None:
+            log.info("  Created: %s → %s", entity.name, entity.filename)
+        else:  # athenaeum#3174: a vault page's title and file name are not logged
+            log.info("  Created: 1 page in vault %s", _create_vault)
 
     # Issue athenaeum#1948: now that every create for this file has either
     # landed or been refused, record the correspondent's address (if the raw
@@ -3033,16 +3099,13 @@ def process_one(
     # carry no source handle at all.
     incoming_handles = collect_handles(raw_meta)
     if not dry_run:
-        preamble = raw.content[: len(raw.content) - len(raw_body)]
-        redacted_body = route_sensitive_values(
-            raw_ref=raw.ref,
-            text=raw_body,
-            frontmatter=raw_meta,
-            config=config,
-            knowledge_root=wiki_root.parent,
+        # athenaeum#3168: routes free-text values and drops fields a `to: []`
+        # rule discards, in one helper shared with the batch transport. The raw
+        # file on disk is not touched.
+        raw_meta, raw_body = screen_raw_for_compile(
+            raw, config=config, knowledge_root=wiki_root.parent
         )
-        if redacted_body != raw_body:
-            raw._content = preamble + redacted_body
+        incoming_handles = collect_handles(raw_meta)
 
     # Sticky intake access (issue athenaeum#320 §5): an `access:` stamped on the raw
     # file at remember() time by the intake screener is CALLER-AUTHORITATIVE —
@@ -3096,9 +3159,15 @@ def process_one(
     # like any other nothing-created raw (skipped reason -> drop ledger, raw
     # deleted by the entity loop); a MIXED raw continues with only its
     # uncovered items. ``None``/empty policy: skipped entirely.
-    if relevance_policy is not None and relevance_policy.rules:
+    # athenaeum#3168: page types a `to: []` rule discards are not captured; the
+    # same gate that applies the policy answers it, so the gate runs for them too.
+    _discarded_types = discarded_page_types(config)
+    if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
         gate = gate_raw_content(
-            relevance_policy, raw.content, jsonl=raw.path.suffix.lower() == ".jsonl"
+            relevance_policy,
+            raw.content,
+            jsonl=raw.path.suffix.lower() == ".jsonl",
+            discarded=_discarded_types,
         )
         if gate.fully_dropped:
             result.skipped.append(gate.reason)
@@ -3655,7 +3724,7 @@ def process_one(
         # an unsure one escalates to the reasoning tier and, if that is
         # unsure too, is dropped (never held). ``None``/empty policy: no-op.
         _rel_jsonl = raw.path.suffix.lower() == ".jsonl"
-        if relevance_policy is not None and relevance_policy.rules:
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             _rel_outcome = gate_classified_entities(
                 classified,
                 relevance_policy,
@@ -3665,6 +3734,7 @@ def process_one(
                 client=client,
                 usage=usage,
                 config=config,
+                discarded=_discarded_types,
             )
             classified = _rel_outcome.kept
             result.relevance_drops.extend(_rel_outcome.drops)
@@ -3719,7 +3789,7 @@ def process_one(
         # Issue athenaeum#2647: a fact landing on an EXISTING page is judged by
         # that page's own type/tags/uid -- the Tier-3 relevance gate, shared
         # with ``batch.process_batch_run`` and run before any Tier-3 call.
-        if relevance_policy is not None and relevance_policy.rules:
+        if (relevance_policy is not None and relevance_policy.rules) or _discarded_types:
             actions, _rel_update_drops = gate_update_actions(
                 actions,
                 relevance_policy,
@@ -3727,6 +3797,7 @@ def process_one(
                 raw_content=raw.content,
                 jsonl=_rel_jsonl,
                 raw_ref=raw.ref,
+                discarded=_discarded_types,
             )
             result.relevance_drops.extend(_rel_update_drops)
             for _rd in _rel_update_drops:
@@ -6703,6 +6774,24 @@ class RunContext:
                 self.run_profile.append(("t1-screen", 0.0, _t1_census.as_profile_fields()))
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: t1 census skipped: %s", exc)
+        # athenaeum#3168: one counter per discarding rule, rule names only
+        # (never a value or a hash of one); omitted when nothing was discarded.
+        try:
+            _discards = discard_counts()
+            if _discards:
+                self.run_profile.append(("discard", 0.0, {"reason": "completed", **_discards}))
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: discard counters skipped: %s", exc)
+        # athenaeum#3174: pages written per vault -- vault names and counts only,
+        # never a title or body; omitted when no page went to a vault.
+        try:
+            _vault_pages = vault_page_counts()
+            if _vault_pages:
+                self.run_profile.append(
+                    ("vault-pages", 0.0, {"reason": "completed", **_vault_pages})
+                )
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: vault page counts skipped: %s", exc)
         # Issue athenaeum#2615: per-surface git pull/push outcomes (omitted
         # entirely when no extra git-backed surface took part, so a run with
         # no extra surfaces keeps an unchanged run_profile).
@@ -12887,6 +12976,9 @@ def run(
     # too (`_run_merge_only_phase` is dispatched later in this same call),
     # since this reset happens before that dispatch.
     reset_t1_census()
+    # athenaeum#3168: the per-rule discard counters are run-scoped, same reasoning.
+    reset_discard_counts()
+    reset_vault_page_counts()
 
     # Issue athenaeum#546: run() is now the ORDERED SEQUENCE of named phase calls over
     # one shared, mutable RunContext (see the class docstring above) — a
@@ -12934,6 +13026,14 @@ def run(
     ctx.lock = lock
     ctx.api_key = os.environ.get("ANTHROPIC_API_KEY")
     ctx.config = load_config(knowledge_root)
+
+    # athenaeum#3168: with value routing on, a class with no storage.routes rule
+    # is refused at load, before anything is compiled.
+    try:
+        refuse_unrouted_value_classes(ctx.config)
+    except SensitivityRoutingError as exc:
+        log.error("sensitivity routing: %s", exc)
+        return 1
 
     # Issue athenaeum#2933 / athenaeum#2988: resolve the owner's declared store
     # rights once, at run start, for every configured surface. They are logged

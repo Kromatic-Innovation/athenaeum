@@ -131,6 +131,7 @@ from athenaeum.provider import (
     resolve_thinking,
     response_text,
 )
+from athenaeum.storage import StorageConfigError, note_discard, route_for
 from athenaeum.store import append_line_durable, now_iso
 
 if TYPE_CHECKING:
@@ -474,6 +475,10 @@ class AttributionContext:
     #: :data:`_ATTRIBUTION_ENFORCED_CLASSES_CACHE` for which callers that
     #: is true for today and which it is not.
     enforced_classes: frozenset[str] = frozenset()
+    #: The resolved config this context was built from. Read only to ask
+    #: :func:`athenaeum.storage.route_for` whether a field is discarded
+    #: (athenaeum#3168); ``None`` for a context built without one.
+    config: dict[str, Any] | None = field(default=None, repr=False)
 
 
 def _attribution_key_path(contacts_root: Path) -> Path:
@@ -603,6 +608,7 @@ def build_attribution_context(
         enforced_classes=attribution_enforced_classes(
             config, resolved_contacts_root, excluded_index=idx
         ),
+        config=config,
     )
 
 
@@ -1373,6 +1379,19 @@ def scrub_compiled_contact_tokens(
     for token, record_field in tagged_tokens:
         if token in name_pii_values:
             continue
+        # athenaeum#3168: a field a `to: []` rule discards is stored nowhere, so
+        # nothing is attributed, filed, logged or parked for it (each of those
+        # carries a key derived from the value). The token is still removed
+        # from the compiled body, as for every other token.
+        if target_type is not None:
+            try:
+                decision = route_for(target_type, record_field, config=context.config)
+            except StorageConfigError:
+                decision = None
+            if decision is not None and decision.discarded:
+                note_discard(decision.rule)
+                scrubbed = scrubbed.replace(token, "")
+                continue
         verdict = check_contact_attribution(
             token,
             target_uid=subject_uid,
@@ -1393,6 +1412,12 @@ def scrub_compiled_contact_tokens(
                 source=source_ref if source_ref is not None else "",
                 observed_at=now_iso(),
             )
+            # athenaeum#3169: a rule with several vault targets has the value
+            # written to each, in order; a failure raises naming the target.
+            if target_type is not None and context.wiki_root is not None:
+                _mirror_contact_value(
+                    context, target_type, record_field, token, subject_uid, target_name, source_ref
+                )
         else:
             # Not fully enforced: unconditional shadow=True, byte-identical
             # to this writer's pre-athenaeum#2220 behaviour (the design's
@@ -1414,6 +1439,45 @@ def scrub_compiled_contact_tokens(
         removed.append(token)
 
     return scrubbed, removed
+
+
+def _mirror_contact_value(
+    context: AttributionContext,
+    target_type: str,
+    record_field: str,
+    token: str,
+    subject_uid: str,
+    target_name: str | None,
+    source_ref: str | dict[str, Any] | None,
+) -> None:
+    """File *token* on every later target of a multi-target rule (athenaeum#3169)."""
+    from athenaeum.storage import apply_to_targets, target_root
+
+    wiki_root = context.wiki_root
+    assert wiki_root is not None
+    try:
+        targets = route_for(target_type, record_field, config=context.config).targets
+    except StorageConfigError:
+        return
+    if len(targets) < 2:
+        return
+    done = context.contacts_root.resolve()
+
+    def _one(name: str) -> None:
+        root = target_root(name, context.config, wiki_root.parent)
+        if root.resolve() != done:
+            pii.record_contact_value(
+                root,
+                token,
+                uid=subject_uid,
+                name=target_name,
+                usage_class=pii.USAGE_CLASS_UNCLASSIFIED,
+                field=record_field,
+                source=source_ref if source_ref is not None else "",
+                observed_at=now_iso(),
+            )
+
+    apply_to_targets(targets, _one)
 
 
 # ---------------------------------------------------------------------------

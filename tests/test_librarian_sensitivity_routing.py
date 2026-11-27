@@ -32,7 +32,11 @@ from athenaeum.librarian import process_one
 from athenaeum.models import EntityIndex, RawFile, parse_frontmatter
 
 SYNTHETIC_EMAIL = "test.user.demo@example.invalid"
-ROUTING_ON = {"sensitivity": {"routing": {"enabled": True}}}
+ROUTING_ON = {
+    "sensitivity": {"routing": {"enabled": True}},
+    # athenaeum#3168: a class value routing would route needs a rule.
+    "storage": {"routes": [{"sensitivity_class": "pii", "to": ["excluded"]}]},
+}
 #: AC10 failure mode 3 (design note §6): routes the `pii` class onto an
 #: IN-CORPUS adapter — a misconfiguration the routing stage must refuse
 #: rather than silently honor.

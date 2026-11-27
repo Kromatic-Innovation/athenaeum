@@ -32,6 +32,24 @@ if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
 
 
+def _no_history_declared(knowledge_root: Path, command: str) -> bool:
+    """True (after printing "no history") when ``storage.history`` is ``none`` (athenaeum#3164).
+
+    A command that reads history to restore a snapshot has nothing to read under
+    a declared ``none``: it reports that and the caller exits 0.
+    """
+    from athenaeum.config import StorageConfigError, load_config, resolve_storage_history
+
+    try:
+        declared = resolve_storage_history(load_config(knowledge_root))
+    except StorageConfigError:
+        return False
+    if declared != "none":
+        return False
+    print(f"no history: storage.history is none, so `{command}` has no snapshot to restore.")
+    return True
+
+
 def _resolve_knowledge_root(args: argparse.Namespace, attr: str = "path") -> Path:
     """Resolve the knowledge root off ``args`` (issue athenaeum#1349, athenaeum#2445).
 

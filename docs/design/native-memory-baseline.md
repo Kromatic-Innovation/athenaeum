@@ -131,8 +131,8 @@ a `read_entity` tool returns one whole page given the `uid` and `type` a
 `recall` hit reports — both served in-process by the same functions the
 shipped MCP server calls (`recall_search`, `entity_read`), using the MCP
 server's own tool descriptions and parameters
-(`query`/`top_k`/`with_pii`/`history`/`type`, and
-`uid`/`entity_class`/`include_excluded`/`usage_classes`) rather than a
+(`query`/`top_k`/`include_sensitive`/`history`/`type`, and
+`uid`/`entity_class`/`include_sensitive`/`usage_classes`) rather than a
 paraphrase. Those two, and nothing else, are what the real server serves a
 PULL arm, so API-mode and CLI-mode PULL measure the same tool surface —
 which matters in two distinct ways (athenaeum#1756, both measured by
