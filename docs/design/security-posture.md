@@ -433,6 +433,16 @@ What follows from the table:
 - **No at-rest option reduces what the model provider sees.** Compile prompts
   and recalled text reach the provider as plaintext whatever is encrypted on
   disk or in git.
+- **The per-turn recall hook sends the previous turn to the topic extractor
+  model** (athenaeum#3105). To pick pages for a follow-up message, the
+  `athenaeum-claude-hook` extractor call carries, per turn, the new message
+  plus the previous user message and the end of the assistant's last reply,
+  each capped at 1,500 characters. The previous turn is read from the session
+  transcript at the `transcript_path` Claude Code passes in the hook payload;
+  when that transcript is missing or unreadable, only the new message is sent.
+  This is on by default. Set `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0` in the
+  hook's environment or its cache `config.env` to turn it off, which sends the
+  new message alone. The hook does not read `athenaeum.yaml` for this switch.
 - **Content in a running librarian or MCP process, anything a member already
   read or copied, file paths, and commit metadata** are outside what any
   at-rest option protects.

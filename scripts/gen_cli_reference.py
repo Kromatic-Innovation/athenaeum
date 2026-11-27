@@ -227,12 +227,29 @@ def _flat_nodes(parser: argparse.ArgumentParser, *, prog: str) -> list[_Node]:
     return nodes
 
 
+def _anchor(n: _Node) -> str:
+    return n.command_line.replace(" ", "-").replace("`", "")
+
+
+def _linkify(text: str, nodes: list[_Node], *, self_node: _Node) -> str:
+    """Turn a backticked ``athenaeum <command>`` naming another documented
+    command into a link to that command's section, so help text can point
+    at it. A command's own name is left alone."""
+    by_line = {n.command_line: n for n in nodes if n is not self_node}
+
+    def repl(m: re.Match[str]) -> str:
+        target = by_line.get(m.group(1))
+        return f"[`{m.group(1)}`](#{_anchor(target)})" if target else m.group(0)
+
+    return re.sub(r"`([^`]+)`", repl, text)
+
+
 def _render_command_index(nodes: list[_Node], *, heading: str) -> list[str]:
     lines: list[str] = [heading, ""]
     for n in nodes:
         kind = "group" if n.children else "command"
-        help_text = _sanitize(n.help_text)
-        anchor = n.command_line.replace(" ", "-").replace("`", "")
+        help_text = _linkify(_sanitize(n.help_text), nodes, self_node=n)
+        anchor = _anchor(n)
         suffix = f" — {help_text}" if help_text else ""
         lines.append(f"- [`{n.command_line}`](#{anchor}) ({kind}){suffix}")
     lines.append("")
@@ -244,7 +261,7 @@ def _render_command_sections(nodes: list[_Node]) -> list[str]:
     for n in nodes:
         lines.append(f"## `{n.command_line}`")
         lines.append("")
-        help_text = _sanitize(n.help_text)
+        help_text = _linkify(_sanitize(n.help_text), nodes, self_node=n)
         if help_text:
             lines.append(help_text)
             lines.append("")
