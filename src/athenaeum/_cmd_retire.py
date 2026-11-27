@@ -119,10 +119,11 @@ def _add_one(subparsers: argparse._SubParsersAction, name: str) -> None:
     parser.add_argument(
         "--force-retire",
         action="store_true",
-        help="Override a retirement guard: allow retiring the contact records "
-        "of a uid whose page is live (they would otherwise be its only "
-        "contact records). The override is "
-        "recorded in the archive commit message.",
+        help="Override a retirement guard: retire pages a relevance-policy "
+        "`always` rule protects (athenaeum#3152), or the contact records of a "
+        "uid whose page is live (they would otherwise be its only contact "
+        "records). The override is recorded in the archive commit message, "
+        "and a policy override also in wiki/_relevance_policy_audit.jsonl.",
     )
     parser.add_argument(
         "--path",

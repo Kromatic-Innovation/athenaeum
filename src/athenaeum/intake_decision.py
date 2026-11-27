@@ -215,6 +215,17 @@ def _capture(policy: PolicyLike, d: Description) -> tuple[str, RuleLike | None]:
     return CAPTURE_KEEP, None
 
 
+def always_rule(policy: PolicyLike, d: Description) -> RuleLike | None:
+    """The ``always`` rule that decides *d*, or ``None`` (athenaeum#3152).
+
+    Same last-match-wins reading as :func:`_capture`, kept beside it so there is
+    one place that matches capture rules; the removal-protection helper
+    :func:`athenaeum.relevance_policy.protecting_rule` delegates here.
+    """
+    rule = policy.match(d.type, list(d.tags), d.subject)
+    return rule if rule is not None and rule.verdict == "always" else None
+
+
 def _store(
     policy: PolicyLike,
     d: Description,

@@ -260,3 +260,52 @@ def record_tool_call(
         reason=reason,
     )
     append_audit_record(path, record)
+
+
+#: Outcomes of a sensitive read's vault check (athenaeum#3176).
+SENSITIVE_READ_OUTCOMES: frozenset[str] = frozenset({"granted", "denied"})
+
+
+def build_sensitive_read_record(
+    *,
+    principal: Sequence[str] | None,
+    vault: str,
+    outcome: str,
+    tool_name: str | None = None,
+) -> dict[str, Any]:
+    """One audit record for the read-grant check on a vault (athenaeum#3176).
+
+    Names the principal (its identity key), the vault and the outcome
+    (``granted`` / ``denied``). It carries no value, no field name and no
+    page text: the check happens before any value is read, so there is none to
+    leave out by accident.
+    """
+    from athenaeum.store import now_iso
+
+    if outcome not in SENSITIVE_READ_OUTCOMES:
+        raise ValueError(f"outcome={outcome!r} must be one of {sorted(SENSITIVE_READ_OUTCOMES)}")
+    return {
+        "ts": now_iso(),
+        "event": "sensitive_read",
+        "tool": tool_name,
+        "principal": list(principal) if principal else None,
+        "vault": vault,
+        "outcome": outcome,
+    }
+
+
+def record_sensitive_read(
+    path: Path,
+    *,
+    principal: Sequence[str] | None,
+    vault: str,
+    outcome: str,
+    tool_name: str | None = None,
+) -> None:
+    """Build and append one sensitive-read record (athenaeum#3176)."""
+    append_audit_record(
+        path,
+        build_sensitive_read_record(
+            principal=principal, vault=vault, outcome=outcome, tool_name=tool_name
+        ),
+    )

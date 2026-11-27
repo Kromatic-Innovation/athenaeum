@@ -503,6 +503,9 @@ class AuditVerdict:
     scan_type: str | None = None
     scan_name: str | None = None
     scan_cluster_id: str | None = None
+    #: Label of the ``always`` relevance rule that protects this page
+    #: (athenaeum#3152). Set => never a retirement candidate.
+    protected_by: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -521,6 +524,7 @@ class AuditVerdict:
             "scan_type": self.scan_type,
             "scan_name": self.scan_name,
             "scan_cluster_id": self.scan_cluster_id,
+            "protected_by": self.protected_by,
         }
 
 
@@ -1167,6 +1171,11 @@ class AuditReport:
         return [v for v in self.audited if v.retirement_candidate]
 
     @property
+    def protected_by_policy(self) -> int:
+        """Pages an ``always`` rule kept off the retirement-candidate list."""
+        return sum(1 for v in self.audited if v.protected_by is not None)
+
+    @property
     def total_input_tokens(self) -> int:
         return sum(v.input_tokens for v in self.verdicts)
 
@@ -1185,6 +1194,7 @@ class AuditReport:
             "failed": len(self.failed),
             "skipped": [{"path": str(p), "reason": r} for p, r in self.skipped],
             "retirement_candidates": len(self.retirement_candidates),
+            "protected_by_policy": self.protected_by_policy,
             "llm_calls": self.llm_calls,
             "llm_available": self.llm_available,
             "used_batch": self.used_batch,
@@ -1203,6 +1213,7 @@ class AuditReport:
             f"failed: {len(self.failed)}",
             f"skipped: {len(self.skipped)}",
             f"retirement candidates: {len(self.retirement_candidates)}",
+            f"protected by policy: {self.protected_by_policy}",
             f"llm calls: {self.llm_calls}",
         ]
         for v in self.verdicts:
@@ -1260,6 +1271,15 @@ def build_audit_report(
     candidates = select_audit_pages(wiki_root, limit=limit, sample=sample, seed=seed, uids=uids)
     report.scanned = len(candidates)
 
+    from athenaeum.relevance_policy import RelevancePolicyError, load_relevance_policy
+
+    try:
+        policy = load_relevance_policy(wiki_root)
+    except RelevancePolicyError as exc:
+        # The audit only recommends; retire-pages fails closed on a bad policy.
+        log.warning("audit: relevance policy invalid, no pages treated as protected: %s", exc)
+        policy = None
+
     all_eligible = _collect_eligible_pages(wiki_root)
     duplicate_reasons = _find_duplicate_reasons(candidates, all_eligible, wiki_root)
 
@@ -1287,6 +1307,18 @@ def build_audit_report(
         elif _is_bare_person_stub(meta, body):
             verdict = replace(verdict, retirement_candidate=False, retirement_reason="")
         verdict = _apply_transitory_class(verdict, meta, body, config)
+        # athenaeum#3152: an `always` rule outranks every candidacy source above.
+        from athenaeum.relevance_policy import protecting_rule
+
+        protector = protecting_rule(policy, meta)
+        if protector is not None:
+            verdict = replace(
+                verdict,
+                retirement_candidate=False,
+                retirement_reason="",
+                protected_by=f"rule {protector.number} (line {protector.line}): "
+                f"{protector.describe()}",
+            )
         return verdict
 
     if client is None:
