@@ -141,6 +141,7 @@ if TYPE_CHECKING:
     # call site in this module (the existing convention here), so this never
     # pulls the module in at import time.
     from athenaeum.pii import ExcludedRecordIndex
+    from athenaeum.vault_read_gate import VaultReadGate
 
 log = logging.getLogger(__name__)
 
@@ -1921,66 +1922,6 @@ def _reorder_hits_uncompiled_last(
         else:
             compiled.append(hit)
     return compiled + uncompiled
-
-
-class _VaultReadGate:
-    """One tool call's per-vault read check (athenaeum#3176).
-
-    Callable with a vault (storage location) name; true when the request's
-    principal holds ``read`` on it by :func:`athenaeum.access.can`. No principal
-    holds nothing, and a location the configuration cannot name is refused. Each
-    vault is asked once per call and each answer is written to the server's
-    audit log (principal, vault, outcome; never a value) BEFORE it is returned,
-    so no read follows an unrecorded decision: an unwritable log raises and the
-    call fails closed. ``denied`` says whether any vault refused.
-    """
-
-    def __init__(
-        self,
-        principal: tuple[str, ...] | None,
-        *,
-        tool_name: str,
-        config: dict[str, Any] | None,
-        knowledge_root: Path,
-        audit_log_path: Path | None,
-    ) -> None:
-        self._principal = principal
-        self._tool_name = tool_name
-        self._config = config
-        self._knowledge_root = knowledge_root
-        self._audit_log_path = audit_log_path
-        self._answers: dict[str, bool] = {}
-        self.denied = False
-
-    def __call__(self, vault: str) -> bool:
-        if vault in self._answers:
-            return self._answers[vault]
-        from athenaeum.access import can
-
-        try:
-            allowed = can(
-                self._principal,
-                vault,
-                "read",
-                config=self._config,
-                knowledge_root=self._knowledge_root,
-            )
-        except ValueError:
-            allowed = False
-        if self._audit_log_path is not None:
-            from athenaeum.audit_log import record_sensitive_read
-
-            record_sensitive_read(
-                self._audit_log_path,
-                principal=self._principal,
-                vault=vault,
-                outcome="granted" if allowed else "denied",
-                tool_name=self._tool_name,
-            )
-        self._answers[vault] = allowed
-        if not allowed:
-            self.denied = True
-        return allowed
 
 
 def _excluded_block_for_hit(
@@ -4686,11 +4627,13 @@ def create_server(
         access = get_access_token() if serve_auth is not None else None
         return request_principal(_identity_provider, access, config=config)
 
-    def _new_vault_gate(tool_name: str) -> _VaultReadGate | None:
+    def _new_vault_gate(tool_name: str) -> "VaultReadGate | None":
         """The per-vault read check for one tool call, or ``None`` when ungated."""
         if serve_auth is None:
             return None
-        return _VaultReadGate(
+        from athenaeum.vault_read_gate import VaultReadGate
+
+        return VaultReadGate(
             _current_principal(),
             tool_name=tool_name,
             config=config,
