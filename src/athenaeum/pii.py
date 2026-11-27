@@ -197,6 +197,8 @@ from athenaeum.storage import (
     route_for,
     surface_root_for_class,
     target_root,
+    vault_page_roots,
+    vault_route_for_page_type,
 )
 from athenaeum.store import append_line_durable, now_iso
 
@@ -5809,6 +5811,10 @@ class EntityRead:
     do_not_email: DoNotEmailState = dataclass_field(
         default_factory=lambda: DoNotEmailState(marked=False)
     )
+    #: True for a whole page held in a vault that this read did not unlock
+    #: (athenaeum#3174): the page exists, nothing of it is returned. ``page_path``
+    #: is then the vault's directory, never the page's own file name.
+    withheld: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable dict: paths as ``str``, redactions as a list of dicts.
@@ -5846,6 +5852,7 @@ class EntityRead:
                 for name, values in self.validity.items()
             },
             "do_not_email": self.do_not_email.to_dict(),
+            **({"withheld": True} if self.withheld else {}),
         }
 
 
@@ -6179,6 +6186,10 @@ def record_placement(
         index = entity_index_for_uid(knowledge_root / "wiki", subject)
         page_path = index.get_by_uid(subject)
         if page_path is None:
+            # A page of a type routed whole to a vault is in no index
+            # (athenaeum#3174); it is still exactly one entity.
+            page_path = vault_page_path(knowledge_root, config, subject)
+        if page_path is None:
             return unplaceable
         frontmatter, _ = parse_frontmatter(page_path.read_text(encoding="utf-8"))
         page_type = str(frontmatter.get("type") or "").strip()
@@ -6366,7 +6377,7 @@ def read_entity(
         entity_index = entity_index_for_uid(
             knowledge_root / "wiki", uid, cache_dir=cache_dir
         )
-    return _entity_read_from_indexes(
+    read = _entity_read_from_indexes(
         uid,
         entity_index=entity_index,
         contact_records=contact_records,
@@ -6374,6 +6385,75 @@ def read_entity(
         wanted_classes=frozenset(usage_classes) if usage_classes is not None else None,
         surface_class=surface_class,
         config=config,
+    )
+    if read is None:
+        return _vault_page_read(uid, knowledge_root, include_excluded, config)
+    return read
+
+
+def vault_page_path(
+    knowledge_root: Path, config: dict[str, Any] | None, uid: str
+) -> Path | None:
+    """The file of the whole vault page with *uid*, else ``None`` (athenaeum#3174).
+
+    Looks in every vault a ``storage.routes`` rule sends whole pages to, and
+    accepts a file only when its own ``type:`` is routed to THAT vault. Keyed
+    on the page's type, never on a surface class: a type's surface class can
+    differ from the type itself (``person`` is on ``pii``), and the rule names
+    the type. With no such rule nothing is scanned.
+    """
+    for vault, root in vault_page_roots(config, knowledge_root).items():
+        path = resolve_contact_record_for_uid(root, uid)
+        if path is None:
+            continue
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if vault_route_for_page_type(str(meta.get("type") or ""), config) == vault:
+            return path
+    return None
+
+
+def _vault_page_read(
+    uid: str,
+    knowledge_root: Path,
+    include_excluded: bool,
+    config: dict[str, Any] | None,
+) -> EntityRead | None:
+    """The read of a whole page held in a vault (athenaeum#3174).
+
+    Only for a page type a ``storage.routes`` rule sends whole to a vault
+    (:func:`vault_page_path`); any other uid with no wiki page stays "not
+    found". With *include_excluded* the page's frontmatter and body are
+    returned; without it the result says the page exists and is withheld, and
+    carries no field value, no body and not the page's file name.
+    """
+    page_path = vault_page_path(knowledge_root, config, uid)
+    if page_path is None:
+        return None
+    if not include_excluded:
+        return EntityRead(
+            uid=uid,
+            page_path=page_path.parent,
+            frontmatter={},
+            body="",
+            contact={},
+            redactions=(),
+            contact_included=False,
+            contact_record_path=None,
+            withheld=True,
+        )
+    frontmatter, body = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+    return EntityRead(
+        uid=uid,
+        page_path=page_path,
+        frontmatter=frontmatter,
+        body=body,
+        contact={},
+        redactions=(),
+        contact_included=True,
+        contact_record_path=page_path,
     )
 
 
@@ -6885,6 +6965,7 @@ __all__ = [
     "RedactionMarker",
     "EntityRead",
     "read_entity",
+    "vault_page_path",
     "RecordPlacement",
     "record_placement",
     "read_entities",

@@ -172,7 +172,7 @@ from athenaeum.declared_relationships import (
     declared_relationship,
 )
 from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE, parse_footnote_definitions
-from athenaeum.intake_destination import destination_for_new_entity
+from athenaeum.intake_destination import destination_for_new_entity, vault_page_exists
 from athenaeum.models import (
     EntityIndex,
     TokenUsage,
@@ -237,9 +237,11 @@ from athenaeum.screening import more_restrictive
 from athenaeum.storage import (
     ReadOnlySurfaceError,
     SurfaceNotIndexedError,
+    note_vault_page,
     open_store,
     refuse_read_only_write,
     resolve_locator_surfaces,
+    vault_for_path,
 )
 from athenaeum.store import now_iso
 from athenaeum.store_links import admit_page_write
@@ -1129,6 +1131,16 @@ def compute_apply(
             dest = destination_for_new_entity(
                 entity, config, wiki_root.parent, entity_type=entity_type
             )
+            # athenaeum#3174: a name the vault already holds is an update
+            # there; the lookup runs in the vault only.
+            if vault_page_exists(dest, entity.name):
+                issues.append(
+                    PlanIssue(
+                        "vault-page-exists",
+                        f"a page with this name is already in vault {dest.vault!r}",
+                    )
+                )
+                return None
             return dest.root
         except SurfaceNotIndexedError as exc:
             issues.append(PlanIssue("surface-not-indexed", str(exc)))
@@ -2531,9 +2543,11 @@ def write_apply(
         for sp in computed.sub_pages:
             atomic_write_text(sp.path, sp.text)
             written.append(sp.path)
+            note_vault_page(vault_for_path(sp.path, config, wiki_root.parent))
         for standalone in computed.standalone_pages:
             atomic_write_text(standalone.path, standalone.text)
             written.append(standalone.path)
+            note_vault_page(vault_for_path(standalone.path, config, wiki_root.parent))
         for target in computed.targets:
             atomic_write_text(target.path, target.text)
             restored.append(target)
