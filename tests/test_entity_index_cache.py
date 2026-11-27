@@ -35,7 +35,12 @@ from athenaeum import entity_index_cache as eic
 from athenaeum import identity_resolution, mcp_server, pii
 from athenaeum.models import EntityIndex
 
-EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 
 def _page(wiki: Path, filename: str, frontmatter: str, body: str = "Body.\n") -> Path:

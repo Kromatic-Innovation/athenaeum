@@ -61,6 +61,10 @@ CONFIG: dict[str, Any] = {
         "adapters": {"vault_a": _vault("vault_a"), "vault_b": _vault("vault_b")},
         "mapping": {"pii": "vault_a", "supplier": "vault_b"},
         "excluded_read_mapping": {"vendor": "supplier"},
+        "excluded_fields": {
+            "pii": ["emails", "phones", "former_emails", "alt_emails"],
+            "supplier": ["emails"],
+        },
     }
 }
 

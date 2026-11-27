@@ -272,7 +272,24 @@ class TestEntityPageLint:
             "name": "Alice",
             "emails": ["alice@example.com"],
         }
+        config = {
+            "storage": {
+                "routes": [{"page_type": "person", "fields": ["emails"], "to": ["excluded"]}]
+            }
+        }
         with pytest.warns(UserWarning, match="inline contact data"):
+            validate_wiki_meta(meta, config=config)
+
+    def test_pydantic_silent_on_inline_emails_without_a_rule(self) -> None:
+        """athenaeum#3170: nothing is private unless the operator declares it."""
+        meta = {
+            "uid": "person-alice",
+            "type": "person",
+            "name": "Alice",
+            "emails": ["alice@example.com"],
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             validate_wiki_meta(meta)
 
     def test_pydantic_warns_on_inline_phones(self) -> None:
@@ -282,8 +299,13 @@ class TestEntityPageLint:
             "name": "Alice",
             "phones": ["+1-555-0100"],
         }
+        config = {
+            "storage": {
+                "routes": [{"page_type": "person", "fields": ["phones"], "to": ["excluded"]}]
+            }
+        }
         with pytest.warns(UserWarning, match="inline contact data"):
-            validate_wiki_meta(meta)
+            validate_wiki_meta(meta, config=config)
 
     def test_pydantic_silent_for_durable_identifiers_only(self) -> None:
         meta = {

@@ -32,7 +32,12 @@ from athenaeum import erasure as erasure_mod
 from athenaeum import identity_resolution, pii
 from athenaeum.erasure import load_or_create_erasure_key, purge_erasure_key
 
-EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 
 def _record(root: Path, filename: str, uid: str, emails: list[str]) -> Path:

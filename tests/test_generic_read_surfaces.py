@@ -37,7 +37,12 @@ from athenaeum._cli_shared import EXIT_INTERNAL_ERROR, EXIT_NOT_FOUND
 from athenaeum._cmd_query import cmd_entity, cmd_recall
 from athenaeum.mcp_server import entity_read
 
-EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 RESTRICTED = {"secondary"}
 
@@ -74,7 +79,11 @@ def _write_config(knowledge: Path) -> None:
     """Write the athenaeum.yaml the CLI commands load for themselves."""
     knowledge.mkdir(parents=True, exist_ok=True)
     (knowledge / "athenaeum.yaml").write_text(
-        "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        (
+            "storage:\n  mapping:\n    pii: excluded\n"
+            "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n"
+        ),
+        encoding="utf-8",
     )
 
 
@@ -181,6 +190,7 @@ class TestMcpReadEntityTool:
         config: dict[str, object] = {
             "storage": {
                 "mapping": {"vendor": "vendor-excluded"},
+                "excluded_fields": {"vendor": ["account_numbers"]},
                 "adapters": {
                     "vendor-excluded": {
                         "backing_store": "markdown",

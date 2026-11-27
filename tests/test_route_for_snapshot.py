@@ -19,7 +19,7 @@ from athenaeum import pii
 from athenaeum.corrections import process_correction_record
 from athenaeum.models import EntityIndex, parse_frontmatter
 from athenaeum.sensitivity_routing import SensitivityRoutingError, _vault_root_for_class
-from athenaeum.storage import EXCLUDED, StorageConfigError
+from athenaeum.storage import EXCLUDED, StorageConfigError, UndeclaredVaultDataError
 
 UID = "person-alex"
 
@@ -64,12 +64,16 @@ READ_CONFIGS: dict[str, dict[str, Any]] = {
 }
 
 
+UNDECLARED_READ_CONFIGS = {"mapping-only", "read-mapping-override"}
+
+
 def _reference_read_fields(cfg: dict[str, Any], record: dict[str, Any]) -> dict[str, list[str]]:
     """The old join, from the raw config: surface class, field list, then values."""
     storage = cfg.get("storage") or {}
     surface = (storage.get("excluded_read_mapping") or {}).get("person", "pii")
     configured = (storage.get("excluded_fields") or {}).get(surface)
-    names = list(configured) if configured is not None else list(pii.CONTACT_DATA_FIELDS)
+    # athenaeum#3170: no built-in contact-field fallback; undeclared means no fields.
+    names = list(configured) if configured is not None else []
     out: dict[str, list[str]] = {}
     for name in names:
         raw = record.get(name)
@@ -85,6 +89,12 @@ def test_read_path_join_is_unchanged(tmp_path: Path, name: str) -> None:
     cfg = READ_CONFIGS[name]
     record, _ = parse_frontmatter((root / "excluded" / f"{UID}.md").read_text(encoding="utf-8"))
     surface = pii.surface_class_for_page_class("person", cfg)
+    if name in UNDECLARED_READ_CONFIGS:
+        # athenaeum#3170: a sensitive read of an off-corpus mapping that no rule
+        # declares is refused rather than answered from a built-in field list.
+        with pytest.raises(UndeclaredVaultDataError):
+            pii.read_entity(root, cfg, UID, surface_class=surface, include_excluded=True)
+        return
     read = pii.read_entity(root, cfg, UID, surface_class=surface, include_excluded=True)
     expected = _reference_read_fields(cfg, record)
     assert read is not None

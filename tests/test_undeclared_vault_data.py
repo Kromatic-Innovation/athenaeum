@@ -316,17 +316,44 @@ class TestRefusalMessage:
         (vault / "b.md").write_text("---\nuid: v2\nsort_code: '00'\n---\n", encoding="utf-8")
         assert previous_field_list("vendor", config, tmp_path) == ("account", "iban", "sort_code")
         routes = suggested_routes(config, tmp_path)
+        # A whole-page rule keeps the pages where they were; the field rule keeps
+        # the read of the vault's record fields.
         assert [(r.page_type, r.fields, r.location, r.replaces) for r in routes] == [
+            ("vendor", None, "vendor-vault", ("storage.mapping.vendor",)),
             (
                 "vendor",
                 ("account", "iban", "sort_code"),
                 "vendor-vault",
                 ("storage.mapping.vendor",),
-            )
+            ),
         ]
         assert "remove these keys, which the rules replace: storage.mapping.vendor" in (
             refusal_message(config, tmp_path)
         )
+        # The printed rules are a valid configuration once the mapping is removed.
+        pasted = _pasted(config, suggested_routes_text(routes))
+        del pasted["storage"]["mapping"]["vendor"]
+        assert undeclared_vault_mappings(pasted) == ()
+        assert pii.resolve_excluded_fields(
+            pii.surface_class_for_page_class("vendor", pasted), pasted, None
+        ) == ("account", "iban", "sort_code")
+        assert route_for("vendor", config=pasted).targets == ("vendor-vault",)
+
+    def test_whole_page_mapping_inside_the_wiki_gets_a_whole_page_rule(
+        self, tmp_path: Path
+    ) -> None:
+        unembedded = dict(VENDOR_ADAPTER, surface_root="wiki", sensitive=False)
+        config = {
+            "storage": {"mapping": {"note": "notes-off"}, "adapters": {"notes-off": unembedded}}
+        }
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "wiki" / "n.md").write_text(
+            "---\nuid: n\ntype: note\nname: N\n---\n", encoding="utf-8"
+        )
+        (route,) = suggested_routes(config, tmp_path)
+        assert (route.page_type, route.fields, route.location) == ("note", None, "notes-off")
+        # Pages in the wiki tree are pages, not records: the scan leaves them alone.
+        assert scan_undeclared_fields(config, tmp_path) == ()
 
     def test_operator_read_mapping_is_named_as_replaced(self, tmp_path: Path) -> None:
         config = {

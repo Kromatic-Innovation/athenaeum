@@ -33,6 +33,9 @@ from athenaeum.models import EntityIndex, parse_frontmatter, render_frontmatter
 from athenaeum.pending_merges import parse_pending_merges, resolve_merge
 from tests.conftest import init_git_repo
 
+# athenaeum#3170: nothing is private unless declared; these tests declare the contact fields.
+_CF = ["emails", "phones", "former_emails", "alt_emails"]
+
 _VALUE = "introducer@example.org"
 _TARGET_UID = "uid-target"
 _TARGET_NAME = "Target Person"
@@ -40,8 +43,16 @@ _OWNER_UID = "uid-owner"
 _OWNER_NAME = "Owner Person"
 _THIRD_UID = "uid-third"
 _THIRD_NAME = "Third Person"
-_EXCLUDED_CONFIG = "storage:\n  mapping:\n    pii: excluded\n"
-_CONFIG: dict[str, Any] = {"storage": {"mapping": {"pii": "excluded"}}}
+_EXCLUDED_CONFIG = (
+    "storage:\n  mapping:\n    pii: excluded\n"
+    "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n"
+)
+_CONFIG: dict[str, Any] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": _CF},
+    }
+}
 
 
 def _write_page(wiki_root: Path, *, uid: str, name: str) -> Path:
@@ -65,7 +76,7 @@ def knowledge(tmp_path: Path) -> Path:
     _write_page(wiki, uid=_OWNER_UID, name=_OWNER_NAME)
     (root / "athenaeum.yaml").write_text(_EXCLUDED_CONFIG, encoding="utf-8")
     context = pii_attribution.build_attribution_context(
-        root, {"storage": {"mapping": {"pii": "excluded"}}}
+        root, _CONFIG
     )
     verdict = pii_attribution.AttributionVerdict(
         disposition=pii_attribution.DISPOSITION_SUSPECT,
@@ -116,7 +127,7 @@ def contested(knowledge: Path) -> Path:
 
 def _suspect_id(knowledge_root: Path) -> str:
     context = pii_attribution.build_attribution_context(
-        knowledge_root, {"storage": {"mapping": {"pii": "excluded"}}}
+        knowledge_root, _CONFIG
     )
     return pii_attribution.suspect_id_for(
         pii_attribution.value_key_for(context, _VALUE), _TARGET_UID
@@ -125,7 +136,7 @@ def _suspect_id(knowledge_root: Path) -> str:
 
 def _contacts_root(knowledge_root: Path) -> Path:
     return pii.contacts_surface_root(
-        knowledge_root, {"storage": {"mapping": {"pii": "excluded"}}}
+        knowledge_root, _CONFIG
     )
 
 
@@ -267,7 +278,7 @@ class TestPlaceAsOwn:
         rather than silently.
         """
         context = pii_attribution.build_attribution_context(
-            knowledge, {"storage": {"mapping": {"pii": "excluded"}}}
+            knowledge, _CONFIG
         )
         relay = "noreply@example.org"
         verdict = pii_attribution.AttributionVerdict(
@@ -306,7 +317,7 @@ class TestPlaceAsOwn:
         rollback (design §9.4) regardless of WHY it was withheld.
         """
         context = pii_attribution.build_attribution_context(
-            knowledge, {"storage": {"mapping": {"pii": "excluded"}}}
+            knowledge, _CONFIG
         )
         role_value = "info@vendor.example.org"
         verdict = pii_attribution.AttributionVerdict(

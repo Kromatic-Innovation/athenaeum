@@ -42,13 +42,19 @@ from athenaeum._cmd_query import cmd_recall
 from athenaeum.mcp_server import recall_search
 from athenaeum.models import EntityIndex
 
-EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 RESTRICTED = {"secondary"}
 
 UNRECALLABLE_CONFIG: dict[str, object] = {
     "storage": {
         "mapping": {"pii": "excluded", "person": "unrecallable"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
         "adapters": {
             "unrecallable": {
                 "backing_store": "wiki-markdown",

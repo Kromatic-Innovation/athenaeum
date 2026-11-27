@@ -39,7 +39,12 @@ from athenaeum.mcp_server import recall_search
 
 #: `pii` routed off-corpus; every other class stays on the default wiki
 #: surface — the shape of the live `~/knowledge/athenaeum.yaml`.
-EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 RESTRICTED = {"secondary"}
 
@@ -217,6 +222,7 @@ class TestJoinReusesTheAssemblySeam:
             {"uid": "alex"},
             {"uid": "alex", "emails": ["alex@example.org", "a2@example.org"]},
             surface_class="pii",
+            config=EXCLUDED_CONFIG,
             include_excluded=False,
         )
         assert fields == {}
@@ -336,6 +342,7 @@ class TestLayerOrdering:
         knowledge = tmp_path / "knowledge"
         config: dict[str, object] = {
             "storage": {"mapping": {"pii": "excluded", "person": "unrecallable"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
                         "adapters": {
                             "unrecallable": {
                                 "backing_store": "wiki-markdown",

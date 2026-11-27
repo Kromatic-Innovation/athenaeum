@@ -42,7 +42,6 @@ from athenaeum.storage import (
     configured_excluded_read_mapping,
     configured_routes,
     location_for_class,
-    resolve_storage_mapping,
     undeclared_vault_mappings,
 )
 
@@ -66,8 +65,9 @@ class SuggestedRoute:
     """One ``storage.routes`` entry that reproduces the previous behaviour.
 
     Attributes:
-        page_type: The page type whose fields the rule names.
-        fields: The previous effective field list, in its previous order.
+        page_type: The page type the rule names.
+        fields: The previous effective field list, in its previous order;
+            ``None`` for a whole-page rule.
         location: The location the class mapped to.
         surface_class: The ``storage.mapping`` key the rule stands in for.
         replaces: Configuration keys the rule cannot sit beside and replaces
@@ -76,7 +76,7 @@ class SuggestedRoute:
     """
 
     page_type: str
-    fields: tuple[str, ...]
+    fields: tuple[str, ...] | None
     location: str
     surface_class: str
     replaces: tuple[str, ...] = ()
@@ -98,6 +98,16 @@ def _record_meta(path: Path) -> dict[str, Any]:
     return pii.read_bounce_record(path)
 
 
+def _is_page_root(root: Path, knowledge_root: Path) -> bool:
+    """True when *root* is the wiki tree or inside it: it holds pages, not records."""
+    try:
+        wiki = (Path(knowledge_root) / "wiki").resolve()
+        resolved = root.resolve()
+    except OSError:
+        return False
+    return resolved == wiki or wiki in resolved.parents
+
+
 def previous_field_list(
     surface_class: str, config: dict[str, Any] | None, knowledge_root: Path
 ) -> tuple[str, ...]:
@@ -114,6 +124,8 @@ def previous_field_list(
     if surface_class == pii.PII_ENTITY_CLASS:
         return pii.BUILTIN_CONTACT_FIELDS
     root = pii.excluded_surface_root(surface_class, Path(knowledge_root), config)
+    if _is_page_root(root, knowledge_root):
+        return ()
     names: dict[str, None] = {}
     for path in pii.iter_contact_records(root):
         for name in _record_meta(path):
@@ -137,22 +149,42 @@ def suggested_routes(
     knowledge_root: Path,
     mappings: tuple[UndeclaredMapping, ...] | None = None,
 ) -> tuple[SuggestedRoute, ...]:
-    """The ``storage.routes`` entries that reproduce the previous behaviour."""
+    """The ``storage.routes`` entries that reproduce the previous behaviour.
+
+    A class read through other page types (``pii``, read by ``person``) gets a
+    field rule per page type. A class that is itself the page type
+    (``storage.mapping.<type>``) gets a whole-page rule that replaces the
+    mapping entry, so its pages keep their location and corpus policy; when
+    the location is a vault holding records with fields, a field rule is added
+    so the read of those fields is unchanged too.
+    """
     if mappings is None:
         mappings = undeclared_vault_mappings(config)
     operator_read_mapping = configured_excluded_read_mapping(config)
-    storage_mapping = resolve_storage_mapping(config)
+    adapters = available_adapters(config)
     out: list[SuggestedRoute] = []
     for mapping in mappings:
         fields = previous_field_list(mapping.surface_class, config, knowledge_root)
-        if not fields:
-            continue
+        sensitive = bool(getattr(adapters.get(mapping.location), "sensitive", False))
         for page_type in _page_types_for_surface(mapping.surface_class, config):
             replaces: list[str] = []
             if page_type in operator_read_mapping:
                 replaces.append(f"storage.excluded_read_mapping.{page_type}")
-            if page_type in storage_mapping:
+            if page_type == mapping.surface_class:
                 replaces.append(f"storage.mapping.{page_type}")
+                out.append(
+                    SuggestedRoute(
+                        page_type=page_type,
+                        fields=None,
+                        location=mapping.location,
+                        surface_class=mapping.surface_class,
+                        replaces=tuple(replaces),
+                    )
+                )
+                if not (fields and sensitive):
+                    continue
+            elif not fields:
+                continue
             out.append(
                 SuggestedRoute(
                     page_type=page_type,
@@ -174,7 +206,8 @@ def suggested_routes_text(routes: tuple[SuggestedRoute, ...]) -> str:
     lines = ["storage:", "  routes:"]
     for route in routes:
         lines.append(f"    - page_type: {route.page_type}")
-        lines.append(f"      fields: {_yaml_list(route.fields)}")
+        if route.fields is not None:
+            lines.append(f"      fields: {_yaml_list(route.fields)}")
         lines.append(f"      to: [{route.location}]")
     return "\n".join(lines)
 
@@ -217,9 +250,8 @@ def refusal_message(
     if replaced:
         lines.append("")
         lines.append("and remove these keys, which the rules replace: " + ", ".join(replaced))
-    empty = [
-        m for m in mappings if not previous_field_list(m.surface_class, config, knowledge_root)
-    ]
+    suggested = {route.surface_class for route in routes}
+    empty = [m for m in mappings if m.surface_class not in suggested]
     for mapping in empty:
         lines.append("")
         lines.append(
@@ -291,7 +323,7 @@ def scan_undeclared_fields(
             resolved = root.resolve()
         except OSError:
             continue
-        if resolved in roots_seen or not root.is_dir():
+        if resolved in roots_seen or not root.is_dir() or _is_page_root(root, knowledge_root):
             continue
         roots_seen.add(resolved)
         counts: dict[str, int] = {}
@@ -330,7 +362,7 @@ def undeclared_report(config: dict[str, Any] | None, knowledge_root: Path) -> di
         "suggested_routes": [
             {
                 "page_type": r.page_type,
-                "fields": list(r.fields),
+                "fields": list(r.fields) if r.fields is not None else None,
                 "to": [r.location],
                 "replaces": list(r.replaces),
             }
