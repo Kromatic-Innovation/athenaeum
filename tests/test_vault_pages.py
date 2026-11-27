@@ -267,14 +267,14 @@ class TestReadByUid:
             pii.read_entity(tmp_path, cfg, "ref-0001", surface_class="reference") is None
         )
 
-    def test_a_type_whose_surface_class_differs_is_read_from_its_vault(
+    def test_a_person_page_in_a_vault_is_read_by_its_type(
         self, tmp_path: Path
     ) -> None:
-        # ``person`` is on the ``pii`` surface class; the rule names the type, so
-        # the read must find the page by the page's own type, not the class.
+        # A rule names the type; the read must find the page by the page's own
+        # type. (athenaeum#3173: no built-in mapping gives ``person`` another
+        # surface class any more, so the two names agree.)
         cfg = _cfg({"page_type": "person", "to": ["vault"]})
         _compile(tmp_path, [_entity("person", "Dana Example", "per-0001")], cfg)
-        assert pii.surface_class_for_page_class("person", cfg) != "person"
         surface = pii.surface_class_for_page_class("person", cfg)
         got = pii.read_entity(
             tmp_path, cfg, "per-0001", surface_class=surface, include_excluded=True

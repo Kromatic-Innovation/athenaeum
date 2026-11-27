@@ -45,12 +45,15 @@ _THIRD_UID = "uid-third"
 _THIRD_NAME = "Third Person"
 _EXCLUDED_CONFIG = (
     "storage:\n  mapping:\n    pii: excluded\n"
-    "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n"
+    "  routes:\n"
+    "    - page_type: person\n"
+    "      fields: [emails, phones, former_emails, alt_emails]\n"
+    "      to: [excluded]\n"
 )
 _CONFIG: dict[str, Any] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": _CF},
+        "routes": [{"page_type": "person", "fields": _CF, "to": ["excluded"]}],
     }
 }
 

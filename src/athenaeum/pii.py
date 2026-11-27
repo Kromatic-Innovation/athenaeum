@@ -236,7 +236,7 @@ def excluded_surface_root(
     load-bearing: a person page is ``type: person`` while its excluded record
     lives on the ``pii`` surface. This function is TOLD the surface class and
     never guesses; mapping a page class onto a surface class is a separate
-    concern (issue athenaeum#885's ``storage.excluded_read_mapping``).
+    concern (:func:`surface_class_for_page_class`).
 
     Absent any ``storage.mapping`` entry for *entity_class*, this resolves to
     the default wiki surface — a no-op convenience, not a silent leak. The
@@ -246,26 +246,17 @@ def excluded_surface_root(
     return surface_root_for_class(entity_class, config, knowledge_root)
 
 
-#: Built-in page-class → surface-class table (issue athenaeum#885). The default is
-#: IDENTITY — every wiki ``type:`` joins a same-named surface — with exactly
-#: one shipped non-identity entry: a ``type: person`` page's excluded record
-#: lives on the ``pii`` surface, which is the whole reason the page class and
-#: the surface class cannot be collapsed into one name. Operator-overridable
-#: via ``storage.excluded_read_mapping``.
-DEFAULT_EXCLUDED_READ_MAPPING: dict[str, str] = {"person": PII_ENTITY_CLASS}
-
-
 def surface_class_for_page_class(
     page_class: str | None,
     config: dict[str, Any] | None,
 ) -> str:
     """The surface class whose excluded record holds *page_class*'s excluded fields.
 
-    Resolution: the operator's ``storage.excluded_read_mapping`` first, then
-    :data:`DEFAULT_EXCLUDED_READ_MAPPING`, then IDENTITY (the page class joins a
-    same-named surface). An operator entry wins over the built-in, so
-    ``person`` can be pointed elsewhere — or back at identity — without a code
-    change.
+    Resolution: a page type with ``storage.routes`` field rules answers the
+    derived surface class its rules are held under; any other page class is
+    IDENTITY (it joins a same-named surface). There is no built-in table: a
+    ``person`` page's record is read through a ``storage.routes`` rule that
+    names ``person``.
 
     Answering this question is NOT the same as deciding a join should happen.
     A page class whose mapped surface class is not actually excluded (every
@@ -282,7 +273,7 @@ def surface_class_for_page_class(
     configured = configured_excluded_read_mapping(config)
     if cls in configured:
         return configured[cls]
-    return DEFAULT_EXCLUDED_READ_MAPPING.get(cls, cls)
+    return cls
 
 
 def contacts_surface_root(
@@ -5509,9 +5500,8 @@ def resolve_excluded_fields(
 ) -> tuple[str, ...]:
     """Which frontmatter fields on an excluded record are DATA, for *surface_class*.
 
-    Only declared fields (athenaeum#3170): the operator's
-    ``storage.excluded_fields.<surface_class>`` list, or the fields a
-    ``storage.routes`` rule names (folded into the same table, read through
+    Only declared fields (athenaeum#3170): the fields a ``storage.routes``
+    rule names for the page type (folded into a per-class table, read through
     :func:`athenaeum.storage.configured_excluded_fields`). A class with no
     declaration has no data fields and yields ``()``.
 
@@ -5896,7 +5886,7 @@ def assemble_excluded_read(
         surface_class: The **surface class** (``storage.mapping`` key, e.g.
             ``"pii"``) whose field policy applies — never a page ``type:``.
         config: Resolved ``athenaeum.yaml``, for the
-            ``storage.excluded_fields`` override.
+            ``storage.routes`` field rule.
         include_excluded: When ``False``, every non-empty field yields a
             :class:`RedactionMarker` instead of its values.
         usage_classes: Restrict returned values to these usage classes (issue

@@ -540,10 +540,7 @@ class SensitivityClass:
 
 
 #: The shipped default sensitivity class (design note §5) — this module's own
-#: single source of truth for it, mirroring how
-#: :data:`athenaeum.pii.DEFAULT_EXCLUDED_READ_MAPPING` (not
-#: ``config._DEFAULTS``) is the shipped-default home for
-#: ``excluded_read_mapping`` (design note §2.4). Merged in by
+#: single source of truth for it (not ``config._DEFAULTS``). Merged in by
 #: :func:`available_classes` at the LOWEST precedence tier — a
 #: ``sensitivity.classes.pii`` config entry overrides this block WHOLESALE
 #: (recognisers and read_policy alike, not merged field-by-field — design

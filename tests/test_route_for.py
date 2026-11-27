@@ -15,7 +15,13 @@ PII_EXCLUDED: dict[str, Any] = {"storage": {"mapping": {"pii": "excluded"}}}
 PII_DECLARED: dict[str, Any] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
 
@@ -44,12 +50,17 @@ FIELD_CASES: list[tuple[str, dict[str, Any] | None, str, str, tuple[str, ...], s
         "person",
         "emails",
         ("excluded",),
-        "storage.excluded_fields.pii",
+        "storage.routes.person",
     ),
     ("mapping-only-unlisted", PII_EXCLUDED, "person", "title", (), None),
     (
         "explicit-list-replaces-builtin",
-        {"storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": ["nickname"]}}},
+        {
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [{"page_type": "person", "fields": ["nickname"], "to": ["excluded"]}],
+            }
+        },
         "person",
         "emails",
         (),
@@ -57,46 +68,29 @@ FIELD_CASES: list[tuple[str, dict[str, Any] | None, str, str, tuple[str, ...], s
     ),
     (
         "explicit-list-names-field",
-        {"storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": ["nickname"]}}},
+        {
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [{"page_type": "person", "fields": ["nickname"], "to": ["excluded"]}],
+            }
+        },
         "person",
         "nickname",
         ("excluded",),
-        "storage.excluded_fields.pii",
+        "storage.routes.person",
     ),
     (
-        "read-mapping-override",
+        "other-page-type-route",
         {
             "storage": {
                 "mapping": {"supplier-pii": "excluded"},
-                "excluded_read_mapping": {"vendor": "supplier-pii"},
-                "excluded_fields": {"supplier-pii": ["iban"]},
+                "routes": [{"page_type": "vendor", "fields": ["iban"], "to": ["excluded"]}],
             }
         },
         "vendor",
         "iban",
         ("excluded",),
-        "storage.excluded_fields.supplier-pii",
-    ),
-    (
-        "read-mapping-person-to-identity",
-        {
-            "storage": {
-                "mapping": {"pii": "excluded"},
-                "excluded_read_mapping": {"person": "person"},
-            }
-        },
-        "person",
-        "emails",
-        (),
-        None,
-    ),
-    (
-        "class-with-empty-field-list",
-        {"storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": []}}},
-        "person",
-        "emails",
-        (),
-        None,
+        "storage.routes.vendor",
     ),
     (
         # athenaeum#3170: no record-derived fallback; an undeclared class routes nothing.
@@ -166,7 +160,11 @@ def test_whole_type_unknown_location_raises() -> None:
 
 
 def test_field_route_unknown_location_raises() -> None:
-    cfg = {"storage": {"mapping": {"pii": "no-such-adapter"}}}
+    cfg = {
+        "storage": {
+            "routes": [{"page_type": "person", "fields": ["emails"], "to": ["no-such-adapter"]}]
+        }
+    }
     with pytest.raises(StorageConfigError):
         route_for("person", "emails", config=cfg)
 
@@ -181,11 +179,14 @@ def test_no_page_type_and_no_surface_class_keeps_the_field_on_the_page() -> None
 def test_surface_class_form_ignores_the_exclusion_gate() -> None:
     # The read path's form: a surface class that is NOT excluded still answers
     # for its field list (callers gate; read_entity does not).
-    cfg = {"storage": {"excluded_fields": {"ledger": ["iban"]}}}
-    on = route_for(None, "iban", config=cfg, surface_class="ledger")
-    assert on.targets == ("wiki-markdown-embedded",) and on.sensitive is False
-    assert on.rule == "storage.excluded_fields.ledger"
-    assert route_for(None, "other", config=cfg, surface_class="ledger").targets == ()
+    cfg = {
+        "storage": {"routes": [{"page_type": "ledger", "fields": ["iban"], "to": ["excluded"]}]}
+    }
+    ledger = pii.surface_class_for_page_class("ledger", cfg)
+    on = route_for(None, "iban", config=cfg, surface_class=ledger)
+    assert on.targets == ("excluded",)
+    assert on.rule == "storage.routes.ledger"
+    assert route_for(None, "other", config=cfg, surface_class=ledger).targets == ()
 
 
 def test_assemble_excluded_read_consults_route_for(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,6 +197,7 @@ def test_assemble_excluded_read_consults_route_for(monkeypatch: pytest.MonkeyPat
     storage_mod = importlib.import_module("athenaeum.storage")
     pii_mod = importlib.import_module("athenaeum.pii")
     calls: list[tuple[str | None, str | None, str | None]] = []
+    surface = pii_mod.surface_class_for_page_class("person", PII_DECLARED)
     real = storage_mod.route_for
 
     def spy(page_type, field=None, **kwargs):  # type: ignore[no-untyped-def]
@@ -207,9 +209,9 @@ def test_assemble_excluded_read_consults_route_for(monkeypatch: pytest.MonkeyPat
         Path("page.md"),
         {},
         {"uid": "u", "emails": ["a@example.com"], "nickname": "x"},
-        surface_class="pii",
+        surface_class=surface,
         config=PII_DECLARED,
         include_excluded=True,
     )
     assert fields == {"emails": ["a@example.com"]}
-    assert (None, "emails", "pii") in calls and (None, "nickname", "pii") not in calls
+    assert (None, "emails", surface) in calls and (None, "nickname", surface) not in calls

@@ -47,7 +47,10 @@ def _seed_root(tmp_path: Path) -> Path:
     (root / "athenaeum.yaml").write_text(
         "storage:\n  mapping:\n    pii: excluded\n"
         # athenaeum#3170: declare the contact fields kept off the page.
-        "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n",
+        "  routes:\n"
+        "    - page_type: person\n"
+        "      fields: [emails, phones, former_emails, alt_emails]\n"
+        "      to: [excluded]\n",
         encoding="utf-8",
     )
     return root

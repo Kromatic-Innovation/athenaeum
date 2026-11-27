@@ -74,8 +74,6 @@ from athenaeum.config import (  # StorageConfigError is defined in config, re-ex
     HISTORY_VALUES,
     StorageConfigError,
     load_config,
-    resolve_excluded_fields_config,
-    resolve_excluded_read_mapping,
     resolve_extra_intake_roots,
     resolve_owner_asserter,
     resolve_storage_adapters,
@@ -651,16 +649,13 @@ def is_sensitive(location: str, config: dict[str, Any] | None) -> bool:
 # The one resolver for "where is this field / page type stored" (athenaeum#3158)
 # ---------------------------------------------------------------------------
 #
-# Four configuration tables answer that question: ``storage.excluded_fields``
-# with ``storage.excluded_read_mapping`` (which fields of a record are kept off
-# the page), ``storage.mapping`` (which class lives outside the corpus),
-# and the free-text value-routing class rule in ``sensitivity_routing``
-# (athenaeum#3162 removed the fourth, the corrections-only
-# ``librarian.corrections.sensitive_fields`` table; corrections route through
-# ``route_for(page_type, field)`` like every other writer). This section is the
-# ONLY module that calls the config resolvers ``resolve_excluded_fields_config``
-# and ``resolve_excluded_read_mapping``;
-# ``tests/test_route_for.py`` fails the build if another module does.
+# Two configuration keys answer that question: ``storage.routes`` (which fields
+# of a page type are kept off the page, and where) and ``storage.mapping`` (the
+# short form of a whole-page-type route), plus the free-text value-routing class
+# rule in ``sensitivity_routing``. athenaeum#3162 removed the corrections-only
+# ``librarian.corrections.sensitive_fields`` table and athenaeum#3173 removed
+# ``storage.excluded_fields`` and ``storage.excluded_read_mapping``; corrections
+# route through ``route_for(page_type, field)`` like every other writer.
 
 
 @dataclass(frozen=True)
@@ -694,21 +689,174 @@ class RouteDecision:
 
 
 def configured_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
-    """The operator's ``storage.excluded_read_mapping`` -- the resolver's input.
+    """Page type -> derived surface class, for the page types with ``storage.routes`` field rules.
 
     A pass-through so :func:`athenaeum.pii.surface_class_for_page_class` reads
     the table through this module rather than from ``config`` directly.
     """
-    return {**resolve_excluded_read_mapping(config), **_route_tables(config)[2]}
+    return dict(_route_tables(config)[2])
 
 
 def configured_excluded_fields(config: dict[str, Any] | None) -> dict[str, tuple[str, ...]]:
-    """The operator's ``storage.excluded_fields`` -- the resolver's input.
+    """Derived surface class -> the fields ``storage.routes`` rules name for it.
 
     A pass-through so :func:`athenaeum.pii.resolve_excluded_fields` reads the
     table through this module rather than from ``config`` directly.
     """
-    return {**resolve_excluded_fields_config(config), **_route_tables(config)[1]}
+    return dict(_route_tables(config)[1])
+
+
+# ---------------------------------------------------------------------------
+# The removed keys: refuse, and print the routes that replace them (athenaeum#3173)
+# ---------------------------------------------------------------------------
+
+#: The two keys athenaeum#3173 removed, in the order the refusal names them.
+REMOVED_ROUTING_KEYS = ("storage.excluded_fields", "storage.excluded_read_mapping")
+
+#: The one non-identity entry the removed read mapping shipped with: a ``person``
+#: page's record was held under the ``pii`` class. Kept only to translate a
+#: configuration that still sets the removed keys, and by
+#: :mod:`athenaeum.vault_declaration`, which prints rules for a configuration
+#: that never named it.
+PREVIOUS_READ_MAPPING: dict[str, str] = {"person": "pii"}
+
+
+class RemovedRoutingKeysError(StorageConfigError):
+    """``storage.excluded_fields`` or ``storage.excluded_read_mapping`` is set.
+
+    Raised by :func:`configured_routes`, so by the first command that reads or
+    writes a routed field. The message carries the ``storage.routes`` entries
+    that reproduce what the removed keys did.
+    """
+
+
+def _raw_storage_table(config: dict[str, Any] | None, key: str) -> Any:
+    storage_cfg = config.get("storage") if isinstance(config, dict) else None
+    return storage_cfg.get(key) if isinstance(storage_cfg, dict) else None
+
+
+def routes_yaml(entries: Sequence[tuple[str, tuple[str, ...] | None, str]]) -> str:
+    """``(page type, fields or None, location)`` entries as a ``storage.routes`` block to paste."""
+    lines = ["storage:", "  routes:"]
+    for page_type, fields, location in entries:
+        lines.append(f"    - page_type: {page_type}")
+        if fields is not None:
+            lines.append(f"      fields: [{', '.join(fields)}]")
+        lines.append(f"      to: [{location}]")
+    return "\n".join(lines)
+
+
+def removed_routing_keys_message(config: dict[str, Any] | None) -> str | None:
+    """The refusal text for a configuration that still sets a removed key, else ``None``.
+
+    The only reader of the removed keys. A key counts as set when it holds a
+    non-empty value. The replacement is built from what the keys did: each
+    ``storage.excluded_fields.<class>`` list was read off the records of the
+    location ``storage.mapping.<class>`` names, for the page types that class
+    was read through (``storage.excluded_read_mapping``, else the previous
+    ``person`` -> ``pii`` default, else the class itself).
+    """
+    raw_fields = _raw_storage_table(config, "excluded_fields")
+    raw_read = _raw_storage_table(config, "excluded_read_mapping")
+    set_keys = [
+        key
+        for key, raw in zip(REMOVED_ROUTING_KEYS, (raw_fields, raw_read), strict=True)
+        if raw
+    ]
+    if not set_keys:
+        return None
+    read_table: dict[str, str] = dict(PREVIOUS_READ_MAPPING)
+    if isinstance(raw_read, dict):
+        for page_type, surface in raw_read.items():
+            if isinstance(page_type, str) and page_type.strip():
+                if isinstance(surface, str) and surface.strip():
+                    read_table[page_type.strip()] = surface.strip()
+    mapping = resolve_storage_mapping(config)
+    entries: list[tuple[str, tuple[str, ...] | None, str]] = []
+    unplaced: list[str] = []
+    replaced_mapping: list[str] = []
+    if isinstance(raw_fields, dict):
+        for surface, listed in raw_fields.items():
+            if not isinstance(surface, str) or not surface.strip() or not isinstance(listed, list):
+                continue
+            surface = surface.strip()
+            fields = tuple(f.strip() for f in listed if isinstance(f, str) and f.strip())
+            location = mapping.get(surface)
+            if not fields:
+                continue
+            if not location:
+                unplaced.append(surface)
+                continue
+            page_types = [p for p, s in read_table.items() if s == surface and p != surface]
+            if not page_types and read_table.get(surface, surface) == surface:
+                page_types = [surface]
+            for page_type in page_types:
+                if page_type == surface:
+                    entries.append((page_type, None, location))
+                    replaced_mapping.append(f"storage.mapping.{page_type}")
+                entries.append((page_type, fields, location))
+    lines = [
+        f"{' and '.join(f'`{k}`' for k in set_keys)} "
+        f"{'was' if len(set_keys) == 1 else 'were'} removed in athenaeum#3173: "
+        "`storage.routes` names a page type and its fields directly. Nothing was read "
+        "or written."
+    ]
+    if entries:
+        lines.append(
+            "Add these entries to `storage.routes` in athenaeum.yaml (merge them with any "
+            "`routes:` list you already have); they read and write exactly what the removed "
+            "keys did:"
+        )
+        lines.append("")
+        lines.append(routes_yaml(entries))
+        lines.append("")
+        lines.append(
+            "Then delete " + " and ".join(f"`{k}`" for k in set_keys) + " from athenaeum.yaml."
+        )
+        if replaced_mapping:
+            lines.append(
+                "A page type named by a route cannot also sit in `storage.mapping`; delete "
+                + ", ".join(f"`{k}`" for k in sorted(set(replaced_mapping)))
+                + " (the whole-page rule above replaces it)."
+            )
+    else:
+        lines.append(
+            "The removed keys name no field that is kept off a page here; delete "
+            + " and ".join(f"`{k}`" for k in set_keys)
+            + " from athenaeum.yaml."
+        )
+    adapters = available_adapters(config)
+    unmarked = sorted(
+        {
+            loc
+            for _, fields, loc in entries
+            if fields is not None and loc in adapters and not adapters[loc].sensitive
+        }
+    )
+    if unmarked:
+        lines.append(
+            "A field rule needs a sensitive target: mark " + ", ".join(unmarked)
+            + " `sensitive: true` under `storage.adapters` (and keep it outside the corpus)."
+        )
+    if unplaced:
+        lines.append(
+            "These classes have a field list but no `storage.mapping` entry, so their fields "
+            "were never kept off the page and no rule is printed for them: "
+            + ", ".join(sorted(unplaced))
+            + "."
+        )
+    lines.append(
+        "Records already written stay where they are; no file moves. "
+        f"`{SUGGEST_ROUTES_COMMAND}` prints rules for data no rule covers."
+    )
+    return "\n".join(lines)
+
+
+def refuse_removed_routing_keys(config: dict[str, Any] | None) -> None:
+    """Raise :class:`RemovedRoutingKeysError` when a removed routing key is set."""
+    message = removed_routing_keys_message(config)
+    if message is not None:
+        raise RemovedRoutingKeysError(message)
 
 
 # ---------------------------------------------------------------------------
@@ -751,15 +899,10 @@ class UndeclaredVaultDataError(RuntimeError):
 
 
 def _locations_named_by_rules(config: dict[str, Any] | None) -> set[str]:
-    """Every location a ``storage.routes`` rule or a ``storage.excluded_fields`` list names."""
+    """Every location a ``storage.routes`` rule names."""
     named: set[str] = set()
     for route in configured_routes(config):
         named.update(route.to)
-    mapping = resolve_storage_mapping(config)
-    for surface_class in resolve_excluded_fields_config(config):
-        location = mapping.get(surface_class)
-        if location:
-            named.add(location)
     return named
 
 
@@ -767,24 +910,22 @@ def undeclared_vault_mappings(config: dict[str, Any] | None) -> tuple[Undeclared
     """The ``storage.mapping`` entries whose data no rule declares (athenaeum#3170).
 
     An entry counts when its location is outside the corpus (no corpus
-    capability), the class has no ``storage.excluded_fields`` list, and no
-    ``storage.routes`` rule or ``storage.excluded_fields`` list names the
-    location. Pure: reads *config* only. An installation with no location
-    outside the corpus in use returns ``()``. A mapping to an unknown location
-    is left to the check that already refuses it.
+    capability) and no ``storage.routes`` rule names the location. Pure: reads
+    *config* only. An installation with no location outside the corpus in use
+    returns ``()``. A mapping to an unknown location is left to the check that
+    already refuses it.
     """
     mapping = resolve_storage_mapping(config)
     if not mapping:
         return ()
     adapters = available_adapters(config)
-    excluded_fields = resolve_excluded_fields_config(config)
     named = _locations_named_by_rules(config)
     found: list[UndeclaredMapping] = []
     for surface_class, location in mapping.items():
         adapter = adapters.get(location)
         if adapter is None or adapter.corpus_policy.in_corpus:
             continue
-        if surface_class in excluded_fields or location in named:
+        if location in named:
             continue
         found.append(UndeclaredMapping(str(surface_class), str(location)))
     return tuple(found)
@@ -824,9 +965,8 @@ def require_declared_for_sensitive_read(config: dict[str, Any] | None) -> None:
 # A rule names a page type (optionally a list of its fields) or a sensitivity
 # class, and one target location. ``storage.mapping`` stays as the short form of
 # a whole-page-type rule. The rules are folded into the same tables the older
-# keys fill (the page-type mapping, ``storage.excluded_fields`` and
-# ``storage.excluded_read_mapping``) so a configuration written with routes and
-# its equivalent written with the old keys take the same read and write paths.
+# keys filled (the page-type mapping, the per-class field lists and the
+# page-type read mapping) so every reader goes through one set of tables.
 
 #: Prefix of the surface class a page type's field rules are folded into. A
 #: surface class is the name the older tables key a record collection by; a
@@ -958,12 +1098,13 @@ def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]
     outside the corpus, not ``read_only``, no name repeated; athenaeum#3169); two rules
     naming the same page type and field, the same whole page type, or the same sensitivity
     class (there is no ordering between rules); a page type named both in ``storage.routes`` and in
-    ``storage.mapping``; a field rule on a page type that also has a
-    ``storage.excluded_read_mapping`` or ``storage.excluded_fields`` entry; a
-    ``to`` that is not a known location; a field rule whose target is not
+    ``storage.mapping``; a ``to`` that is not a known location; a field rule whose target is not
     ``sensitive`` (:func:`is_sensitive`); and field rules of one page type that
-    name different locations.
+    name different locations. Raises :class:`RemovedRoutingKeysError` (a
+    :class:`StorageConfigError`) while a removed key, ``storage.excluded_fields`` or
+    ``storage.excluded_read_mapping``, is set (athenaeum#3173).
     """
+    refuse_removed_routing_keys(config)
     raw = resolve_storage_routes(config)
     if not raw:
         return ()
@@ -989,8 +1130,6 @@ def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]
             seen.add(key)
 
     mapping = resolve_storage_mapping(config)
-    read_mapping = resolve_excluded_read_mapping(config)
-    excluded_fields = resolve_excluded_fields_config(config)
     field_target: dict[str, tuple[str, ...]] = {}
     adapters = available_adapters(config)
     for route in routes:
@@ -1022,20 +1161,6 @@ def configured_routes(config: dict[str, Any] | None) -> tuple[StorageRoute, ...]
             raise StorageConfigError(
                 f"storage.routes sends fields of {route.page_type!r} to more than one "
                 "location; a page type's field rules share one target"
-            )
-        old_surface = _pii_policy().surface_class_for_page_class(route.page_type, None)
-        if route.page_type in read_mapping or route.page_type in excluded_fields:
-            clash = "storage.excluded_read_mapping" if route.page_type in read_mapping else (
-                "storage.excluded_fields"
-            )
-            raise StorageConfigError(
-                f"page type {route.page_type!r} is named in both storage.routes and "
-                f"{clash}; keep one"
-            )
-        if old_surface in excluded_fields:
-            raise StorageConfigError(
-                f"page type {route.page_type!r} has field rules in storage.routes and its "
-                f"surface class {old_surface!r} is listed in storage.excluded_fields; keep one"
             )
     return routes
 
@@ -1326,8 +1451,6 @@ def _excluded_field_names(
 def _field_rule(surface_class: str, config: dict[str, Any] | None) -> str:
     if surface_class.startswith(_ROUTE_SURFACE_PREFIX):
         return f"storage.routes.{surface_class[len(_ROUTE_SURFACE_PREFIX):]}"
-    if surface_class in configured_excluded_fields(config):
-        return f"storage.excluded_fields.{surface_class}"
     return f"storage.mapping.{surface_class}"
 
 

@@ -45,7 +45,13 @@ from athenaeum.models import EntityIndex
 EXCLUDED_CONFIG: dict[str, object] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
 
@@ -53,8 +59,15 @@ RESTRICTED = {"secondary"}
 
 UNRECALLABLE_CONFIG: dict[str, object] = {
     "storage": {
-        "mapping": {"pii": "excluded", "person": "unrecallable"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "mapping": {"pii": "excluded"},
+        "routes": [
+            {"page_type": "person", "to": ["unrecallable"]},
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            },
+        ],
         "adapters": {
             "unrecallable": {
                 "backing_store": "wiki-markdown",

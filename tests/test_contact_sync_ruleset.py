@@ -464,15 +464,19 @@ class TestUnresolvedTargetIsADefinedNoop:
             },
             "storage": {
                 "mapping": {"pii": "excluded"},
-                "excluded_fields": {
-                    "pii": [
+                "routes": [
+                    {
+                        "page_type": "person",
+                        "fields": [
                         "emails",
                         "phones",
                         "former_emails",
                         "alt_emails",
                         "identifier_validity",
-                    ]
-                },
+                    ],
+                        "to": ["excluded"],
+                    }
+                ],
             },
         }
 

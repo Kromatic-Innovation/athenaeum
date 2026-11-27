@@ -55,7 +55,13 @@ from athenaeum.remote_policy import (
 EXCLUDED_CONFIG: dict[str, object] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
 

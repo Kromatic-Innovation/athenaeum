@@ -91,7 +91,12 @@ def _old_config() -> dict[str, Any]:
         "librarian": {
             "corrections": {"fields": _fields(), "sensitive_fields": {"bounced": "pii"}}
         },
-        "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+        "storage": {
+            "mapping": {"pii": "excluded"},
+            "routes": [
+                {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+            ],
+        },
     }
 
 
@@ -112,7 +117,9 @@ def _pasted_config() -> dict[str, Any]:
 
 def test_printed_replacement_includes_builtin_contact_fields() -> None:
     cfg = _pasted_config()
-    listed = cfg["storage"]["excluded_fields"]["pii"]
+    (rule,) = cfg["storage"]["routes"]
+    assert rule["page_type"] == "person" and rule["to"] == ["excluded"]
+    listed = rule["fields"]
     assert listed == [*pii.BUILTIN_CONTACT_FIELDS, "bounced"]
 
 
@@ -127,9 +134,13 @@ def test_printed_replacement_reproduces_the_old_routing_byte_for_byte(tmp_path: 
         "librarian": {"corrections": {"fields": _fields()}},
         "storage": {
             "mapping": {"pii": "excluded"},
-            "excluded_fields": {
-                "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
-            },
+            "routes": [
+                    {
+                        "page_type": "person",
+                        "fields": ["emails", "phones", "former_emails", "alt_emails", "bounced"],
+                        "to": ["excluded"],
+                    }
+                ],
         },
     }
     pasted = _root(tmp_path / "pasted")
@@ -152,7 +163,12 @@ def test_default_routes_emails_to_the_separate_location(tmp_path: Path) -> None:
     before = page.read_bytes()
     cfg = {
         "librarian": {"corrections": {"fields": _fields()}},
-        "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+        "storage": {
+            "mapping": {"pii": "excluded"},
+            "routes": [
+                {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+            ],
+        },
     }
     result = _apply(root, cfg, _record("emails", "add", "alex2@example.org"))
     assert result.disposition == "routed-elsewhere"

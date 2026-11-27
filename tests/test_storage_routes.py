@@ -105,15 +105,6 @@ def test_page_type_in_routes_and_mapping_refused() -> None:
         configured_routes(cfg)
 
 
-def test_field_rule_with_old_read_keys_refused() -> None:
-    cfg = _cfg([_rule(page_type="p", fields=["f"])], excluded_read_mapping={"p": "x"})
-    with pytest.raises(StorageConfigError, match="excluded_read_mapping"):
-        configured_routes(cfg)
-    cfg = _cfg([_rule(page_type="person", fields=["f"])], excluded_fields={"pii": ["f"]})
-    with pytest.raises(StorageConfigError, match="excluded_fields"):
-        configured_routes(cfg)
-
-
 def test_unknown_target_refused() -> None:
     with pytest.raises(StorageConfigError, match="unknown location 'nope'"):
         configured_routes(_cfg([{"page_type": "p", "to": ["nope"]}]))
@@ -184,12 +175,7 @@ def _fixture_root(root: Path) -> Path:
     return root
 
 
-OLD = _cfg(
-    mapping={"ledger": "vault", "recipe": "shared"},
-    excluded_fields={"ledger": ["emails", "nickname"]},
-    excluded_read_mapping={"person": "ledger"},
-)
-NEW = _cfg(
+ROUTES = _cfg(
     [
         _rule(page_type="person", fields=["emails", "nickname"]),
         {"page_type": "recipe", "to": ["shared"]},
@@ -198,34 +184,20 @@ NEW = _cfg(
 )
 
 
-def test_routes_and_old_keys_give_identical_reads_and_writes(tmp_path: Path) -> None:
+def test_routes_read_and_write_the_fixture(tmp_path: Path) -> None:
+    """The rules place pages and fields; the previous release's records are read in place."""
     root = _fixture_root(tmp_path)
-    for field in (None, "emails", "nickname", "phones", "name", "never_seen"):
-        for page_type in ("person", "recipe", "ledger", "note", None):
-            if page_type == "ledger" and field is not None:
-                continue  # OLD's surface-class name doubles as a page type; not a page type here
-            a = route_for(page_type, field, config=OLD)
-            b = route_for(page_type, field, config=NEW)
-            assert (a.targets, a.sensitive) == (b.targets, b.sensitive), (page_type, field)
-    for cls in ("person", "recipe", "note"):
-        assert page_write_root_for_class(cls, OLD, root) == page_write_root_for_class(
-            cls, NEW, root
-        )
-    assert surface_root_for_class("ledger", OLD, root) == surface_root_for_class(
-        "ledger", NEW, root
-    )
-    reads = []
-    for cfg in (OLD, NEW):
-        surface = pii.surface_class_for_page_class("person", cfg)
-        assert surface_root_for_class(surface, cfg, root) == root / "vault"
-        read = pii.read_entity(root, cfg, UID, surface_class=surface, include_excluded=True)
-        assert read is not None
-        reads.append(repr(dataclasses.asdict(read)))
-        withheld = pii.read_entity(root, cfg, UID, surface_class=surface, include_excluded=False)
-        assert withheld is not None
-        reads.append(repr(dataclasses.asdict(withheld)))
-    assert reads[0] == reads[2] and reads[1] == reads[3]
-    assert "alex@example.org" in reads[0] and "alex@example.org" not in reads[1]
+    assert route_for("person", "emails", config=ROUTES).targets == ("vault",)
+    assert route_for("person", "phones", config=ROUTES).targets == ()
+    assert route_for("recipe", config=ROUTES).targets == ("shared",)
+    assert page_write_root_for_class("recipe", ROUTES, root) == root / "shared"
+    surface = pii.surface_class_for_page_class("person", ROUTES)
+    assert surface_root_for_class(surface, ROUTES, root) == root / "vault"
+    read = pii.read_entity(root, ROUTES, UID, surface_class=surface, include_excluded=True)
+    assert read is not None
+    assert read.contact == {"emails": ["alex@example.org"], "nickname": ["Al"]}
+    withheld = pii.read_entity(root, ROUTES, UID, surface_class=surface, include_excluded=False)
+    assert withheld is not None and "alex@example.org" not in repr(dataclasses.asdict(withheld))
     # Records already on disk were read in place and not moved.
     assert (root / "vault" / f"{UID}.md").exists()
 

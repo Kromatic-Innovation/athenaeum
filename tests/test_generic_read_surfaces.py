@@ -40,7 +40,13 @@ from athenaeum.mcp_server import entity_read
 EXCLUDED_CONFIG: dict[str, object] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
 
@@ -81,7 +87,10 @@ def _write_config(knowledge: Path) -> None:
     (knowledge / "athenaeum.yaml").write_text(
         (
             "storage:\n  mapping:\n    pii: excluded\n"
-            "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n"
+            "  routes:\n"
+            "    - page_type: person\n"
+            "      fields: [emails, phones, former_emails, alt_emails]\n"
+            "      to: [excluded]\n"
         ),
         encoding="utf-8",
     )
@@ -189,12 +198,19 @@ class TestMcpReadEntityTool:
         knowledge = tmp_path / "knowledge"
         config: dict[str, object] = {
             "storage": {
-                "mapping": {"vendor": "vendor-excluded"},
-                "excluded_fields": {"vendor": ["account_numbers"]},
+                "routes": [
+                    {"page_type": "vendor", "to": ["vendor-excluded"]},
+                    {
+                        "page_type": "vendor",
+                        "fields": ["account_numbers"],
+                        "to": ["vendor-excluded"],
+                    },
+                ],
                 "adapters": {
                     "vendor-excluded": {
                         "backing_store": "markdown",
                         "surface_root": "vendor-excluded",
+                        "sensitive": True,
                         "corpus_policy": {
                             "embedded": False,
                             "recallable": False,

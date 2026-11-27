@@ -34,14 +34,13 @@ from typing import Any
 
 from athenaeum import pii
 from athenaeum.storage import (
+    PREVIOUS_READ_MAPPING,
     SUGGEST_ROUTES_COMMAND,
     UndeclaredMapping,
     UndeclaredVaultDataError,
     available_adapters,
-    configured_excluded_fields,
-    configured_excluded_read_mapping,
     configured_routes,
-    location_for_class,
+    routes_yaml,
     undeclared_vault_mappings,
 )
 
@@ -71,8 +70,7 @@ class SuggestedRoute:
         location: The location the class mapped to.
         surface_class: The ``storage.mapping`` key the rule stands in for.
         replaces: Configuration keys the rule cannot sit beside and replaces
-            (for example ``storage.excluded_read_mapping.person``); empty for
-            the common case.
+            (for example ``storage.mapping.<type>``); empty for the common case.
     """
 
     page_type: str
@@ -113,14 +111,10 @@ def previous_field_list(
 ) -> tuple[str, ...]:
     """The field list the previous release used for *surface_class*.
 
-    The explicit list where one is configured, else the four contact fields
-    for the ``pii`` class, else the field names actually present on the
+    The four contact fields for the ``pii`` class, else the field names actually present on the
     class's records (first-seen order over the records in sorted path order,
     bookkeeping keys left out). Reads the records only for the last case.
     """
-    configured = configured_excluded_fields(config).get(surface_class)
-    if configured is not None:
-        return tuple(configured)
     if surface_class == pii.PII_ENTITY_CLASS:
         return pii.BUILTIN_CONTACT_FIELDS
     root = pii.excluded_surface_root(surface_class, Path(knowledge_root), config)
@@ -135,9 +129,9 @@ def previous_field_list(
     return tuple(names)
 
 
-def _page_types_for_surface(surface_class: str, config: dict[str, Any] | None) -> list[str]:
+def _page_types_for_surface(surface_class: str) -> list[str]:
     """The page types whose excluded fields are read from *surface_class*."""
-    table = {**pii.DEFAULT_EXCLUDED_READ_MAPPING, **configured_excluded_read_mapping(config)}
+    table = PREVIOUS_READ_MAPPING
     types = [p for p, s in table.items() if s == surface_class and p != surface_class]
     if not types and table.get(surface_class, surface_class) == surface_class:
         types = [surface_class]
@@ -160,16 +154,13 @@ def suggested_routes(
     """
     if mappings is None:
         mappings = undeclared_vault_mappings(config)
-    operator_read_mapping = configured_excluded_read_mapping(config)
     adapters = available_adapters(config)
     out: list[SuggestedRoute] = []
     for mapping in mappings:
         fields = previous_field_list(mapping.surface_class, config, knowledge_root)
         sensitive = bool(getattr(adapters.get(mapping.location), "sensitive", False))
-        for page_type in _page_types_for_surface(mapping.surface_class, config):
+        for page_type in _page_types_for_surface(mapping.surface_class):
             replaces: list[str] = []
-            if page_type in operator_read_mapping:
-                replaces.append(f"storage.excluded_read_mapping.{page_type}")
             if page_type == mapping.surface_class:
                 replaces.append(f"storage.mapping.{page_type}")
                 out.append(
@@ -197,19 +188,9 @@ def suggested_routes(
     return tuple(out)
 
 
-def _yaml_list(items: tuple[str, ...]) -> str:
-    return "[" + ", ".join(items) + "]"
-
-
 def suggested_routes_text(routes: tuple[SuggestedRoute, ...]) -> str:
     """*routes* as YAML to paste into ``athenaeum.yaml`` (append to an existing list)."""
-    lines = ["storage:", "  routes:"]
-    for route in routes:
-        lines.append(f"    - page_type: {route.page_type}")
-        if route.fields is not None:
-            lines.append(f"      fields: {_yaml_list(route.fields)}")
-        lines.append(f"      to: [{route.location}]")
-    return "\n".join(lines)
+    return routes_yaml([(r.page_type, r.fields, r.location) for r in routes])
 
 
 CHOOSE_OTHERWISE = (
@@ -281,8 +262,6 @@ def require_declared_vault_data(config: dict[str, Any] | None, knowledge_root: P
 def _covered_fields(config: dict[str, Any] | None) -> dict[str, set[str]]:
     """Location -> the field names some rule keeps there."""
     covered: dict[str, set[str]] = {}
-    for surface_class, fields in configured_excluded_fields(config).items():
-        covered.setdefault(location_for_class(surface_class, config), set()).update(fields)
     for route in configured_routes(config):
         if route.fields is None:
             continue

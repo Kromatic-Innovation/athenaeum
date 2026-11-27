@@ -366,8 +366,10 @@ class TestWorkedExampleEndToEnd:
             "storage:\n"
             "  mapping:\n"
             "    pii: excluded\n"
-            "  excluded_fields:\n"
-            "    pii: [emails, phones, former_emails, alt_emails, bounced]\n"
+            "  routes:\n"
+            "    - page_type: person\n"
+            "      fields: [emails, phones, former_emails, alt_emails, bounced]\n"
+            "      to: [excluded]\n"
         )
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")

@@ -146,9 +146,13 @@ class TestNoBuiltInList:
 
     def test_only_declared_fields_are_routed(self) -> None:
         config = {
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": ["phones"]}}
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [{"page_type": "person", "fields": ["phones"], "to": ["excluded"]}],
+            }
         }
-        assert pii.resolve_excluded_fields("pii", config, None) == ("phones",)
+        surface = pii.surface_class_for_page_class("person", config)
+        assert pii.resolve_excluded_fields(surface, config, None) == ("phones",)
         assert route_for("person", "emails", config=config).targets == ()
         assert route_for("person", "phones", config=config).targets == ("excluded",)
 
@@ -163,12 +167,6 @@ class TestConfigurationHalf:
                 "mapping": {"pii": "excluded"},
                 "routes": [{"page_type": "person", "fields": ["emails"], "to": ["excluded"]}],
             }
-        }
-        assert undeclared_vault_mappings(config) == ()
-
-    def test_excluded_fields_list_declares_it(self) -> None:
-        config = {
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": ["emails"]}}
         }
         assert undeclared_vault_mappings(config) == ()
 
@@ -324,10 +322,6 @@ class TestRefusalMessage:
         assert "to: []" in message
         assert "does not edit athenaeum.yaml" in message
 
-    def test_explicit_list_is_used_when_configured(self, tmp_path: Path) -> None:
-        config = {"storage": {"excluded_fields": {"pii": ["phones"]}}}
-        assert previous_field_list("pii", config, tmp_path) == ("phones",)
-
     def test_other_class_takes_the_field_names_on_its_records(self, tmp_path: Path) -> None:
         config = {
             "storage": {
@@ -381,13 +375,6 @@ class TestRefusalMessage:
         assert (route.page_type, route.fields, route.location) == ("note", None, "notes-off")
         # Pages in the wiki tree are pages, not records: the scan leaves them alone.
         assert scan_undeclared_fields(config, tmp_path) == ()
-
-    def test_operator_read_mapping_is_named_as_replaced(self, tmp_path: Path) -> None:
-        config = {
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_read_mapping": {"person": "pii"}}
-        }
-        (route,) = suggested_routes(config, tmp_path)
-        assert route.replaces == ("storage.excluded_read_mapping.person",)
 
 
 class TestPastingReproducesThePreviousRelease:

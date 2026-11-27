@@ -277,11 +277,25 @@ _REMOVED_CONFIG_KEYS: dict[str, str] = {
     "librarian.corrections.sensitive_fields": (
         "removed in athenaeum#3162; a correction is now routed by the same "
         "storage settings as every other writer, so a field kept on a separate "
-        "location is named once, under `storage.excluded_fields.<class>` (with "
-        "`storage.mapping.<class>` placing that class outside the corpus). A "
+        "location is named once, under `storage.routes` (a `page_type` and its "
+        "`fields` sent `to` a location outside the corpus). A "
         "run that processes corrections refuses to start while this key is "
         "non-empty and prints the exact replacement; other commands only show "
         "this notice"
+    ),
+    "storage.excluded_fields": (
+        "removed in athenaeum#3173; name the page type and its fields in "
+        "`storage.routes` instead (`- page_type: person`, `fields: [...]`, "
+        "`to: [<location>]`). The first command that reads or writes a routed "
+        "field refuses to run while this key is set and prints the entries "
+        "that reproduce what it did; no record moves"
+    ),
+    "storage.excluded_read_mapping": (
+        "removed in athenaeum#3173; a `storage.routes` entry names its page "
+        "type directly, so no page-type-to-class table is needed. The first "
+        "command that reads or writes a routed field refuses to run while "
+        "this key is set and prints the entries that reproduce what it did; "
+        "no record moves"
     ),
     "serve.excluded_fields": (
         "renamed in athenaeum#3163; use `serve.sensitive_reads: on | off` "
@@ -5613,14 +5627,13 @@ def resolve_page_recompile_never_auto_types(
     regardless of ``mode``/``auto_apply_class`` or the plan's own scope.
 
     Yaml only, like :func:`resolve_model_rates` and
-    :func:`resolve_excluded_fields_config` -- a whole list of operator-named
+    :func:`resolve_storage_routes` -- a whole list of operator-named
     types is not the single scalar the ``ATHENAEUM_*`` env convention fits.
     A non-list value, or a non-dict ``page_recompile`` section, resolves to
     :data:`DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES`; a non-string or blank
     entry within an otherwise-valid list is dropped rather than rejecting
     the whole list, the same per-entry tolerance
-    :func:`resolve_excluded_fields_config` already applies to its own list
-    values.
+    :func:`resolve_storage_routes` already applies to its own list values.
     """
     if not isinstance(config, dict):
         return DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES
@@ -7187,42 +7200,6 @@ def resolve_sensitivity_routing(config: dict[str, Any] | None) -> dict[str, Any]
     return {"enabled": enabled, "classes": classes}
 
 
-def resolve_excluded_read_mapping(config: dict[str, Any] | None) -> dict[str, str]:
-    """Resolve ``storage.excluded_read_mapping`` — page ``type:`` → surface class (athenaeum#885).
-
-    The operator override for the mapping ``recall`` consults to know WHICH
-    excluded surface a hit joins to. It is a different table from
-    ``storage.mapping``: that one maps a class onto a storage ADAPTER, this one
-    maps a wiki page's ``type:`` onto the SURFACE CLASS whose excluded record
-    holds that page's excluded fields. The two names are distinct and the
-    distinction is load-bearing — a page is ``type: person`` while its record
-    lives on the ``pii`` surface.
-
-    Returns an EMPTY dict when unset. The identity default plus the single
-    shipped non-identity entry (``person: pii``) lives in
-    :data:`athenaeum.pii.DEFAULT_EXCLUDED_READ_MAPPING`, not here, so this
-    resolver reports only what the OPERATOR configured —
-    ``resolve_storage_mapping``'s precedent. Non-string keys/values and blank
-    entries are dropped defensively.
-    """
-    if not isinstance(config, dict):
-        return {}
-    storage_cfg = config.get("storage") or {}
-    if not isinstance(storage_cfg, dict):
-        return {}
-    raw = storage_cfg.get("excluded_read_mapping")
-    if not isinstance(raw, dict):
-        return {}
-    mapping: dict[str, str] = {}
-    for page_class, surface_class in raw.items():
-        if not isinstance(page_class, str) or not page_class.strip():
-            continue
-        if not isinstance(surface_class, str) or not surface_class.strip():
-            continue
-        mapping[page_class.strip()] = surface_class.strip()
-    return mapping
-
-
 def resolve_pii_scan_exclude(config: dict[str, Any] | None) -> list[str]:
     """Resolve ``storage.pii_scan_exclude`` — extra PII-scan filename exclusions (athenaeum#1273).
 
@@ -7407,48 +7384,6 @@ def resolve_pii_hazard_classifier_timeout_secs(config: dict[str, Any] | None) ->
             raw,
         )
         return default
-
-
-def resolve_excluded_fields_config(
-    config: dict[str, Any] | None,
-) -> dict[str, tuple[str, ...]]:
-    """Resolve ``storage.excluded_fields`` — surface class → data-field names (athenaeum#883).
-
-    The explicit operator override at the top of
-    :func:`athenaeum.pii.resolve_excluded_fields`'s resolution order: it names
-    which frontmatter fields on an excluded record of a given SURFACE class
-    (the ``storage.mapping`` key, e.g. ``pii`` — not a wiki page's ``type:``)
-    hold data rather than the record's own bookkeeping.
-
-    Returns an EMPTY dict when unset. A class with no entry (and no
-    ``storage.routes`` field rule) has no data fields: there is no built-in
-    list (athenaeum#3170). ``resolve_storage_mapping``'s precedent applies: no
-    seed in ``_DEFAULTS``, so this default stays reachable.
-
-    A class mapped to an EMPTY list is honoured literally as "this class has no
-    data fields" — that is an operator saying so, which is a different
-    statement from not configuring the class at all, and collapsing the two
-    would make the override unable to express it. Non-string keys, non-list
-    values, and blank/non-string field names are dropped defensively.
-    """
-    if not isinstance(config, dict):
-        return {}
-    storage_cfg = config.get("storage") or {}
-    if not isinstance(storage_cfg, dict):
-        return {}
-    raw = storage_cfg.get("excluded_fields")
-    if not isinstance(raw, dict):
-        return {}
-    resolved: dict[str, tuple[str, ...]] = {}
-    for surface_class, fields in raw.items():
-        if not isinstance(surface_class, str) or not surface_class.strip():
-            continue
-        if not isinstance(fields, list):
-            continue
-        resolved[surface_class.strip()] = tuple(
-            name.strip() for name in fields if isinstance(name, str) and name.strip()
-        )
-    return resolved
 
 
 # ---------------------------------------------------------------------------

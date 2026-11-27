@@ -1942,9 +1942,13 @@ class TestSensitivityRouting:
             },
             "storage": {
                 "mapping": {"pii": "excluded"},
-                "excluded_fields": {
-                    "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
-                },
+                "routes": [
+                    {
+                        "page_type": "person",
+                        "fields": ["emails", "phones", "former_emails", "alt_emails", "bounced"],
+                        "to": ["excluded"],
+                    }
+                ],
             },
         }
 
@@ -2087,7 +2091,12 @@ class TestSensitivityRoutingUsageClass:
                     },
                 }
             },
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [
+                    {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+                ],
+            },
         }
 
     def _record(self, **overrides) -> dict:
@@ -2151,7 +2160,7 @@ class TestSensitivityRoutingUsageClass:
             tmp_path,
             self._config(),
             "person-alex",
-            surface_class="pii",
+            surface_class=pii.surface_class_for_page_class("person", self._config()),
             include_excluded=True,
             usage_classes=[pii.USAGE_CLASS_OBSERVED],
         )
@@ -2187,7 +2196,7 @@ class TestSensitivityRoutingUsageClass:
             tmp_path,
             self._config(),
             "person-alex",
-            surface_class="pii",
+            surface_class=pii.surface_class_for_page_class("person", self._config()),
             include_excluded=True,
         )
         assert read is not None
@@ -2257,9 +2266,13 @@ class TestSensitivityRoutingUsageClass:
             "shape": "scalar",
             "writers": ["delivery-monitor"],
         }
-        cfg["storage"]["excluded_fields"] = {
-            "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
-        }
+        cfg["storage"]["routes"] = [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails", "bounced"],
+                "to": ["excluded"],
+            }
+        ]
         result = process_correction_record(
             {
                 "record": "correction",
@@ -2804,7 +2817,12 @@ class TestEmailKeyedApply:
 
     def _config(self) -> dict:
         return {
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [
+                    {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+                ],
+            },
             "librarian": {
                 "corrections": {
                     "fields": {
@@ -2882,7 +2900,12 @@ class TestEmailHandleRaisedReasonInHandoff:
 
     def _config(self) -> dict:
         return {
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [
+                    {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+                ],
+            },
             "librarian": {
                 "corrections": {
                     "fields": {
@@ -2974,7 +2997,12 @@ class TestEmailHandleRaisedReasonInHandoff:
 class TestParkedEmailNoMatchCorrections:
     def _config(self) -> dict:
         return {
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [
+                    {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+                ],
+            },
             "librarian": {
                 "corrections": {
                     "fields": {
@@ -3416,7 +3444,12 @@ class TestRemoveDropsOrphanedContactFacts:
                     },
                 }
             },
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [
+                    {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+                ],
+            },
         }
 
     def _write_surface(self, excluded_root: Path, lines: list[str]) -> Path:
@@ -3526,7 +3559,12 @@ class TestAttributionSeamWiring:
                     },
                 }
             },
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [
+                    {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+                ],
+            },
         }
 
     def _add(
@@ -3641,7 +3679,12 @@ class TestEnforceModeEscalatesASuspectValue:
                 },
                 "attribution": {"mode": mode},
             },
-            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [
+                    {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+                ],
+            },
         }
 
     def _add(

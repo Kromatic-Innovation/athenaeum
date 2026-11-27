@@ -343,8 +343,8 @@ _SENTINEL_VALUES: tuple[Any, ...] = (
     {"__parity_sentinel_key__": {"__parity_sentinel_nested__": "x"}},
     # A dict whose values are LISTS (issue athenaeum#883). The battery already had
     # dict-of-str and dict-of-dict, but a resolver keyed
-    # ``<name> -> [<item>, ...]`` — ``resolve_excluded_fields_config``'s
-    # ``storage.excluded_fields`` is the first — rejects both as malformed and
+    # ``<name> -> [<item>, ...]`` (the former ``resolve_excluded_fields_config``)
+    # rejects both as malformed and
     # returns its empty baseline, which reads identically to "never read the
     # key". That is a shape gap in this prober, not a broken resolver (the
     # same class of gap the module docstring records for

@@ -32,7 +32,13 @@ from athenaeum.sensitivity_routing import resolve_pointers_in_text, route_sensit
 EXCLUDED_CONFIG: dict[str, object] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
 EMAIL = "alex@example.org"
@@ -46,7 +52,10 @@ def corpus(tmp_path: Path) -> Path:
     (knowledge / "athenaeum.yaml").write_text(
         (
             "storage:\n  mapping:\n    pii: excluded\n"
-            "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n"
+            "  routes:\n"
+            "    - page_type: person\n"
+            "      fields: [emails, phones, former_emails, alt_emails]\n"
+            "      to: [excluded]\n"
         ),
         encoding="utf-8",
     )

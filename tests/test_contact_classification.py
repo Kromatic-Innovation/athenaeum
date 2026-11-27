@@ -54,12 +54,21 @@ from athenaeum.pii import (
     is_outreach_eligible,
     read_bounce_record,
     read_entity,
+    surface_class_for_page_class,
 )
 
 # athenaeum#3170: nothing is private unless declared; these tests declare the contact fields.
 _CF = ["emails", "phones", "former_emails", "alt_emails"]
 
-EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}}}
+EXCLUDED_CONFIG = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "routes": [{"page_type": "person", "fields": _CF, "to": ["excluded"]}],
+    }
+}
+
+#: The surface class the `person` route reads its record under.
+ROUTED_SURFACE = surface_class_for_page_class("person", EXCLUDED_CONFIG)
 
 OBSERVED_ADDRESS = "alex@example.org"
 PROVIDER_ADDRESS = "alex.example@corp.example"
@@ -158,7 +167,7 @@ class TestStoreAndReadBackBothClasses:
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
         result = read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
 
         assert result is not None
@@ -186,7 +195,7 @@ class TestStoreAndReadBackBothClasses:
     def test_to_dict_is_json_serializable(self, tmp_path: Path) -> None:
         knowledge, _ = _person_with_two_addresses(tmp_path)
         result = read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
         assert result is not None
 
@@ -215,7 +224,7 @@ class TestClassFilteredRead:
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=ROUTED_SURFACE,
             include_excluded=True,
             usage_classes=[USAGE_CLASS_OBSERVED],
         )
@@ -262,7 +271,7 @@ class TestClassFilteredRead:
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=ROUTED_SURFACE,
             include_excluded=True,
             usage_classes=OUTREACH_ELIGIBLE_CLASSES,
         )
@@ -297,7 +306,7 @@ class TestClassFilteredRead:
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=ROUTED_SURFACE,
             include_excluded=True,
             usage_classes=[USAGE_CLASS_OBSERVED],
         )
@@ -312,7 +321,7 @@ class TestClassFilteredRead:
         knowledge, _ = _person_with_two_addresses(tmp_path)
 
         result = read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
 
         assert result is not None
@@ -327,7 +336,7 @@ class TestClassFilteredRead:
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=ROUTED_SURFACE,
             include_excluded=True,
             usage_classes=[],
         )
@@ -344,7 +353,7 @@ class TestClassFilteredRead:
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=ROUTED_SURFACE,
             include_excluded=False,
             usage_classes=[USAGE_CLASS_OBSERVED],
         )
@@ -521,7 +530,7 @@ class TestUnclassifiedLegacyValue:
         )
 
         result = read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
 
         assert result is not None
@@ -581,7 +590,7 @@ class TestOutreachEligibility:
         assert is_outreach_eligible(meta, PROVIDER_ADDRESS) is False
 
         result = read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
         assert result is not None
         assert PROVIDER_ADDRESS in result.contact["emails"]
@@ -856,7 +865,7 @@ class TestOrphanedClassificationEntriesAreInvisible:
         )
 
         result = read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
 
         assert result is not None
