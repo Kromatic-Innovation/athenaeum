@@ -456,7 +456,9 @@ It is on by default. Turn it off with `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0`,
 set in the environment the hook runs in or in the hook cache's `config.env`
 (the hook does not read `athenaeum.yaml` for this switch). Off, the extractor
 sees your message alone and messages under 8 characters get no push, exactly
-as before.
+as before. The extractor is a model call, so this previous turn is also
+what reaches the model provider; the
+[security posture](../design/security-posture.md) page lists it.
 
 The push gives the agent a pointer; the agent still has to follow it when the
 excerpt is not enough. Add this line to your instruction file
