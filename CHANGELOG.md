@@ -199,9 +199,6 @@ For most users:
   location read those tables through it, and a test fails the build if another
   module reads them. No behaviour change and no new configuration key
   (athenaeum#3158).
-- The four `access:` levels are defined once (`models.ACCESS_LEVELS`) and the
-  built-in contact field names once (`pii.BUILTIN_CONTACT_FIELDS`); the other
-  copies are computed from them, with no behaviour change (athenaeum#3159).
 - `athenaeum retire-pages` is now `athenaeum retire` (athenaeum#3151).
   `retire-pages` still works for this release as a deprecated alias that
   prints a note, and is removed in the next one. The override for the
