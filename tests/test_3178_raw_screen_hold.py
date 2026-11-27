@@ -802,12 +802,12 @@ def test_storage_status_prints_the_same_text(
 
     cfg = _cfg(tmp_path / "vault")
     kb = _kb(tmp_path, cfg)
-    assert cmd_storage(argparse.Namespace(storage_target="status", path=kb)) == 0
-    out = capsys.readouterr().out.splitlines()
-    assert out == [m.text for m in raw_screening.hold_messages(load_config(kb), kb)]
-    kb2 = _kb(tmp_path / "two", None) if (tmp_path / "two").mkdir() is None else kb
-    assert cmd_storage(argparse.Namespace(storage_target="status", path=kb2)) == 0
-    assert "No routing or discard rule" in capsys.readouterr().out
+    assert cmd_storage(argparse.Namespace(storage_target="status", path=kb, json=False)) == 0
+    captured = capsys.readouterr()
+    messages = raw_screening.hold_messages(load_config(kb), kb)
+    for message in messages:
+        stream = captured.out if message.kind == "notice" else captured.err
+        assert message.text in stream
 
 
 def test_status_changes_nothing(tmp_path: Path) -> None:
@@ -817,7 +817,7 @@ def test_status_changes_nothing(tmp_path: Path) -> None:
     kb = _kb(tmp_path, cfg)
     _put_raw(kb, f"Mail {ROUTED}.\n")
     before = _git(kb, "status", "--porcelain")
-    cmd_storage(argparse.Namespace(storage_target="status", path=kb))
+    cmd_storage(argparse.Namespace(storage_target="status", path=kb, json=False))
     assert _git(kb, "status", "--porcelain") == before
 
 

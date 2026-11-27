@@ -169,6 +169,7 @@ MODULE_LAYER: dict[str, int] = {
     "run_summary_log": 2,
     "stuck_ledger": 2,
     "raw_screening": 4,
+    "storage_status": 4,
     "transcript_receipts": 2,
     "verdicts": 2,
     "wiki_write_guard": 2,

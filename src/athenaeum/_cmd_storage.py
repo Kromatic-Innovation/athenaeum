@@ -423,9 +423,9 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
     status_p = s_sub.add_parser(
         "status",
         help=(
-            "Report how this installation keeps raw intake out of history: the hold "
-            "notice, the hold-off warning and the raw-intake-in-git-tree warning "
-            "(athenaeum#3178). Read-only."
+            "Report each location, each route, what is discarded, the history "
+            "setting, who may read each vault, and how raw intake is kept out of "
+            "history. Warnings go to stderr. Read-only; exit status is zero."
         ),
     )
     status_p.add_argument(
@@ -434,20 +434,32 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=DEFAULT_KNOWLEDGE_ROOT,
         help="Knowledge root (default: ~/knowledge).",
     )
+    status_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the report as JSON; the warnings are in its `warnings` list.",
+    )
 
 
 def _cmd_storage_status(args: argparse.Namespace) -> int:
-    """Print the hold messages (:func:`athenaeum.raw_screening.hold_messages`), read-only."""
-    from athenaeum.raw_screening import hold_messages
+    """Print the storage status report (:mod:`athenaeum.storage_status`). Read-only.
+
+    Warnings go to stderr, and are also in the JSON ``warnings`` list. Exit status
+    stays zero whatever the report finds.
+    """
+    import json
+
+    from athenaeum.storage_status import build_status, format_status
 
     knowledge_root = _resolve_knowledge_root(args)
-    config = load_config(knowledge_root)
-    messages = hold_messages(config, knowledge_root)
-    if not messages:
-        print("No routing or discard rule is configured: no raw file is held.")
-        return 0
-    for message in messages:
-        print(message.text)
+    status = build_status(load_config(knowledge_root), knowledge_root)
+    if getattr(args, "json", False):
+        sys.stdout.write(json.dumps(status, indent=2, sort_keys=True) + "\n")
+    else:
+        for line in format_status(status):
+            print(line)
+    for warning in status["warnings"]:
+        print(f"warning: {warning}", file=sys.stderr)
     return 0
 
 

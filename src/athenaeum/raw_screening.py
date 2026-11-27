@@ -91,6 +91,7 @@ __all__ = [
     "register_raw_root",
     "rules_configured",
     "screen_raw_intake",
+    "unscreened_raw_files",
     "whole_page_types",
 ]
 
@@ -460,6 +461,36 @@ def screen_raw_intake(
     except OSError:
         log.warning("raw screening: the screened-state ledger could not be written")
     return report
+
+
+def unscreened_raw_files(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    *,
+    cache_dir: Path | None = None,
+) -> list[str]:
+    """Raw files whose current bytes are neither marked screened nor processed. Read-only.
+
+    Empty when no routing or discard rule is configured (nothing screens, so
+    nothing is unscreened). Reads the files and the ledger; writes neither.
+    """
+    if not rules_configured(config):
+        return []
+    knowledge_root = Path(knowledge_root)
+    ledger = _load_ledger(raw_screen_ledger_path(knowledge_root, cache_dir))
+    found: list[str] = []
+    prefixes = _prefixes(knowledge_root)
+    for path in _iter_raw_files(knowledge_root, _out_of_scope_sources(config), prefixes):
+        rel = path.relative_to(knowledge_root).as_posix()
+        try:
+            digest = _sha(path.read_bytes())
+        except OSError:
+            found.append(rel)
+            continue
+        entry = ledger.get(rel)
+        if entry is None or entry.get("sha") != digest:
+            found.append(rel)
+    return found
 
 
 def mark_processed(
