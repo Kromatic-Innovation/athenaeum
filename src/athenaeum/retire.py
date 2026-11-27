@@ -98,7 +98,7 @@ from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
 from athenaeum.pending_merges import parse_pending_merges
 from athenaeum.session_recovery import SessionRecoverer
 from athenaeum.storage import open_store, require_writable_paths
-from athenaeum.store import Store, note_no_restore_point
+from athenaeum.store import Store, held_raw_paths_for_commit, note_no_restore_point
 from athenaeum.transcript_verify import default_projects_root, verify_user_stated
 from athenaeum.verdicts import get_verdict_status, make_pair_key, page_id_for_path
 
@@ -192,6 +192,12 @@ def _commit_paths_if_staged(
     add actually staged something (already-committed unchanged files stage
     nothing → no empty commit). Returns True when a commit was made.
     """
+    if not rel_paths:
+        return False
+    # athenaeum#3178: a raw file neither screened nor processed is never staged;
+    # the screened text of the rest is what the provenance snapshot commits.
+    held = set(held_raw_paths_for_commit(knowledge_root, rel_paths))
+    rel_paths = [p for p in rel_paths if p not in held]
     if not rel_paths:
         return False
     _git(knowledge_root, "add", "--", *rel_paths)

@@ -151,6 +151,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum storage lint-pii`](#athenaeum-storage-lint-pii) (command) — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - [`athenaeum storage migrate-pii`](#athenaeum-storage-migrate-pii) (command) — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
 - [`athenaeum storage move-type`](#athenaeum-storage-move-type) (command) — Move every wiki page of one entity type into a configured, indexed surface that lives in its own git repository. Dry-run by default (lists the pages and any link that would break the store-link rule); --apply snapshots both repositories, moves the pages and commits each; --undo restores both repositories.
+- [`athenaeum storage status`](#athenaeum-storage-status) (command) — Report how this installation keeps raw intake out of history: the hold notice, the hold-off warning and the raw-intake-in-git-tree warning. Read-only.
 - [`athenaeum store`](#athenaeum-store) (group) — Store access: 'store access check' compares each declared store's rights with local config and this install's last fetch and push. Read-only.
 - [`athenaeum store-link-lint`](#athenaeum-store-link-lint) (command) — Read-only: list every link from a page to a page on a more private store (lower visibility rank). A link to a more shared store is fine.
 - [`athenaeum store access`](#athenaeum-store-access) (group) — Access to declared stores.
@@ -1950,6 +1951,7 @@ Subcommands:
 - `athenaeum storage lint-pii` — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - `athenaeum storage migrate-pii` — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
 - `athenaeum storage move-type` — Move every wiki page of one entity type into a configured, indexed surface that lives in its own git repository. Dry-run by default (lists the pages and any link that would break the store-link rule); --apply snapshots both repositories, moves the pages and commits each; --undo restores both repositories.
+- `athenaeum storage status` — Report how this installation keeps raw intake out of history: the hold notice, the hold-off warning and the raw-intake-in-git-tree warning. Read-only.
 
 ## `athenaeum storage lint-mapping`
 
@@ -2005,6 +2007,14 @@ Move every wiki page of one entity type into a configured, indexed surface that 
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 | `--to` | — | — | Target surface: a storage.adapters name (embedded: true, own git repo). |
 | `--undo` | — | — | Undo a previous --apply: RECORD is the record id --apply printed (found in the cache dir) or the path of its JSON file. Restores both repositories to their pre-move snapshots. |
+
+## `athenaeum storage status`
+
+Report how this installation keeps raw intake out of history: the hold notice, the hold-off warning and the raw-intake-in-git-tree warning. Read-only.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 
 ## `athenaeum store`
 

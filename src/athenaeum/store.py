@@ -1402,9 +1402,52 @@ def _repo_has_remote(repo: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+#: A raw-hold: given a repository root and the repository-relative paths git
+#: reports as changed under ``raw/``, the subset that must stay out of any
+#: commit (athenaeum#3178). Registered per knowledge root by
+#: :func:`athenaeum.storage.open_store` and consulted by every whole-directory
+#: commit below, so the snapshot, the pre-sync snapshots and the store-move
+#: restore points all honour it.
+RawHold = Callable[[Path, "list[str]"], "list[str]"]
+
+_RAW_HOLDS: dict[Path, RawHold] = {}
+
+
+def set_raw_hold(knowledge_root: Path, hold: RawHold | None) -> None:
+    """Register (or with ``None`` clear) the raw-hold for *knowledge_root*."""
+    key = Path(knowledge_root).resolve()
+    if hold is None:
+        _RAW_HOLDS.pop(key, None)
+    else:
+        _RAW_HOLDS[key] = hold
+
+
+_STATUS_ARGV = ("status", "--porcelain=v1", "-z", "--no-renames", "-uall")
+
+
+def _git_z(repo: Path, *args: str) -> list[str]:
+    out = subprocess.run(
+        ["git", *args], cwd=str(repo), capture_output=True, text=True, check=True
+    ).stdout
+    return [item for item in out.split("\0") if item]
+
+
+def _held_raw_paths(repo: Path) -> list[str]:
+    """Repository-relative paths the registered hold keeps out of a commit (it scopes them)."""
+    hold = _RAW_HOLDS.get(Path(repo).resolve())
+    if hold is None:
+        return []
+    changed = [entry[3:] for entry in _git_z(repo, *_STATUS_ARGV)]
+    return hold(repo, changed) if changed else []
+
+
 def _commit_all(repo: Path, label: str) -> str | None:
     """``git add -A`` + ``git commit`` in *repo* iff it has changes; return the
-    new HEAD SHA, or ``None`` when there was nothing to commit (or no ``.git``)."""
+    new HEAD SHA, or ``None`` when there was nothing to commit (or no ``.git``).
+
+    With a raw-hold registered for *repo* (athenaeum#3178) the paths it names
+    are never staged: they are left exactly as they are in the working tree.
+    """
     if not (repo / ".git").exists():
         return None
     status = subprocess.run(
@@ -1415,7 +1458,37 @@ def _commit_all(repo: Path, label: str) -> str | None:
     )
     if not status.stdout.strip():
         return None
-    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    held = _held_raw_paths(repo)
+    if not held:
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    else:
+        held_set = set(held)
+        specs = [
+            entry[3:]
+            for entry in _git_z(repo, *_STATUS_ARGV)
+            if entry[3:] not in held_set
+        ]
+        if specs:
+            subprocess.run(
+                ["git", "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                cwd=str(repo),
+                check=True,
+                input="\0".join(f":(literal){p}" for p in specs) + "\0",
+                text=True,
+            )
+        staged = _git_z(repo, "diff", "--cached", "--name-only", "-z")
+        staged_held = [p for p in staged if p in held_set]
+        if staged_held:
+            # Staged by something else before this call: take it back out.
+            subprocess.run(
+                ["git", "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                cwd=str(repo),
+                check=True,
+                input="\0".join(f":(literal){p}" for p in staged_held) + "\0",
+                text=True,
+            )
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(repo)).returncode == 0:
+            return None
     subprocess.run(["git", "commit", "-m", label], cwd=str(repo), check=True)
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -1424,6 +1497,38 @@ def _commit_all(repo: Path, label: str) -> str | None:
         text=True,
         check=True,
     ).stdout.strip()
+
+
+def held_raw_paths_for_commit(repo: Path, rel_paths: Sequence[str]) -> list[str]:
+    """The subset of *rel_paths* the registered raw-hold keeps out of a commit.
+
+    For a scoped commit that names its own paths (the retirement snapshot).
+    ``[]`` when no hold is registered for *repo*.
+    """
+    hold = _RAW_HOLDS.get(Path(repo).resolve())
+    if hold is None:
+        return []
+    return hold(repo, [p for p in rel_paths])
+
+
+def committed_tracked_paths(repo: Path, prefix: str) -> list[str]:
+    """Repository-relative paths git tracks under *prefix* (empty when not a repository)."""
+    if not (repo / ".git").exists():
+        return []
+    try:
+        return _git_z(repo, "ls-files", "-z", "--", prefix)
+    except (subprocess.CalledProcessError, OSError):
+        return []
+
+
+def committed_text(repo: Path, rel_path: str) -> str | None:
+    """The text of *rel_path* at ``HEAD``, or ``None`` when it is not committed."""
+    result = subprocess.run(
+        ["git", "show", f"HEAD:{rel_path}"], cwd=str(repo), capture_output=True
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 def commit_repo(repo: Path, label: str) -> str | None:

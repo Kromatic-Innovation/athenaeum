@@ -1220,6 +1220,73 @@ def resolve_push_after_run(config: dict[str, Any] | None) -> bool:
     return False
 
 
+def resolve_hold_unscreened_raw(config: dict[str, Any] | None) -> bool:
+    """Resolve ``librarian.hold_unscreened_raw`` (athenaeum#3178).
+
+    A boolean, default ``True``; read beside ``librarian.push_after_run``. A value
+    that is not a boolean is a configuration error and fails the run.
+
+    **When it takes effect.** Only when at least one routing or discard rule is
+    configured (``sensitivity.routing.enabled`` is on, or any ``storage.routes``
+    rule exists). With no rule nothing is held, whatever the value, and every
+    commit is exactly what it was. The hold is off only when the key is set to
+    ``false`` explicitly.
+
+    **What it does.** The compile run starts with a screening phase, before its
+    first commit (the snapshot taken before a sync included). For every raw file
+    not yet screened it applies value routing, discard and declared-field rules,
+    writes any vault record first, replaces the raw file atomically with the
+    screened text, then marks it screened. Screening a screened file changes
+    nothing. With the hold on, no commit athenaeum makes includes a raw file that
+    is neither screened nor processed: the whole-directory snapshots skip it, and
+    the retirement snapshot commits the screened text. A file that cannot be
+    screened without being processed (no declared page type on an installation
+    that routes or discards a whole page type) is held until it has been
+    processed; held files are counted in the run summary (``held=`` in the ``raw-screen`` segment).
+    A file whose screening failed, including a failed vault write, stays
+    unscreened and uncommitted and is reported. With the hold off the screening
+    phase still runs first, but the snapshots stage raw files as before,
+    including one that could not be screened, and the run summary names each
+    (``unscreened_staged=``).
+
+    **Messages.** With the hold on and a rule configured, a notice is printed when
+    the rule is first loaded and by ``athenaeum storage status``: "Raw notes are
+    not snapshotted before they are processed. Routed or discarded values are
+    screened out of history and kept only in their vault, or nowhere for a
+    discard." With the hold off and a rule configured, and raw intake kept in a git
+    working tree, a warning is printed at the same two places: "librarian.hold_unscreened_raw
+    is off and raw intake is kept in a git working tree: routed or discarded values
+    can leak into that history." In either case, whenever raw intake is inside a git
+    working tree or the knowledge directory is not a git repository, the output also
+    says: "Anything else that commits or copies the knowledge directory can capture a
+    raw file before it is screened, and a value already committed stays in history."
+    ``athenaeum doctor`` lists raw files that are already committed and hold a routed
+    or discarded value, by path and class only.
+
+    **Outside the guarantee.** Raw intake addressed to a shared store
+    (``raw/_stores/``) and answer files (``raw/answers/``) are not held: they are
+    records other installs wait for. Sources named in
+    ``librarian.non_intake_sources`` are a tool's operational files, not intake,
+    and are not screened or held. Another program, or a sync client, that copies
+    the directory can capture a raw file before it is screened; a value already
+    committed stays in history (history is not rewritten). With
+    ``storage.history: none`` the phase still rewrites raw files, since a synced
+    folder has no commit to wait for: the file was readable, and may have been
+    copied by a sync client, between being written and being screened. Text that no
+    recogniser and no declared field identifies is not screened.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict) and "hold_unscreened_raw" in cfg:
+            raw = cfg.get("hold_unscreened_raw")
+            if not isinstance(raw, bool):
+                raise StorageConfigError(
+                    f"librarian.hold_unscreened_raw must be true or false, got {raw!r}"
+                )
+            return raw
+    return True
+
+
 def resolve_push_remote(config: dict[str, Any] | None) -> str:
     """Resolve the post-run push remote from ``librarian.push_remote`` (athenaeum#284).
 
