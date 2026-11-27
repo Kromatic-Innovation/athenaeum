@@ -83,6 +83,14 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sensitivity.register_recognizer(_TokenRecognizer(), replace=True)
     monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # No model is called: the provider is a stub binary that always fails, so the
+    # same thing happens on a host with and without the claude CLI installed.
+    stub = tmp_path / "bin" / "claude-stub"
+    stub.parent.mkdir()
+    stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
+    monkeypatch.setenv("ATHENAEUM_CLAUDE_CLI_BIN", str(stub))
     monkeypatch.setattr(raw_screening, "_EMITTED", set())
     # The hold is registered per knowledge root, process-wide: drop what a test leaves.
     from athenaeum import store
@@ -624,7 +632,12 @@ def test_sentinel_with_the_hold_on_reaches_no_commit_of_either_repository(
     bare = _bare_remote(tmp_path, kb)
     _put_raw(kb, f"Mail {ROUTED} and {DISCARDED}.\n")  # written straight into raw intake
     caplog.set_level(logging.INFO)
-    run(raw_root=kb / "raw", wiki_root=kb / "wiki", knowledge_root=kb, push_after_run=True)
+    run(
+        raw_root=kb / "raw",
+        wiki_root=kb / "wiki",
+        knowledge_root=kb,
+        push_after_run=True,
+    )
     assert ROUTED not in _all_history(kb) and DISCARDED not in _all_history(kb)
     assert ROUTED not in _all_history(bare) and DISCARDED not in _all_history(bare)
     assert _git(kb, "rev-parse", "HEAD") == _git(bare, "rev-parse", "HEAD")  # the push happened
@@ -644,7 +657,12 @@ def test_sentinel_with_the_hold_off_and_a_failing_vault_commits_the_file_and_nam
     _bare_remote(tmp_path, kb)
     _put_raw(kb, f"Mail {ROUTED}.\n")
     caplog.set_level(logging.INFO)
-    run(raw_root=kb / "raw", wiki_root=kb / "wiki", knowledge_root=kb, push_after_run=True)
+    run(
+        raw_root=kb / "raw",
+        wiki_root=kb / "wiki",
+        knowledge_root=kb,
+        push_after_run=True,
+    )
     assert ROUTED in _git(kb, "show", f"HEAD:{RAW_REL}")
     assert f"unscreened_staged={RAW_REL}" in _summary_segment(caplog)
 
