@@ -365,7 +365,7 @@ Two operator-configuration consequences, both of which bite silently if missed.
 `identifier_validity` must be on §6.3's attribute allowlist as a `list` attribute
 with the submitter among its `writers`, or every such correction is rejected with
 "attribute not on the allowlist" and escalated forever. And it must be
-routed by the storage settings (§7.1: `storage.excluded_fields`), or the close — which embeds an address — is written to
+routed by the storage settings (§7.1: a `storage.routes` field rule for the page type), or the close — which embeds an address — is written to
 the public entity page instead of the excluded surface where the addresses live.
 
 `src/athenaeum/rule_examples/contact-sync-email-removal.yaml` is the worked example.
@@ -671,10 +671,10 @@ router corrects it. A submitter cannot opt out by being specific.
 
 The sensitivity classification is deployment configuration, not a constant in this repo.
 There is one setting for it, the storage keys every other writer already uses: a correction
-goes to `storage.route_for(page_type, field)`, so a field on the page class's
-`storage.excluded_fields` list (the built-in contact fields for `pii`, unless an explicit
-list replaces them) is written to the separate location when that class is mapped outside
-the corpus by `storage.mapping`, and in place on the page otherwise. A correction to a
+goes to `storage.route_for(page_type, field)`, so a field named by a
+`storage.routes` rule for the page type (`page_type`, `fields`, `to`) is written to the
+rule's separate location, and in place on the page otherwise. A route names every field it
+keeps off the page; there is no built-in list. A correction to a
 contact field therefore follows the same destination as a read or any other write, with no
 corrections-only table to keep in step. The earlier `librarian.corrections.sensitive_fields`
 table was removed in athenaeum#3162; a configuration that still sets it is refused before

@@ -170,18 +170,15 @@ validated-dataclass split** already used for `storage.adapters`:
   malformed entry raises `StorageConfigError` **at build time, with the
   adapter name in the message** — not at config.py's read time.
 
-And the **operator-override / module-owned-default split** used for
-`excluded_read_mapping`: `resolve_excluded_read_mapping()`
-(`config.py:2404-2437`) returns **only what the operator configured** (empty
-when unset), explicitly *not* seeding the shipped default — the shipped
-`{"person": "pii"}` entry lives in `pii.DEFAULT_EXCLUDED_READ_MAPPING`
-(`pii.py:201`) and is merged in by the *consuming* module, not by config.py
-(`config.py:2415-2419` states this precedent by name: *"this resolver
-reports only what the OPERATOR configured — `resolve_storage_mapping`'s
-precedent"*). §3.1 below follows this exact split for the same reason
-`resolve_excluded_read_mapping` does: the shipped defaults are not something
-config.py owns, they are something the owning domain module (`sensitivity.py`,
-§3.2) ships and merges.
+And the **operator-override / module-owned-default split** that
+`excluded_read_mapping` used (that key and its resolver were removed in
+athenaeum#3173; this note is the record of the split): the resolver returned
+**only what the operator configured** (empty when unset), explicitly *not*
+seeding the shipped default, which lived in the consuming module and was merged
+in there, not by config.py (the precedent was `resolve_storage_mapping`'s). §3.1
+below follows this exact split for the same reason: the shipped defaults are
+not something config.py owns, they are something the owning domain module
+(`sensitivity.py`, §3.2) ships and merges.
 
 ---
 
@@ -253,9 +250,8 @@ defensively (non-dict/blank entries dropped, same posture as
 `resolve_storage_adapters`), returns `dict[str, dict[str, Any]]` of
 still-unvalidated per-class blocks, and is **not** seeded in `_DEFAULTS`
 (§2.4's rule) because the shipped default (§5) has its own single source of
-truth in a new `sensitivity.py` module, mirroring exactly how
-`pii.DEFAULT_EXCLUDED_READ_MAPPING` (not `_DEFAULTS`) is the shipped-default
-home for `excluded_read_mapping`.
+truth in a new `sensitivity.py` module (not `_DEFAULTS`), as the shipped
+read mapping once was in `pii` (removed in athenaeum#3173).
 
 A new `sensitivity.py` module (L3 — see §3.2's layering note) owns:
 
@@ -406,9 +402,8 @@ on a recognizer bound to two classes. A detected match therefore always has
 exactly one destination class — there is no "which class wins" question to
 answer downstream.
 
-**Empty `recognizers: []` is honoured literally** (mirroring
-`storage.excluded_fields`'s empty-list-is-a-statement rule,
-`docs/extending/storage-adapter-contract.md:171-173`): a class with no recognisers is
+**Empty `recognizers: []` is honoured literally** (an
+operator saying "none" is a different statement from not configuring the class): a class with no recognisers is
 never auto-detected, only reached by explicit operator/agent tagging (e.g. a
 correction's `usage_class`-style manual field, or a future `athenaeum tag`
 verb — out of scope here). `classified` in §3.1's example is exactly this
@@ -471,13 +466,13 @@ class-name-agnostic; this design's only change to that call graph is that
 the class name it passes is no longer the literal `PII_ENTITY_CLASS`
 constant but whichever name `sensitivity.classes` iterates.
 
-`storage.excluded_read_mapping` (page `type:` → surface class,
-`docs/extending/storage-adapter-contract.md`'s "Page class vs surface class") and
-`storage.excluded_fields` (which frontmatter fields on an excluded record are
-data) are likewise **reused unmodified** — a `hipaa` class that stores on
-its own page type declares its own `excluded_read_mapping`/`excluded_fields`
-entries the same way `person: pii` does today (`pii.py:201`,
-`docs/extending/storage-adapter-contract.md:118-125`).
+`storage.routes` (a page type, the frontmatter fields on its excluded record
+that are data, and the location that holds them; see
+`docs/extending/storage-adapter-contract.md`'s "Routes name page types") is
+likewise **reused unmodified** — a `hipaa` class that stores on its own page
+type declares its own `routes` entry the same way `person` does today. (This
+note was written against the earlier `excluded_read_mapping` and
+`excluded_fields` keys, removed in athenaeum#3173.)
 
 ---
 

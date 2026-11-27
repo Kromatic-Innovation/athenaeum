@@ -2426,14 +2426,13 @@ whose plans always go to the queue, never the unattended applier,
 regardless of ``mode``/``auto_apply_class`` or the plan's own scope.
 
 Yaml only, like `resolve_model_rates` and
-`resolve_excluded_fields_config` -- a whole list of operator-named
+`resolve_storage_routes` -- a whole list of operator-named
 types is not the single scalar the ``ATHENAEUM_*`` env convention fits.
 A non-list value, or a non-dict ``page_recompile`` section, resolves to
 `DEFAULT_PAGE_RECOMPILE_NEVER_AUTO_TYPES`; a non-string or blank
 entry within an otherwise-valid list is dropped rather than rejecting
 the whole list, the same per-entry tolerance
-`resolve_excluded_fields_config` already applies to its own list
-values.
+`resolve_storage_routes` already applies to its own list values.
 
 ### `resolve_page_recompile_opening_max_pages_per_run`
 
@@ -6334,58 +6333,6 @@ storage:
   mapping:
     recipe: shared-recipes
 ```
-
-### `resolve_excluded_fields_config`
-
-- **YAML path:** `storage.excluded_fields`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `{}`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve ``storage.excluded_fields`` — surface class → data-field names.
-
-The explicit operator override at the top of
-`athenaeum.pii.resolve_excluded_fields`'s resolution order: it names
-which frontmatter fields on an excluded record of a given SURFACE class
-(the ``storage.mapping`` key, e.g. ``pii`` — not a wiki page's ``type:``)
-hold data rather than the record's own bookkeeping.
-
-Returns an EMPTY dict when unset. A class with no entry (and no
-``storage.routes`` field rule) has no data fields: there is no built-in
-list. ``resolve_storage_mapping``'s precedent applies: no
-seed in ``_DEFAULTS``, so this default stays reachable.
-
-A class mapped to an EMPTY list is honoured literally as "this class has no
-data fields" — that is an operator saying so, which is a different
-statement from not configuring the class at all, and collapsing the two
-would make the override unable to express it. Non-string keys, non-list
-values, and blank/non-string field names are dropped defensively.
-
-### `resolve_excluded_read_mapping`
-
-- **YAML path:** `storage.excluded_read_mapping`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `{}`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve ``storage.excluded_read_mapping`` — page ``type:`` → surface class.
-
-The operator override for the mapping ``recall`` consults to know WHICH
-excluded surface a hit joins to. It is a different table from
-``storage.mapping``: that one maps a class onto a storage ADAPTER, this one
-maps a wiki page's ``type:`` onto the SURFACE CLASS whose excluded record
-holds that page's excluded fields. The two names are distinct and the
-distinction is load-bearing — a page is ``type: person`` while its record
-lives on the ``pii`` surface.
-
-Returns an EMPTY dict when unset. The identity default plus the single
-shipped non-identity entry (``person: pii``) lives in
-`athenaeum.pii.DEFAULT_EXCLUDED_READ_MAPPING`, not here, so this
-resolver reports only what the OPERATOR configured —
-``resolve_storage_mapping``'s precedent. Non-string keys/values and blank
-entries are dropped defensively.
 
 ### `resolve_storage_history`
 
