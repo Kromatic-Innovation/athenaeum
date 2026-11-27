@@ -88,6 +88,7 @@ __all__ = [
     "make_raw_hold",
     "mark_processed",
     "raw_screen_ledger_path",
+    "register_raw_root",
     "rules_configured",
     "screen_raw_intake",
     "whole_page_types",
@@ -234,30 +235,72 @@ def _out_of_scope_sources(config: dict[str, Any] | None) -> frozenset[str]:
     return frozenset({ANSWERS_SOURCE, STORE_RAW_DIRNAME, *resolve_non_intake_sources(config)})
 
 
-def _in_scope(rel: str, excluded: frozenset[str]) -> bool:
-    parts = rel.split("/")
-    if parts[0] != RAW_DIRNAME or len(parts) < 2:
-        return False
-    # A file directly in raw/ has no source directory; it is still intake.
-    return len(parts) == 2 or parts[1] not in excluded
+#: Raw roots other than ``<knowledge root>/raw`` that a run was pointed at with
+#: ``--raw-root`` and that sit inside the knowledge root, by resolved knowledge
+#: root. Set by :func:`register_raw_root`, read by every scope check.
+_EXTRA_RAW_ROOTS: dict[Path, set[str]] = {}
 
 
-def _iter_raw_files(knowledge_root: Path, excluded: frozenset[str]) -> list[Path]:
-    raw_root = knowledge_root / RAW_DIRNAME
+def register_raw_root(knowledge_root: Path, raw_root: Path | None) -> None:
+    """Record a run's own raw root so it is screened and held like ``raw/``.
+
+    Ignored when it is the default ``raw/`` or lies outside the knowledge root
+    (nothing there is in the repository a commit would capture).
+    """
+    if raw_root is None:
+        return
+    root = Path(knowledge_root).resolve()
+    try:
+        rel = Path(raw_root).resolve().relative_to(root).as_posix()
+    except ValueError:
+        return
+    if rel and rel != RAW_DIRNAME:
+        _EXTRA_RAW_ROOTS.setdefault(root, set()).add(rel)
+
+
+def _prefixes(knowledge_root: Path) -> list[str]:
+    """Repository-relative raw roots: ``raw`` and any registered extra one."""
+    return [RAW_DIRNAME, *sorted(_EXTRA_RAW_ROOTS.get(Path(knowledge_root).resolve(), ()))]
+
+
+def _in_scope(rel: str, excluded: frozenset[str], prefixes: list[str]) -> bool:
+    for prefix in prefixes:
+        if not rel.startswith(prefix + "/"):
+            continue
+        rest = rel[len(prefix) + 1 :].split("/")
+        # A file directly in the raw root has no source directory; it is still intake.
+        return len(rest) == 1 or rest[0] not in excluded
+    return False
+
+
+def _ref_for(rel: str, prefixes: list[str]) -> str:
+    """``RawFile.ref`` for a raw path: ``<source>/<file name>``."""
+    for prefix in prefixes:
+        if rel.startswith(prefix + "/"):
+            rest = rel[len(prefix) + 1 :].split("/")
+            return f"{rest[0]}/{rest[-1]}" if len(rest) >= 2 else rest[-1]
+    return rel.rsplit("/", 1)[-1]
+
+
+def _iter_raw_files(
+    knowledge_root: Path, excluded: frozenset[str], prefixes: list[str]
+) -> list[Path]:
     found: list[Path] = []
-    if not raw_root.is_dir():
-        return found
-    for dirpath, dirnames, filenames in os.walk(raw_root, followlinks=False):
-        here = Path(dirpath)
-        if here == raw_root:
-            dirnames[:] = sorted(d for d in dirnames if d not in excluded)
-        else:
-            dirnames.sort()
-        for name in sorted(filenames):
-            path = here / name
-            if path.is_symlink():
-                continue  # git tracks the link, not what it points at
-            found.append(path)
+    for prefix in prefixes:
+        raw_root = knowledge_root / prefix
+        if not raw_root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(raw_root, followlinks=False):
+            here = Path(dirpath)
+            if here == raw_root:
+                dirnames[:] = sorted(d for d in dirnames if d not in excluded)
+            else:
+                dirnames.sort()
+            for name in sorted(filenames):
+                path = here / name
+                if path.is_symlink():
+                    continue  # git tracks the link, not what it points at
+                found.append(path)
     return found
 
 
@@ -312,12 +355,6 @@ class RawScreenReport:
         return fields
 
 
-def _ref_for(rel: str) -> str:
-    """``RawFile.ref`` for a raw path: ``<source>/<file name>``."""
-    parts = rel.split("/")
-    return f"{parts[1]}/{parts[-1]}" if len(parts) >= 3 else parts[-1]
-
-
 def _fingerprint(path: Path) -> str:
     try:
         st = path.stat()
@@ -331,6 +368,7 @@ def screen_raw_intake(
     config: dict[str, Any] | None,
     *,
     cache_dir: Path | None = None,
+    raw_root: Path | None = None,
 ) -> RawScreenReport:
     """Screen every raw file not yet screened; return what happened.
 
@@ -340,6 +378,7 @@ def screen_raw_intake(
     it was, unscreened, and names it in the report.
     """
     report = RawScreenReport()
+    register_raw_root(knowledge_root, raw_root)
     if not rules_configured(config):
         return report
     report.active = True
@@ -355,7 +394,8 @@ def screen_raw_intake(
     ).screen_intake_content
 
     present: set[str] = set()
-    for path in _iter_raw_files(knowledge_root, excluded):
+    prefixes = _prefixes(knowledge_root)
+    for path in _iter_raw_files(knowledge_root, excluded, prefixes):
         rel = path.relative_to(knowledge_root).as_posix()
         present.add(rel)
         report.scanned += 1
@@ -394,7 +434,7 @@ def screen_raw_intake(
                 report.rewritten.append(
                     RawRewrite(
                         rel=rel,
-                        ref=_ref_for(rel),
+                        ref=_ref_for(rel, prefixes),
                         old_text=text,
                         new_text=screened_text,
                         old_fingerprint=old_fp,
@@ -444,7 +484,7 @@ def mark_processed(
         text = data.decode("utf-8")
     except (OSError, ValueError):
         return False
-    if not _in_scope(rel, _out_of_scope_sources(config)):
+    if not _in_scope(rel, _out_of_scope_sources(config), _prefixes(knowledge_root)):
         return False
     meta, _body = parse_frontmatter(text)
     if not _needs_processing(meta, whole_page_types(config)):
@@ -478,7 +518,7 @@ def make_raw_hold(knowledge_root: Path, config: dict[str, Any] | None) -> RawHol
         ledger = _load_ledger(raw_screen_ledger_path(knowledge_root))
         held: list[str] = []
         for rel in rel_paths:
-            if not _in_scope(rel, excluded):
+            if not _in_scope(rel, excluded, _prefixes(knowledge_root)):
                 continue
             path = Path(repo) / rel
             if path.is_symlink() or not path.is_file():
@@ -563,8 +603,10 @@ def committed_raw_with_values(
     knowledge_root = Path(knowledge_root)
     excluded = _out_of_scope_sources(config)
     found: list[tuple[str, list[str]]] = []
-    for rel in sorted(committed_tracked_paths(knowledge_root, RAW_DIRNAME)):
-        if not _in_scope(rel, excluded):
+    prefixes = _prefixes(knowledge_root)
+    tracked = [r for prefix in prefixes for r in committed_tracked_paths(knowledge_root, prefix)]
+    for rel in sorted(tracked):
+        if not _in_scope(rel, excluded, prefixes):
             continue
         text = committed_text(knowledge_root, rel)
         if not text:

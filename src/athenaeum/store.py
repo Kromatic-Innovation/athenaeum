@@ -1433,11 +1433,11 @@ def _git_z(repo: Path, *args: str) -> list[str]:
 
 
 def _held_raw_paths(repo: Path) -> list[str]:
-    """Repository-relative paths under ``raw/`` the registered hold keeps out of a commit."""
+    """Repository-relative paths the registered hold keeps out of a commit (it scopes them)."""
     hold = _RAW_HOLDS.get(Path(repo).resolve())
     if hold is None:
         return []
-    changed = [entry[3:] for entry in _git_z(repo, *_STATUS_ARGV, "--", "raw")]
+    changed = [entry[3:] for entry in _git_z(repo, *_STATUS_ARGV)]
     return hold(repo, changed) if changed else []
 
 
