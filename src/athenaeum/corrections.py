@@ -101,9 +101,11 @@ not silently baked in — see the athenaeum#797 completion report for the full l
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import uuid
 from collections.abc import Callable, Iterable, Sequence
@@ -1545,6 +1547,9 @@ class CorrectionRecordResult:
     entity_name: str = ""
     monotone: bool = False
     unknown_keys: list[str] = dc_field(default_factory=list)
+    #: The resolved entity's uid, set once the target resolved to a page
+    #: (athenaeum#3180); empty before that.
+    entity_uid: str = ""
 
 
 def process_correction_record(
@@ -2018,6 +2023,7 @@ def process_correction_record(
             entity_path=entity_path,
             entity_name=entity_name,
             monotone=monotone_apply,
+            entity_uid=str(existing_meta.get("uid", "") or entity_path.stem),
         )
 
     # §7.2 schema evolution -- decided before the conflict/write step since
@@ -3573,6 +3579,10 @@ class EscalatedCorrection:
     source_text: str
     correction_id: str
     schema_version: int
+    #: For a block that holds a reference in place of the value (athenaeum#3180):
+    #: the reference. ``value`` is then ``None`` until
+    #: :func:`resolve_pending_value` fetches it.
+    value_ref: str | None = None
 
 
 def parse_escalated_correction(description: str) -> "EscalatedCorrection | str":
@@ -3639,6 +3649,28 @@ def parse_escalated_correction(description: str) -> "EscalatedCorrection | str":
     if not isinstance(target, dict) or not target:
         return "Target: line must decode to a non-empty object"
 
+    ref_match = _VALUE_REF_RE.fullmatch(value_text)
+    if ref_match is not None:
+        # athenaeum#3180: the value is on the target's vault record, not in the
+        # block. Fetched at apply time, never here. The block's own
+        # `Correction ID:` must be the same reference, and its target must name
+        # the entity by uid (where the reference is looked up).
+        ref = ref_match.group(1)
+        if cid_text != ref:
+            return "block fields do not match its Correction ID"
+        if not str(target.get("uid", "") or "").strip():
+            return "Target: line must name the entity by uid"
+        return EscalatedCorrection(
+            target=target,
+            op=op_text,
+            field=field_text,
+            value=None,
+            source_text=_line("Source:") or "",
+            correction_id=ref,
+            schema_version=max(KNOWN_SCHEMA_VERSIONS),
+            value_ref=ref,
+        )
+
     try:
         value = ast.literal_eval(value_text)
     except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
@@ -3663,6 +3695,249 @@ def parse_escalated_correction(description: str) -> "EscalatedCorrection | str":
                 schema_version=schema_version,
             )
     return "block fields do not match its Correction ID"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#3180 — the value of a vault field kept out of the question block
+# ---------------------------------------------------------------------------
+
+#: The record section holding a pending correction's proposed value.
+PENDING_CORRECTIONS_SECTION = "pending_corrections"
+
+#: ``Value:`` line of a block holding a reference: ``vault:<32 hex>``.
+_VALUE_REF_RE = re.compile(r"vault:([0-9a-f]{32})")
+_VALUE_REF_LINE_RE = re.compile(r"^([ \t]*Value:[ \t]*)vault:([0-9a-f]{32})[ \t]*$", re.MULTILINE)
+
+
+def new_pending_ref() -> str:
+    """A random reference; derived from nothing about the correction."""
+    return uuid.uuid4().hex
+
+
+def pending_vault_targets(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    field_name: str,
+    page_type: str,
+) -> tuple[str, ...] | None:
+    """The vault targets a correction to *field_name* of *uid* is kept in, or ``None``.
+
+    ``None`` means the question block carries the value as it always has: no rule
+    sends the field (or the page type) to a vault. Raises :class:`ValueError`
+    (no value in the message) when a rule discards it or the placement is
+    ``nowhere`` / ``unplaceable``, so the caller writes nothing.
+    """
+    from athenaeum import pii
+
+    by_field = route_for(page_type, field_name, config=config)
+    whole = route_for(page_type, config=config)
+    if by_field.discarded:
+        raise ValueError(f"no home for a pending value (discarded by {by_field.rule})")
+    vaulted = (by_field.targets and by_field.sensitive) or (whole.targets and whole.sensitive)
+    if not vaulted and not whole.discarded:
+        return None
+    placement = pii.record_placement(knowledge_root, config, uid, field=field_name)
+    if placement.kind == "vault":
+        return placement.targets
+    raise ValueError(f"no home for a pending value ({placement.kind}: {placement.reason})")
+
+
+def _pending_entries(
+    knowledge_root: Path, config: dict[str, Any] | None, uid: str
+) -> dict[str, Any] | None:
+    """The ``pending_corrections`` entries of *uid*'s vault record, read through the entity read.
+
+    ``None`` when the entity cannot be read.
+    """
+    from athenaeum import pii
+
+    read = pii.entity_read_by_uid(knowledge_root, config, uid, include_excluded=True)
+    if read is None:
+        return None
+    entries = read.sections.get(PENDING_CORRECTIONS_SECTION, {})
+    return entries if isinstance(entries, dict) else {}
+
+
+def find_open_pending_ref(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    *,
+    field_name: str,
+    op: str,
+    value: Any,
+    open_refs: Iterable[str],
+) -> str | None:
+    """The open reference already holding this correction, else ``None``.
+
+    How a second pass over the same batch recognises a vault correction as open
+    without any identifier computed from its value.
+    """
+    entries = _pending_entries(knowledge_root, config, uid)
+    if not entries:
+        return None
+    open_set = set(open_refs)
+    for ref, entry in entries.items():
+        if (
+            ref in open_set
+            and isinstance(entry, dict)
+            and entry.get("field") == field_name
+            and entry.get("op") == op
+            and entry.get("value") == value
+        ):
+            return str(ref)
+    return None
+
+
+def store_pending_value(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    ref: str,
+    *,
+    targets: Sequence[str],
+    field_name: str,
+    op: str,
+    value: Any,
+    source: Any,
+    observed_at: Any,
+    schema_version: Any,
+) -> None:
+    """Put the proposed value on the target's vault record, before the block is written."""
+    from athenaeum import pii
+
+    pii.write_record_section(
+        knowledge_root,
+        config,
+        uid,
+        PENDING_CORRECTIONS_SECTION,
+        ref,
+        {
+            "field": field_name,
+            "op": op,
+            "value": value,
+            "source": "" if source is None else str(source),
+            "observed_at": "" if observed_at is None else str(observed_at),
+            "schema_version": schema_version,
+        },
+        targets=targets,
+    )
+
+
+def resolve_pending_value(
+    parsed: EscalatedCorrection, knowledge_root: Path, config: dict[str, Any] | None
+) -> "EscalatedCorrection | str":
+    """Fetch the value a reference block stands for, through the entity read.
+
+    Returns the correction with its value filled in, or a reason (never a value)
+    when the pending value cannot be read or is not the one this block names: the
+    entry must exist on the block's own target and carry the block's field and op.
+    """
+    ref = parsed.value_ref
+    if ref is None:
+        return parsed
+    uid = str(parsed.target.get("uid", "") or "").strip()
+    entries = _pending_entries(knowledge_root, config, uid)
+    if entries is None:
+        return "pending value could not be read: target unreadable"
+    entry = entries.get(ref)
+    if not isinstance(entry, dict) or "value" not in entry:
+        return "pending value could not be read: no entry for the block's reference"
+    if entry.get("field") != parsed.field or entry.get("op") != parsed.op:
+        return "pending value does not belong to this block"
+    version = entry.get("schema_version")
+    return dataclasses.replace(
+        parsed,
+        value=entry["value"],
+        schema_version=version if version in KNOWN_SCHEMA_VERSIONS else parsed.schema_version,
+    )
+
+
+def discard_pending_value(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    ref: str,
+    *,
+    targets: Sequence[str],
+) -> None:
+    """Undo :func:`store_pending_value` for a block that was never written."""
+    from athenaeum import pii
+
+    pii.delete_record_section(
+        knowledge_root, config, uid, PENDING_CORRECTIONS_SECTION, ref, targets=targets
+    )
+
+
+def drop_pending_value(
+    parsed: EscalatedCorrection, knowledge_root: Path, config: dict[str, Any] | None
+) -> None:
+    """Remove the pending entry of a reference block from every vault target."""
+    from athenaeum import pii
+
+    ref = parsed.value_ref
+    if ref is None:
+        return
+    uid = str(parsed.target.get("uid", "") or "").strip()
+    placement = pii.record_placement(knowledge_root, config, uid, field=parsed.field)
+    if placement.kind == "vault":
+        names = list(placement.targets)
+    else:
+        # The rules moved since the block was written: clean every location a rule names.
+        names = [
+            n
+            for n in sorted(pii._rule_target_names(config))
+            if target_root(n, config, knowledge_root).is_dir()
+        ]
+    if names:
+        pii.delete_record_section(
+            knowledge_root, config, uid, PENDING_CORRECTIONS_SECTION, ref, targets=names
+        )
+
+
+def description_value_views(
+    description: str,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    *,
+    include_sensitive: bool,
+) -> dict[str, str]:
+    """``{reference: text}`` for each reference block in a description, as a listing shows it.
+
+    With *include_sensitive* the text is the stored value in the form a block
+    used to carry (``repr``); without it, or when the value cannot be read, a
+    redaction marker naming the field. Empty for a description with no reference.
+    """
+    if "vault:" not in description or _VALUE_REF_LINE_RE.search(description) is None:
+        return {}
+    parsed = parse_escalated_correction(description)
+    field_name = ""
+    for line in description.splitlines():
+        if line.strip().startswith("Field:"):
+            field_name = line.strip().removeprefix("Field:").strip()
+    shown = f"<redacted: {field_name or 'field'} value withheld>"
+    if include_sensitive and not isinstance(parsed, str):
+        resolved = resolve_pending_value(parsed, knowledge_root, config)
+        if not isinstance(resolved, str):
+            shown = repr(resolved.value)
+    return {m.group(2): shown for m in _VALUE_REF_LINE_RE.finditer(description)}
+
+
+def resolve_description_refs(
+    description: str,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    *,
+    include_sensitive: bool,
+) -> str:
+    """*description* with its reference replaced (see :func:`description_value_views`)."""
+    views = description_value_views(
+        description, knowledge_root, config, include_sensitive=include_sensitive
+    )
+    if not views:
+        return description
+    return _VALUE_REF_LINE_RE.sub(lambda m: f"{m.group(1)}{views[m.group(2)]}", description)
 
 
 # ---------------------------------------------------------------------------

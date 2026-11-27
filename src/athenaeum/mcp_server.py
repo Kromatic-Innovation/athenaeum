@@ -5665,7 +5665,9 @@ def create_server(
         )
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
-    def list_pending_decisions(offset: int = 0, limit: int | None = None) -> dict:
+    def list_pending_decisions(
+        offset: int = 0, limit: int | None = None, include_sensitive: bool = False
+    ) -> dict:
         """List pending human decisions — questions AND merges (issue athenaeum#401).
 
         The unified queue behind ``athenaeum decisions list``. Combines the
@@ -5727,6 +5729,12 @@ def create_server(
         underlying library functions: it resolves to the same page-limit
         default as an omitted ``limit``. A caller can never get the
         unbounded 11MB response back through this tool.
+
+        A field-correction question whose field is kept in a vault shows a
+        redaction marker naming the field in place of the proposed value. With
+        ``include_sensitive=True`` an owner caller gets the value, read through
+        the entity read; a restricted caller, or a server started with
+        ``serve.sensitive_reads: off``, never does.
         """
         from athenaeum.config import (
             load_config,
@@ -5748,6 +5756,8 @@ def create_server(
             caller_audience=caller_audience,
             offset=offset,
             limit=limit,
+            include_sensitive=include_sensitive
+            and not (remote_policy is not None and not remote_policy.sensitive_reads),
         )
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)

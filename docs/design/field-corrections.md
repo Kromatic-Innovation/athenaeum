@@ -840,6 +840,35 @@ Submitters should still pre-filter targets against `registry.json`
 built for this. But that is a **courtesy that keeps work in the cheap tier**, not an
 admission requirement.
 
+### 8.1.1 A vault field's value is kept out of the block (athenaeum#3180)
+
+The block rendered for an escalated correction carries the proposed value on its `Value:`
+line and an id computed from the target, field and value on its `Correction ID:` line.
+Both files the block lands in (`_pending_questions.md` and its archive) are in the main
+store. For a field `storage.route_for` sends to a vault, the block carries a reference
+instead:
+
+- `Value: vault:<ref>`, `Correction ID: <ref>`, and `Target:` as the entity uid. `<ref>` is
+  random (128 bits), not derived from the value, the field or the target.
+- The value is stored first, on the target's vault record, through the record-section
+  writer: section `pending_corrections`, key `<ref>`, holding `field`, `op`, `value`,
+  `source`, `observed_at` and the schema version. If it cannot be stored (a rule discards
+  the field, or there is no place to keep it) no block is written.
+- Dedup (`open_correction_ids`) compares the `<ref>`. A second pass over the same batch
+  looks the correction up among the open references of the target's pending entries by
+  field, op and value, and adds no block when one matches.
+- Applying the answer fetches the value at apply time, never at parse time, through the
+  entity read. The entry must be on the block's own target and carry the block's field and
+  op, so a block edited to point at another record's reference is held. An unreadable
+  value holds the answer and writes nothing.
+- Ratify (once applied) and reject remove the pending entry from every target.
+- Listing surfaces (`athenaeum decisions list --include-sensitive`, the MCP
+  `list_pending_decisions` tool's `include_sensitive`) substitute the value for an owner
+  caller who asked for it and a redaction marker naming the field otherwise. The
+  substitution is made on the page returned, after the stored queue and framing.
+- A field with no vault rule gets the block of §8.1 unchanged; blocks written before this
+  change still parse and apply; nothing already written is rewritten.
+
 ### 8.2 Parking an email no-match for retry (issue athenaeum#1988)
 
 A zero-match `handle: {email}` target is overwhelmingly "not yet known," not "will
