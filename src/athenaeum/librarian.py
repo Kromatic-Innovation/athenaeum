@@ -7671,12 +7671,15 @@ def _run_raw_screen_phase(ctx: RunContext) -> None:
     config = ctx.config
     if ctx.dry_run:
         return
+    raw_screening.register_raw_root(ctx.knowledge_root, ctx.raw_root)
     raw_screening.install_raw_hold(config, ctx.knowledge_root)
     if not raw_screening.rules_configured(config):
         return
     raw_screening.emit_hold_messages(config, ctx.knowledge_root)
     try:
-        report = raw_screening.screen_raw_intake(ctx.knowledge_root, config)
+        report = raw_screening.screen_raw_intake(
+            ctx.knowledge_root, config, raw_root=ctx.raw_root
+        )
         ctx.raw_screen = report
         _rekey_content_records(ctx.wiki_root, report.rewritten)
     except Exception as exc:  # noqa: BLE001 - the run goes on; the hold keeps values out

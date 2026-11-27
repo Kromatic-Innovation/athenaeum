@@ -92,6 +92,7 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
     monkeypatch.setenv("ATHENAEUM_CLAUDE_CLI_BIN", str(stub))
     monkeypatch.setattr(raw_screening, "_EMITTED", set())
+    monkeypatch.setattr(raw_screening, "_EXTRA_RAW_ROOTS", {})
     # The hold is registered per knowledge root, process-wide: drop what a test leaves.
     from athenaeum import store
 
@@ -424,6 +425,25 @@ def test_a_symlinked_raw_path_is_neither_screened_nor_held(tmp_path: Path) -> No
     assert raw_screening.screen_raw_intake(kb, cfg).scanned == 0
     assert open_store(cfg, kb).snapshot("snap") is not None
     assert _committed(kb, "raw/linked")
+
+
+def test_a_raw_root_elsewhere_in_the_repository_is_screened_and_held(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path / "vault")
+    kb = _kb(tmp_path, cfg)
+    custom = kb / "intake" / "src"
+    custom.mkdir(parents=True)
+    path = custom / "n.md"
+    path.write_text(f"Mail {ROUTED}.\n", encoding="utf-8")
+    raw_screening.register_raw_root(kb, kb / "intake")
+    open_store(cfg, kb)
+    assert open_store(cfg, kb).snapshot("snap") is None  # held before it is screened
+    report = raw_screening.screen_raw_intake(kb, cfg, raw_root=kb / "intake")
+    assert len(report.rewritten) == 1 and ROUTED not in path.read_text(encoding="utf-8")
+    assert open_store(cfg, kb).snapshot("snap") is not None
+    assert _committed(kb, "intake/src/n.md") and ROUTED not in _all_history(kb)
+    assert raw_screening._prefixes(kb) == ["raw", "intake"]
+    raw_screening.register_raw_root(kb, tmp_path)  # outside the repository: ignored
+    assert raw_screening._prefixes(kb) == ["raw", "intake"]
 
 
 def test_history_none_still_rewrites_raw_files(tmp_path: Path) -> None:
