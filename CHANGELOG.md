@@ -75,21 +75,32 @@ without a repository. Access principals, identity providers and per-vault read
 grants decide who may read a vault's values on a served install, and one
 command, `athenaeum retire`, now retires a page, a contact record or an
 off-corpus record by uid. The flag that returns sensitive values is renamed
-`include_sensitive` on every read. It is a MINOR release because it adds
-configuration and a command, and it carries two breaking changes. It also ships
-an eval-harness fix; that changes no behaviour. `athenaeum.__all__` is
-unchanged.
+`include_sensitive` on every read. It also changes three things outside that
+theme: the per-turn recall hook now sends the previous turn's text to its
+extractor model, a decision answer that does not name the item's fingerprint is
+held on an authority-routed item, and spend records can carry a `spend.account`
+label (ledger schema 5). It is a MINOR release because it adds configuration
+and a command, and it carries five breaking changes. It also ships an
+eval-harness fix; that changes no behaviour. `athenaeum.__all__` is unchanged.
 
 For most users:
 
-- Breaking changes: two. The `librarian.corrections.sensitive_fields` key is
-  removed, and with `sensitivity.routing.enabled` on, a sensitivity class that
-  has no `storage.routes` rule is refused. Both are in `### Removed` and
-  `### Changed`, and both have steps below.
+- Breaking changes: five entries are marked `**BREAKING:**`, and each has a
+  step below. (1) The `librarian.corrections.sensitive_fields` key is removed.
+  (2) With `sensitivity.routing.enabled` on, a sensitivity class that has no
+  `storage.routes` rule is refused. (3) A free-text `backing_store` value is
+  refused. (4) The `serve.excluded_fields` yaml key is refused at startup, and
+  the `read_entity` payload key `excluded_fields_withheld` is now
+  `sensitive_reads_withheld`, with no alias. (5) A decision answer that does
+  not name the item's fingerprint is held on an authority-routed item.
 - Behaviour changes: a field correction goes where the storage settings put
   the field. `athenaeum retire-pages` is now `athenaeum retire`, and the old
   name still works for this release. The old read-flag names still work and
   print a notice, and are removed in the next minor release.
+- The per-turn recall hook (`athenaeum-claude-hook`) now sends the previous
+  turn's text (the last user message and the end of the last reply, each cut to
+  1,500 characters) to the extractor model by default. Set
+  `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0` to turn it off.
 - Nothing is routed, discarded or restricted unless a rule says so. With no
   `storage.routes` rule and no sensitivity routing, nothing else changes.
 
@@ -115,11 +126,25 @@ For most users:
    `serve.excluded_fields`, `athenaeum serve --sensitive-reads` for
    `--excluded-fields`, and `ATHENAEUM_SERVE_SENSITIVE_READS` for
    `ATHENAEUM_SERVE_EXCLUDED_FIELDS`. The old `serve.excluded_fields` yaml key
-   is already refused at startup.
-5. If you wrote a free-text `backing_store` such as `files` or `sqlite`,
+   is already refused at startup: rename it in `athenaeum.yaml` or `athenaeum
+   serve` will not start.
+5. MCP clients: read `sensitive_reads_withheld` where you read
+   `excluded_fields_withheld` in a `read_entity` result. There is no alias, so
+   a client that still checks the old key no longer sees the withheld notice.
+6. If you wrote a free-text `backing_store` such as `files` or `sqlite`,
    change it to `markdown`. Use `athenaeum retire` in place of
    `athenaeum retire-pages`, and `--force-retire` for its guard override.
-6. `sync.mode: integrate` users: no change.
+7. If you write decision answer files by hand, or run `ingest-answers`
+   automation: an answer on an authority-routed item (`confirmation`,
+   `proposed-rule`, `auto-apply-threshold`, `dimension-proposal`,
+   `relevance-policy-edit`, `page-recompile`) must now name the item's current
+   `fingerprint`, or it is held with error code `held_unconfirmed` and the item
+   stays in the queue. Read the `fingerprint` from `athenaeum decisions list
+   --json` (or the `list_pending_decisions` tool) and answer again with it. An
+   answer file already waiting on disk is held the same way on the next tick.
+8. The recall hook change needs no step. To keep the old behaviour, set
+   `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0`.
+9. `sync.mode: integrate` users: no change.
 
 ### Removed
 
@@ -140,7 +165,7 @@ For most users:
 ### Changed
 
 - An escalated field correction whose field is kept in a vault no longer puts the proposed value in the question block (athenaeum#3180). The block's `Value:` line reads `vault:<ref>`, its `Correction ID:` is the same random `<ref>` (not computed from the value), and its `Target:` names the entity by uid even when the correction named an email address. The value is kept on the target's vault record under the `pending_corrections` section, written before the block, read back through the entity read when the answer is applied, and removed when the question is ratified or rejected; an unreadable value holds the answer and writes nothing. `athenaeum decisions list` and the `list_pending_decisions` tool show a redaction marker naming the field unless the caller passes `--include-sensitive` / `include_sensitive` and may read sensitive values. A field with no vault rule gets the same block as before, and blocks written earlier still parse and apply.
-- The flag that returns sensitive values is named `include_sensitive` on every
+- **BREAKING:** The flag that returns sensitive values is named `include_sensitive` on every
   read (athenaeum#3163): the `recall`, `read_entity` and `enumerate_entities`
   MCP tools, and `athenaeum recall`, `athenaeum entity` and `athenaeum
   enumerate` (`--include-sensitive`). It replaces `with_pii` / `--with-pii` and
@@ -183,7 +208,7 @@ For most users:
 - The four `access:` levels are defined once (`models.ACCESS_LEVELS`) and the
   built-in contact field names once (`pii.BUILTIN_CONTACT_FIELDS`); the other
   copies are computed from them, with no behaviour change (athenaeum#3159).
-- `backing_store` now names a registered store implementation (athenaeum#3165).
+- **BREAKING:** `backing_store` now names a registered store implementation (athenaeum#3165).
   `markdown` and `wiki-markdown` resolve to the filesystem implementation; any
   other value, which was previously accepted and built the same filesystem
   store, now raises `StorageConfigError` naming the known values. If you wrote
@@ -217,7 +242,7 @@ For most users:
   `athenaeum relevance-policy report` and the `relevance_policy` MCP tool say
   so, and the report counts the live pages each `always` rule protects. With no
   policy file nothing changes (athenaeum#3152).
-- A decision answer that does not name the fingerprint of the item it
+- **BREAKING:** A decision answer that does not name the fingerprint of the item it
   answers is no longer applied on an authority-routed item (`confirmation`,
   `proposed-rule`, `auto-apply-threshold`, `dimension-proposal`,
   `relevance-policy-edit`, `page-recompile`). It is held with error code
@@ -330,7 +355,6 @@ For most users:
 - A `storage.routes` rule's `to` list may name several vaults (athenaeum#3169). A write goes to each target in order and succeeds only if every target accepts it; a failure raises naming the target and is never logged and skipped, and re-running completes the targets that were missed (each write is idempotent per target). Every target must be a vault (`sensitive: true`, outside the index, not `read_only`): a list that includes a location in the index is refused, and a `read_only` target raises `StorageConfigError`. The first target is the primary and the only one read; a record or value that a later target holds and the primary lacks is reported by `athenaeum doctor` (`multi_target_divergence`), not served. Removing a value and `athenaeum retire` apply to every target, and an unreachable target (one that exists but cannot be read or written) is named with a non-zero exit; a target root that does not exist yet holds no records. `athenaeum retire` applies the same store-rights check to every target before deleting anything, so one refusal refuses the run. `athenaeum status` counts targets per rule and names any target inside a git repository, where an erasure does not reach history. Nothing keeps targets in step after an out-of-band edit.
 - `storage.routes`: a list of rules that each send a page type, or chosen fields of one, or a sensitivity class, to one named location (athenaeum#3166). A rule is `page_type` (or `sensitivity_class`), an optional `fields` list and `to`, a list of one location name (or none: see below). A field rule's target must be `sensitive: true`; a rule without `fields` is the long form of a `storage.mapping` entry, which stays; a `sensitivity_class` rule replaces the per-class lookup in value routing. Duplicate rules, a page type named in both `storage.routes` and `storage.mapping`, an unknown target and a non-sensitive field target raise `StorageConfigError`. Nothing is routed unless a rule says so, records already on disk are read through a rule without being moved, and `athenaeum init` writes a commented example and no active rule.
 - A `storage.routes` rule that sends a whole page type to a vault now has compile write those pages there (athenaeum#3174). They stay out of the keyword and vector indexes, merge discovery and name lookup, so they are not searchable. `read_entity` returns one by uid with the read flag, and without it answers `withheld: true` with no value. A name already in the vault is an update there, a link from the main store to a vault page is refused, and the run summary counts pages per vault without logging a title. A non-indexed location that is not a vault still raises `SurfaceNotIndexedError`.
-
 - `storage.history: git | none` (default `git`) declares whether a knowledge
   directory keeps history (athenaeum#3160). `athenaeum init --no-history`
   writes `none` into the configuration it creates and creates no repository:
@@ -350,7 +374,6 @@ For most users:
   `sync.mode: integrate`). Its configuration blocks are checked against fixtures by
   `tests/test_shared_page_type_guide.py`, which also builds two installs around a local
   bare repository.
-
 - A storage location can be marked `sensitive: true` (athenaeum#3161): a vault,
   where reading a value needs the explicit read flag. The built-in excluded
   location is sensitive; the wiki location cannot be. A sensitive location
@@ -359,7 +382,6 @@ For most users:
   predicate. A custom location outside the corpus keeps its read behaviour
   whether or not it is marked, and `athenaeum doctor` warns for each such
   location that holds routed fields but is unmarked.
-
 - `athenaeum retire` retires any information by uid, in whichever store holds
   it: a wiki page, a contact record or an off-corpus record (athenaeum#3151).
   A bare uid resolves to its store; `page:`, `contact:` and `off-corpus:`
@@ -375,7 +397,6 @@ For most users:
   count, each value masked, whether it also lives on a live record and the
   commit that added it. No output or commit message carries an unmasked
   address. Purging the erasure key stays out of scope.
-
 - Decision answers now record who answered, where, and what they were shown
   (`answer_version: 2`). `athenaeum decisions answer` takes
   `--shown-fingerprint`, `--answerer-id`, `--answerer-kind`
