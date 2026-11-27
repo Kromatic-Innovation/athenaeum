@@ -12,6 +12,7 @@ from athenaeum.cli import main
 from athenaeum.librarian import _render_run_summary
 from athenaeum.relevance_policy import (
     POLICY_FILENAME,
+    REMOVAL_PROTECTION_NOTE,
     RelevancePolicyError,
     load_relevance_policy,
     policy_hash_token,
@@ -230,6 +231,7 @@ FOUR_COL_RENDER = (
     "Relevance policy hash=c45e9fa2; 3 rule(s), evaluated top to bottom, last match wins:\n"
     "  1. never tag=personal\n  2. always tag=personal/travel\n"
     "  3. never type=person subject=uid-1\n"
+    f"Note: {REMOVAL_PROTECTION_NOTE}.\n"
 )
 
 

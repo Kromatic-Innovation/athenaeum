@@ -4729,11 +4729,17 @@ def create_server(
         a later rule is an exception to an earlier one. A fact no rule
         matches has no policy (default behaviour).
 
+        An `always` rule has two effects: it is a capture hint, and it
+        protects every page it matches from retirement (`retire`
+        refuses it, `decay-sweep` skips it, the audit never lists it as a
+        retirement candidate).
+
         Returns:
             A dict with `present` (false when no policy file exists — nothing
             is constrained), `hash` (8-hex digest of the effective rules, the
             same value the librarian run summary reports, or null),
-            `semantics`, and `rules` — each with `rule`, `line`, `verdict`,
+            `semantics`, `removal_protection` (what `always` protects), and
+            `rules` — each with `rule`, `line`, `verdict`,
             `type`, `tag`, `subject` and `store` (null unless a `route` rule).
             An invalid file returns `error`
             naming each bad rule instead.
