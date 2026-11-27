@@ -187,7 +187,9 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   commit message and in `wiki/_relevance_policy_audit.jsonl`. `athenaeum
   decay-sweep` skips protected pages and counts them. The audit never lists
   them as retirement candidates and reports `protected by policy: N`. One
-  helper, `relevance_policy.protecting_rule`, decides for all three.
+  helper, `relevance_policy.protecting_rule`, decides for all three, and for the
+  raise `retract` that removes a raised copy: a protected copy is kept and a
+  decision asks; answering "remove" is the override, recorded in the removal commit.
   `athenaeum relevance-policy report` and the `relevance_policy` MCP tool say
   so, and the report counts the live pages each `always` rule protects. With no
   policy file nothing changes (athenaeum#3152).

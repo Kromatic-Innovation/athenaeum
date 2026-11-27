@@ -201,6 +201,9 @@ tag:
   `wiki/_relevance_policy_audit.jsonl`.
 - `athenaeum decay-sweep` skips a protected page and counts it in its
   `protected by policy` line.
+- A raise `retract` never removes a protected copy by rule: the copy is kept and a
+  decision asks. Answering "remove" is the override and is recorded in the removal
+  commit message.
 - The audit (`athenaeum audit`) never lists a protected page as a retirement
   candidate and reports `protected by policy: N` in its summary.
 

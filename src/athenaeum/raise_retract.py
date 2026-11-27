@@ -30,7 +30,8 @@ compile role does with one:
 3. **Untouched or edited.** The copy is projected as it stands and its payload
    hash compared with ``raised_from.content_hash`` (never a hash of the whole
    page, so a change to a key outside the projection leaves it untouched).
-4. **Untouched**: removed with
+4. **Untouched**: unless an ``always`` relevance rule protects it (athenaeum#3152: then it
+   is kept and a decision asks), removed with
    :func:`athenaeum.retire_pages.apply_retirement` (a snapshot commit, then the
    removal; pending merges naming it are withdrawn). The removal commit carries
    ``Athenaeum-Raise: <raise_id> seq=<n> retract``.
@@ -102,7 +103,12 @@ from athenaeum.raise_messages import (
 from athenaeum.raise_projection import derived_uid, payload_hash
 from athenaeum.raise_provenance import RaisedFrom, RaisedFromError, parse_raised_from
 from athenaeum.raise_supersede import APPLIED, IGNORED, _accepted_rows, _has_waiting_raise
-from athenaeum.retire_pages import RetireCandidate, apply_retirement
+from athenaeum.retire_pages import (
+    RetireCandidate,
+    apply_retirement,
+    describe_protection,
+    find_policy_protected,
+)
 from athenaeum.store import commit_paths, repo_head
 from athenaeum.store_decisions import file_decision, load_queue, resolve_decision
 from athenaeum.store_intake_dispatch import (
@@ -348,8 +354,9 @@ def apply_retract(
         and found.block is not None
         and payload_hash(found.text) == found.block.content_hash
     )
-    if untouched:
-        commit = _remove(root, found, uid, msg)
+    protection = _protection(knowledge_root, found, uid)
+    if untouched and protection is None:
+        commit = _remove(root, found, uid, msg, knowledge_root=knowledge_root)
         row = _record(
             cache_dir, msg, target_store_id, location,
             disposition=DISPOSITION_ACCEPTED, now=now,
@@ -357,12 +364,20 @@ def apply_retract(
         return Outcome(APPLIED, None, None, row, uid, commit)
 
     folded = found.folded_into
+    reason = "folded" if found.tombstone else "edited"
+    if untouched:
+        reason = "protected"
     question = (
         "The origin withdrew a page that was raised to this store, and the copy here "
         + (
             f"was folded into another page ({folded}); the copy is now a tombstone. "
             if found.tombstone
-            else "was edited after it was accepted. "
+            else (
+                f"is protected from removal by the relevance policy ({protection}); "
+                "it was not removed. "
+                if untouched
+                else "was edited after it was accepted. "
+            )
         )
         + "Remove the copy, or keep it as this store's own page? Kept, it is no longer "
         "watched and later messages about it are ignored."
@@ -375,7 +390,7 @@ def apply_retract(
         mounts=mounts,
         asserter=asserter,
         detail={
-            "reason": "folded" if found.tombstone else "edited",
+            "reason": reason,
             "raise_id": msg.raise_id,
             "message_id": msg.message_id,
             "seq": msg.seq,
@@ -391,14 +406,54 @@ def apply_retract(
     return Outcome(ASKED, None, decision, row, uid)
 
 
-def _remove(root: Path, found: _Found, uid: str, msg: RaiseMessage) -> str | None:
-    """Remove the copy with the retirement mechanics; the removal commit carries the line."""
+def _protection(knowledge_root: Path, found: _Found, uid: str) -> str | None:
+    """Why the relevance policy protects the copy from removal, or ``None`` (athenaeum#3152).
+
+    Asks the one shared helper (:func:`athenaeum.retire_pages.find_policy_protected`,
+    which delegates to :func:`athenaeum.relevance_policy.protecting_rule`). A retract
+    arrives unattended, so a protected copy is never removed by rule: it is
+    kept and a decision asks. An invalid policy fails closed the same way.
+    """
+    from athenaeum.relevance_policy import RelevancePolicyError
+
+    cand = RetireCandidate(uid=uid, path=found.path)
+    try:
+        hits = find_policy_protected(knowledge_root, [cand])
+    except RelevancePolicyError as exc:
+        return f"the relevance policy is invalid: {exc}"
+    if not hits:
+        return None
+    return describe_protection(*hits[0])
+
+
+def _remove(
+    root: Path,
+    found: _Found,
+    uid: str,
+    msg: RaiseMessage,
+    *,
+    knowledge_root: Path,
+    forced: bool = False,
+) -> str | None:
+    """Remove the copy with the retirement mechanics; the removal commit carries the line.
+
+    *forced* is an operator's explicit "remove" on a decision: a copy the relevance
+    policy protects is then removed and the override is recorded in the commit.
+    """
     assert msg.raise_id is not None and msg.seq is not None
+    cand = RetireCandidate(uid=uid, path=found.path)
+    overridden: list[tuple[RetireCandidate, Any]] = []
+    if forced:
+        try:
+            overridden = find_policy_protected(knowledge_root, [cand])
+        except Exception:  # an invalid policy: the operator's answer still stands
+            overridden = []
     report = apply_retirement(
         root,
-        [RetireCandidate(uid=uid, path=found.path)],
+        [cand],
         reason="raised page withdrawn at its origin",
         trailer=commit_line(msg.raise_id, msg.seq),
+        forced_protected=overridden or None,
     )
     if report.errors or not report.committed:
         # Nothing is recorded: the message is read again and the removal retried.
@@ -535,7 +590,9 @@ def answer_retract(
             disposition="kept",
         )
         return Outcome(IGNORED, _REASON_KEPT, None, row, uid, commit)
-    commit = _remove(root, found, uid, msg)
+    # An operator answering "remove" on a protected copy is the explicit override
+    # (the counterpart of ``retire-pages --force-retire``): it is recorded in the commit.
+    commit = _remove(root, found, uid, msg, knowledge_root=knowledge_root, forced=True)
     row = _record(
         cache_dir, msg, target_store_id, location, disposition=DISPOSITION_ACCEPTED, now=now
     )
