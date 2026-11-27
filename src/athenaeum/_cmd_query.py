@@ -436,6 +436,13 @@ def cmd_recall(args: argparse.Namespace) -> int:
         return 1
 
     cfg = load_config(knowledge_root)
+    # athenaeum#3170: ordinary recall keeps running on undeclared vault data
+    # and says so on stderr (configuration only; no file access).
+    from athenaeum.storage import undeclared_vault_mappings, undeclared_vault_summary
+
+    _undeclared = undeclared_vault_mappings(cfg)
+    if _undeclared:
+        print(f"warning: {undeclared_vault_summary(_undeclared)}", file=sys.stderr)
     # Issue athenaeum#2458: resolved through `resolve_search_backend` (yaml >
     # shipped default) so every recall surface answers on the same backend.
     backend_name = args.backend or resolve_search_backend(cfg)

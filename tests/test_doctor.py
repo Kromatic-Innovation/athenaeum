@@ -189,6 +189,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "merge_rejected_with_targets",
         "removed_config_keys",
         "unmarked_vault_locations",
+        "undeclared_vault_data",
         "storage_history",
         "multi_target_divergence",
         "raw_values_in_history",

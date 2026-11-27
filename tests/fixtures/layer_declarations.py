@@ -214,6 +214,9 @@ MODULE_LAYER: dict[str, int] = {
     # from pii's own writer call sites only through a function-local
     # import, so pii's own module-scope import set is unchanged).
     "pii_attribution": 3,
+    # Issue athenaeum#3170: undeclared vault data -- the record scan and the
+    # suggested rules (L3, over pii and storage).
+    "vault_declaration": 3,
     # Issue athenaeum#2184: the contact-record fold (L3, over pii) and the
     # repair that needs pending_merges' target resolver (L4).
     "contact_record_fold": 3,

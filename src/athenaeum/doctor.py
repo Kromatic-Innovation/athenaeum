@@ -1155,6 +1155,43 @@ def check_unmarked_vault_locations(config: dict) -> CheckResult:
     )
 
 
+def check_undeclared_vault_data(config: dict, knowledge_root: Path) -> CheckResult:
+    """FAIL when the installation holds vault data no rule declares (athenaeum#3170).
+
+    Both halves: a ``storage.mapping`` entry to a location outside the corpus
+    that no rule names, and any field held in such a location that no rule
+    covers (names and record counts only, never a value). A "fail" because
+    every writing command refuses to start until it is declared. An
+    installation with no location outside the corpus in use is "ok".
+    """
+    from athenaeum.storage import SUGGEST_ROUTES_COMMAND, StorageConfigError
+    from athenaeum.vault_declaration import undeclared_report
+
+    try:
+        report = undeclared_report(config, knowledge_root)
+    except StorageConfigError as exc:
+        return CheckResult("undeclared_vault_data", "skip", f"storage config invalid: {exc}")
+    if not report["undeclared"]:
+        return CheckResult(
+            "undeclared_vault_data", "ok", "every field held outside the corpus is declared"
+        )
+    parts = [
+        f"storage.mapping.{m['surface_class']} -> {m['location']} has no rule"
+        for m in report["mappings"]
+    ]
+    parts += [
+        f"{u['location']}: field {u['field']} on {u['records']} record(s) has no rule"
+        for u in report["uncovered_fields"]
+    ]
+    status: Status = "fail" if report["mappings"] else "warn"
+    return CheckResult(
+        "undeclared_vault_data",
+        status,
+        "undeclared vault data: " + "; ".join(parts),
+        fix=f"run `{SUGGEST_ROUTES_COMMAND}` and add the printed storage.routes entries",
+    )
+
+
 def check_storage_history(config: dict, knowledge_root: Path) -> CheckResult:
     """Report the declared ``storage.history`` and whether a repository backs it (athenaeum#3160).
 
@@ -1343,6 +1380,7 @@ def run_checks(
         check_merge_rejected_with_targets(knowledge_root / "wiki"),
         check_removed_config_keys(config),
         check_unmarked_vault_locations(config),
+        check_undeclared_vault_data(config, knowledge_root),
         check_storage_history(config, knowledge_root),
         check_multi_target_divergence(config, knowledge_root),
         check_raw_values_in_history(config, knowledge_root),

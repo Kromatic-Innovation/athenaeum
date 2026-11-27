@@ -5468,10 +5468,12 @@ CONTACT_DATA_FIELDS: tuple[str, ...] = BUILTIN_CONTACT_FIELDS
 
 
 #: Frontmatter keys on an excluded record that are BOOKKEEPING — the record's
-#: own machinery — and are therefore never reported as data fields by the
-#: denylist-complement default in :func:`resolve_excluded_fields` (issue
-#: athenaeum#883). Every one of these is written by this module about a record or
-#: about one of its values, not by an observer about the entity:
+#: own machinery — and are therefore never reported as data fields (issue
+#: athenaeum#883; since athenaeum#3170 by the undeclared-field scan in
+#: :mod:`athenaeum.vault_declaration`, and when the previous release's
+#: every-field default is reconstructed for a suggested rule). Every one of
+#: these is written by this module about a record or about one of its values,
+#: not by an observer about the entity:
 #: ``uid``/``type`` are the join and the class; ``pii`` is the flag; the rest
 #: are :func:`mark_bounced`'s and :func:`classify_contact_value`'s own marks.
 #:
@@ -5507,49 +5509,26 @@ def resolve_excluded_fields(
 ) -> tuple[str, ...]:
     """Which frontmatter fields on an excluded record are DATA, for *surface_class*.
 
-    The per-surface-class field policy that replaces the fixed
-    :data:`CONTACT_DATA_FIELDS` allowlist (issue athenaeum#883), resolved in this
-    order:
+    Only declared fields (athenaeum#3170): the operator's
+    ``storage.excluded_fields.<surface_class>`` list, or the fields a
+    ``storage.routes`` rule names (folded into the same table, read through
+    :func:`athenaeum.storage.configured_excluded_fields`). A class with no
+    declaration has no data fields and yields ``()``.
 
-    1. explicit operator config — ``storage.excluded_fields.<surface_class>``,
-       a list of frontmatter field names (see
-       :func:`athenaeum.config.resolve_excluded_fields_config`, read through
-       :func:`athenaeum.storage.configured_excluded_fields`);
-    2. surface class ``pii`` — the built-in default stays
-       :data:`CONTACT_DATA_FIELDS` VERBATIM, so a person read is byte-identical
-       to what it returned before this function existed;
-    3. any other surface class — every frontmatter field on the record MINUS
-       :data:`EXCLUDED_RECORD_BOOKKEEPING_FIELDS`.
+    There is no built-in list any more. Before athenaeum#3170 the ``pii`` class
+    fell back to :data:`BUILTIN_CONTACT_FIELDS` and any other class to every
+    field on the record minus :data:`EXCLUDED_RECORD_BOOKKEEPING_FIELDS`. An
+    installation that relied on either is now refused before it writes and on
+    a sensitive read (:func:`athenaeum.storage.undeclared_vault_mappings`), and
+    :mod:`athenaeum.vault_declaration` prints the rules that reproduce it.
 
-    **Why a denylist-complement and not an allowlist for the unknown class.**
-    An allowlist for a class nobody has enumerated makes the redaction marker
-    *dishonest by omission*: a field the allowlist forgot is reported neither
-    as a value nor as a marker, so "withheld" and "absent" collapse into the
-    same shape — precisely the failure :class:`RedactionMarker` exists to
-    prevent. A denylist-complement is honest by construction, and its failure
-    direction is only noise (a bookkeeping key surfaced as a field), never a
-    silent hole. Noise is visible and correctable; a hole is neither.
-
-    Rule 3 reads the record, so the returned tuple is per-record for an
-    unconfigured class — a record with no fields yields ``()``. Field order is
-    the record's own frontmatter order, which keeps a read's field iteration
-    stable for a given record. Rules 1 and 2 return the configured/built-in
-    order and ignore *record_meta* entirely.
+    *record_meta* is accepted for the call shape and no longer consulted.
     """
+    del record_meta
     from athenaeum.storage import configured_excluded_fields
 
     configured = configured_excluded_fields(config).get(surface_class)
-    if configured is not None:
-        return tuple(configured)
-    if surface_class == PII_ENTITY_CLASS:
-        return CONTACT_DATA_FIELDS
-    if not isinstance(record_meta, Mapping):
-        return ()
-    return tuple(
-        str(name)
-        for name in record_meta
-        if str(name) not in EXCLUDED_RECORD_BOOKKEEPING_FIELDS
-    )
+    return tuple(configured) if configured is not None else ()
 
 
 def _normalize_frontmatter_uid(raw: Any) -> str:
@@ -5928,7 +5907,17 @@ def assemble_excluded_read(
         ``(fields, redactions, classifications)`` — the three payload pieces
         of an :class:`EntityRead`, with the same four-cell semantics that type
         documents.
+
+    Raises:
+        athenaeum.storage.UndeclaredVaultDataError: *include_excluded* is set
+            and the installation has undeclared vault data (athenaeum#3170).
     """
+    if include_excluded:
+        # athenaeum#3170: with undeclared vault data a field the read was never
+        # told about cannot be told apart from an absent one, so refuse.
+        from athenaeum.storage import require_declared_for_sensitive_read
+
+        require_declared_for_sensitive_read(config)
     if not record_meta:
         return {}, (), {}
 
@@ -6700,7 +6689,17 @@ def read_entity(
         calls via the parameters above.** A caller that already HAS the page
         and its frontmatter — ``recall`` — should call
         :func:`assemble_excluded_read` directly and build no index at all.
+
+    Raises:
+        athenaeum.storage.UndeclaredVaultDataError: *include_excluded* is set
+            and the installation has undeclared vault data (athenaeum#3170).
     """
+    if include_excluded:
+        # athenaeum#3170: with undeclared vault data a field the read was never
+        # told about cannot be told apart from an absent one, so refuse.
+        from athenaeum.storage import require_declared_for_sensitive_read
+
+        require_declared_for_sensitive_read(config)
     if excluded_index is not None:
         record_path = excluded_index.by_uid(uid)
     else:
@@ -7198,7 +7197,16 @@ def read_entities(
     surface root and the records within it. A caller still never constructs a
     surface path — which is what made a batch entry point the right fix rather
     than exporting the index for callers to scan themselves.
+
+    Raises:
+        athenaeum.storage.UndeclaredVaultDataError: *include_excluded* is set
+            and the installation has undeclared vault data (athenaeum#3170),
+            on the first item.
     """
+    if include_excluded:
+        from athenaeum.storage import require_declared_for_sensitive_read
+
+        require_declared_for_sensitive_read(config)
     wanted_classes = frozenset(usage_classes) if usage_classes is not None else None
     entity_index: EntityIndex | None = None
     contact_records: Mapping[str, Path] = {}

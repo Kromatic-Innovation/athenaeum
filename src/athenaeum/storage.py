@@ -712,6 +712,112 @@ def configured_excluded_fields(config: dict[str, Any] | None) -> dict[str, tuple
 
 
 # ---------------------------------------------------------------------------
+# Undeclared vault data -- the configuration half (athenaeum#3170)
+# ---------------------------------------------------------------------------
+#
+# Nothing is private unless the operator declares it. Before athenaeum#3170 a
+# class mapped to a location outside the corpus got a field list it never
+# wrote: the four contact fields for ``pii``, every field on the record for
+# any other class. That default is gone, so an installation that relied on it
+# has records outside the corpus that no rule covers. This half needs no file
+# access and runs at load; the record scan is in :mod:`athenaeum.vault_declaration`.
+
+
+@dataclass(frozen=True)
+class UndeclaredMapping:
+    """A ``storage.mapping`` entry to a location outside the corpus that no rule names.
+
+    Attributes:
+        surface_class: The ``storage.mapping`` key (for example ``"pii"``).
+        location: The location (adapter name) it maps to.
+    """
+
+    surface_class: str
+    location: str
+
+
+class UndeclaredVaultDataError(RuntimeError):
+    """The installation holds data outside the corpus that no rule declares.
+
+    Raised by a command that writes pages or records before it writes
+    anything, and by a read that asks for sensitive values. The message says
+    what to declare; ``athenaeum storage status --suggest-routes`` prints the
+    same rules. *mappings* lists the configuration entries that triggered it.
+    """
+
+    def __init__(self, message: str, mappings: Sequence[UndeclaredMapping] = ()) -> None:
+        super().__init__(message)
+        self.mappings: tuple[UndeclaredMapping, ...] = tuple(mappings)
+
+
+def _locations_named_by_rules(config: dict[str, Any] | None) -> set[str]:
+    """Every location a ``storage.routes`` rule or a ``storage.excluded_fields`` list names."""
+    named: set[str] = set()
+    for route in configured_routes(config):
+        named.update(route.to)
+    mapping = resolve_storage_mapping(config)
+    for surface_class in resolve_excluded_fields_config(config):
+        location = mapping.get(surface_class)
+        if location:
+            named.add(location)
+    return named
+
+
+def undeclared_vault_mappings(config: dict[str, Any] | None) -> tuple[UndeclaredMapping, ...]:
+    """The ``storage.mapping`` entries whose data no rule declares (athenaeum#3170).
+
+    An entry counts when its location is outside the corpus (no corpus
+    capability), the class has no ``storage.excluded_fields`` list, and no
+    ``storage.routes`` rule or ``storage.excluded_fields`` list names the
+    location. Pure: reads *config* only. An installation with no location
+    outside the corpus in use returns ``()``. A mapping to an unknown location
+    is left to the check that already refuses it.
+    """
+    mapping = resolve_storage_mapping(config)
+    if not mapping:
+        return ()
+    adapters = available_adapters(config)
+    excluded_fields = resolve_excluded_fields_config(config)
+    named = _locations_named_by_rules(config)
+    found: list[UndeclaredMapping] = []
+    for surface_class, location in mapping.items():
+        adapter = adapters.get(location)
+        if adapter is None or adapter.corpus_policy.in_corpus:
+            continue
+        if surface_class in excluded_fields or location in named:
+            continue
+        found.append(UndeclaredMapping(str(surface_class), str(location)))
+    return tuple(found)
+
+
+#: The command that prints the rules a refusal names.
+SUGGEST_ROUTES_COMMAND = "athenaeum storage status --suggest-routes"
+
+
+def undeclared_vault_summary(mappings: Sequence[UndeclaredMapping]) -> str:
+    """One sentence naming *mappings*, for a read error or a report line."""
+    entries = ", ".join(f"storage.mapping.{m.surface_class} -> {m.location}" for m in mappings)
+    return (
+        f"undeclared vault data: {entries} sends records outside the corpus, but no "
+        "storage.routes rule says which fields are kept there (athenaeum no longer "
+        f"assumes a built-in list). Run `{SUGGEST_ROUTES_COMMAND}` for the rules that "
+        "keep the previous behaviour."
+    )
+
+
+def require_declared_for_sensitive_read(config: dict[str, Any] | None) -> None:
+    """Raise :class:`UndeclaredVaultDataError` when a sensitive read cannot be answered.
+
+    With undeclared vault data a read cannot tell a field it was never told
+    about from an absent one, so it refuses instead of reporting the field as
+    absent. Configuration only; no file access.
+    """
+    mappings = undeclared_vault_mappings(config)
+    if mappings:
+        raise UndeclaredVaultDataError(undeclared_vault_summary(mappings), mappings)
+
+
+# ---------------------------------------------------------------------------
 # storage.routes -- one rule per "this goes there" (athenaeum#3166)
 # ---------------------------------------------------------------------------
 #

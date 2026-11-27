@@ -156,6 +156,7 @@ from athenaeum.storage import (
     StorageConfigError,
     apply_to_targets,
     available_adapters,
+    configured_excluded_fields,
     discard_rule_for_field_any_type,
     is_excluded,
     note_discard,
@@ -238,8 +239,9 @@ def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | Non
     ``None`` when the key is absent or empty. The replacement is COMPLETE: an
     explicit ``storage.excluded_fields.<class>`` list replaces the built-in one
     (:func:`athenaeum.pii.resolve_excluded_fields`), so each class's list is
-    the fields it already carries (the built-in contact fields for ``pii``)
-    plus the fields the old key named for that class.
+    the fields it already carries (the contact fields the previous release
+    kept off the page for ``pii``) plus the fields the old key named for that
+    class.
     """
     is_set, entries = _removed_sensitive_fields_entries(config)
     if not is_set:
@@ -267,13 +269,22 @@ def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | Non
     lines.append("storage:")
     lines.append("  excluded_fields:")
     for cls, names in by_class.items():
-        complete = list(pii.resolve_excluded_fields(cls, config, None))
+        # athenaeum#3170: there is no built-in list any more, so the contact
+        # fields the previous release kept off the page for ``pii`` are named
+        # here explicitly rather than read back from the resolver.
+        configured = configured_excluded_fields(config).get(cls)
+        if configured is not None:
+            complete = list(configured)
+        elif cls == pii.PII_ENTITY_CLASS:
+            complete = list(pii.BUILTIN_CONTACT_FIELDS)
+        else:
+            complete = []
         complete.extend(n for n in names if n not in complete)
         lines.append(f"    {json.dumps(cls)}: [{', '.join(json.dumps(n) for n in complete)}]")
     lines.append("")
     lines.append(
-        "An explicit `storage.excluded_fields.<class>` list replaces the built-in one, so "
-        "each list above already includes the built-in contact fields "
+        "There is no built-in list of private fields, so "
+        "each list above already includes the contact fields "
         f"({', '.join(pii.BUILTIN_CONTACT_FIELDS)}) for `pii`."
     )
     outside = [c for c in by_class if not is_excluded(c, config)]
@@ -1945,7 +1956,7 @@ def process_correction_record(
             today=today,
         )
         try:
-            validate_wiki_meta(created_meta, declared_types=valid_types)
+            validate_wiki_meta(created_meta, declared_types=valid_types, config=config)
         except PydanticValidationError as exc:
             return _raised(
                 f"create violates schema for type {resolution.entity_type!r}: {exc}"
@@ -2531,6 +2542,7 @@ def process_correction_record(
         merged_read,
         declared_types=load_schema_list(index.wiki_root / "_schema", "types.md")
         or sorted(KNOWN_TYPES),
+        config=config,
     )
     atomic_write_text(
         entity_path, render_frontmatter(merged_read) + "\n" + existing_body

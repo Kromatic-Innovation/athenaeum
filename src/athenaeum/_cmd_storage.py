@@ -439,6 +439,15 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Emit the report as JSON; the warnings are in its `warnings` list.",
     )
+    status_p.add_argument(
+        "--suggest-routes",
+        action="store_true",
+        help=(
+            "Print the storage.routes entries that keep the previous behaviour for "
+            "undeclared vault data, and each location, field name and record count "
+            "no rule covers (no values). Never edits athenaeum.yaml."
+        ),
+    )
 
 
 def _cmd_storage_status(args: argparse.Namespace) -> int:
@@ -449,10 +458,17 @@ def _cmd_storage_status(args: argparse.Namespace) -> int:
     """
     import json
 
-    from athenaeum.storage_status import build_status, format_status
+    from athenaeum.storage_status import build_status, format_status, format_suggest_routes
 
     knowledge_root = _resolve_knowledge_root(args)
     status = build_status(load_config(knowledge_root), knowledge_root)
+    if getattr(args, "suggest_routes", False):
+        if getattr(args, "json", False):
+            sys.stdout.write(json.dumps(status["undeclared"], indent=2, sort_keys=True) + "\n")
+        else:
+            for line in format_suggest_routes(status):
+                print(line)
+        return 0
     if getattr(args, "json", False):
         sys.stdout.write(json.dumps(status, indent=2, sort_keys=True) + "\n")
     else:

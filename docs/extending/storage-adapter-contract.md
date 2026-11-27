@@ -151,26 +151,25 @@ nothing, never an error.
 
 An excluded record carries both data and its own bookkeeping (`uid`, `type`,
 `pii`, the bounce/classification marks). A read of that record has to know
-which is which. `storage.excluded_fields` names it explicitly per surface
-class; absent an entry, the default resolves in two branches:
+which is which. Only declared fields are data: the fields a `storage.routes`
+rule names for a page type, or a `storage.excluded_fields` list for a surface
+class. A class with no declaration has no data fields. There is no built-in
+list (athenaeum#3170).
 
-- **`pii`** keeps its built-in allowlist (`emails`, `phones`, `former_emails`,
-  `alt_emails`) verbatim, so a person read is byte-identical to what it was
-  before the read became class-generic.
-- **Any other class** defaults to *every frontmatter field on the record minus
-  a bookkeeping denylist* (`uid`, `type`, `pii`, `identifier`,
-  `identifier_validity`, `contact_classification`, `folded_into`, `source`,
-  `observed_at`, `valid_until`, `bounce_diagnostic`).
-
-The denylist-complement is deliberate for the unknown class. An allowlist for a
-class nobody has enumerated makes the redaction marker **dishonest by
-omission**: a field the allowlist forgot is reported neither as a value nor as a
-marker, so "withheld" and "absent" collapse into the same shape — precisely the
-failure the marker exists to prevent. The complement is honest by construction,
-and its failure direction is only noise (a bookkeeping key surfaced as a field),
-never a silent hole. An explicitly empty list is honoured literally as "this
-class has no data fields", which is a different statement from not configuring
-the class at all.
+Earlier releases supplied one: `emails`, `phones`, `former_emails` and
+`alt_emails` for `pii`, and every frontmatter field on the record minus the
+bookkeeping keys for any other class. An installation that relied on it has
+*undeclared vault data*: a `storage.mapping` entry to a location outside the
+corpus with no rule naming that location, or a record there holding a field
+no rule covers. With the first, every command that writes pages or records
+refuses to start, and a read that asks for sensitive values raises
+`athenaeum.storage.UndeclaredVaultDataError` rather than reporting the fields
+as absent. `athenaeum storage status --suggest-routes` prints the
+`storage.routes` entries that reproduce the previous behaviour, and lists each
+location, field name and record count no rule covers (no values). Ordinary
+recall, `athenaeum doctor` and `athenaeum storage status` keep running and
+report the condition. An explicitly empty `storage.excluded_fields` list is
+honoured literally as "this class has no data fields".
 
 ### Fail-closed policy defaults
 

@@ -2018,6 +2018,7 @@ Report each location, each route, what is discarded, the history setting, who ma
 |---|---|---|---|
 | `--json` | off (flag absent) | — | Emit the report as JSON; the warnings are in its `warnings` list. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
+| `--suggest-routes` | off (flag absent) | — | Print the storage.routes entries that keep the previous behaviour for undeclared vault data, and each location, field name and record count no rule covers (no values). Never edits athenaeum.yaml. |
 
 ## `athenaeum store`
 

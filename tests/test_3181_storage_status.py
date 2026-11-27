@@ -316,6 +316,7 @@ def test_json_output_is_complete(tmp_path: Path) -> None:
         "locations",
         "routes",
         "contact_fields",
+        "undeclared",
         "vaults",
         "raw_intake",
         "machine_access",

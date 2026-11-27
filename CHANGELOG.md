@@ -64,6 +64,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING:** athenaeum no longer assumes which fields are private (athenaeum#3170). A class mapped to a location outside the corpus used to get a field list nobody wrote: `emails`, `phones`, `former_emails` and `alt_emails` for the `pii` class, and every field on the record for any other class. Both defaults are gone: only fields a `storage.routes` rule or a `storage.excluded_fields` list names are kept off the page. An installation whose `storage.mapping` sends a class to such a location with no rule naming it now has undeclared vault data. `athenaeum run`, correction processing, the contact writers (`repair` of contact records and bounce marks, `attribution place`), `correct-notes` and `ingest-answers` refuse to start and write nothing. A read that asks for sensitive values raises `UndeclaredVaultDataError` instead of reporting the fields as absent. Ordinary recall, `athenaeum doctor` and `athenaeum storage status` keep running and report the condition. No record is moved, rewritten or deleted, and athenaeum never edits `athenaeum.yaml`. The inline-contact lint now warns about a frontmatter field only when a rule routes it off the page and the page still carries a value. **Upgrade step:** run `athenaeum storage status --suggest-routes` and add the printed `storage.routes` entries to `athenaeum.yaml`; they reproduce the previous behaviour exactly. For the usual `pii: excluded` mapping that is `- page_type: person`, `fields: [emails, phones, former_emails, alt_emails]`, `to: [excluded]`. Delete a field from the printed rule to keep it on the page from now on (values already stored stay in the location and the status command lists them), or move it to its own rule with `to: []` to stop storing it. The same command lists each location, field name and record count no rule covers, with no values. An installation with no location outside the corpus in use is unaffected.
+
 ## [0.31.0] - 2026-11-27
 
 **Summary.** 0.31.0 is about where athenaeum keeps sensitive values. A
