@@ -1401,63 +1401,22 @@ def decide_verdict(
 
 
 def _read_surface_record(surface_root: Path, uid: str) -> tuple[Path, dict[str, Any], str]:
-    """Resolve *uid*'s record on the sensitivity-routed surface (issue athenaeum#872).
+    """Resolve *uid*'s record on the sensitivity-routed surface (athenaeum#872).
 
-    Reached through :func:`athenaeum.pii.resolve_contact_record_for_uid` — the
-    SAME uid-keyed resolution :func:`athenaeum.pii.read_entity` uses — rather
-    than a bespoke ``{uid}.json`` path this router alone understood. That is
-    what makes a value this function's caller writes visible to
-    ``classify_contact_value``/``iter_contact_records``/``is_bounced`` by
-    construction, on whichever record shape the CONFIGURED surface actually
-    uses (markdown for the built-in excluded surface; whatever a storage
-    adapter's own shape is otherwise — see the module docstring's routing
-    section).
-
-    Returns ``(path, meta, body)``:
-
-    - an EXISTING ``.md`` record already carrying *uid*, parsed; or
-    - a **read-through** of a legacy ``{uid}.json`` record — the shape this
-      router minted before issue athenaeum#872 — when no ``.md`` record carries
-      this uid but that file exists. Its content is returned as *meta* so a
-      correction against a uid a pre-fix run already wrote merges onto that
-      data rather than starting over; *path* is still the canonical
-      ``{uid}.md`` location, so the very next write to this uid lands there,
-      upgrading the record to the canonical shape with no separate migration
-      script. The legacy file itself is left in place, untouched — read-through,
-      not delete-on-read;
-    - or a deterministic ``{uid}.md`` fallback path, with empty
-      ``meta``/``body``, when neither exists — the mint case, mirroring
-      :func:`athenaeum.pii.mark_bounced`'s own resolve-then-mint discipline
-      (deterministic naming keeps a second correction for the same uid
-      resolving to the record the first one just minted, rather than
-      re-scanning for a filename convention).
+    Delegates to :func:`athenaeum.pii.read_surface_record`, the one reader the
+    named-section writer (athenaeum#3179) shares; the name stays here because
+    the corrections path and its tests call it.
     """
     from athenaeum import pii
 
-    existing_path = pii.resolve_contact_record_for_uid(surface_root, uid)
-    if existing_path is not None:
-        meta, body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
-        return existing_path, (meta if isinstance(meta, dict) else {}), body
-
-    canonical_path = surface_root / f"{uid}.md"
-    legacy_path = surface_root / f"{uid}.json"
-    if legacy_path.exists():
-        try:
-            legacy_raw = json.loads(legacy_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            legacy_raw = None
-        if isinstance(legacy_raw, dict):
-            return canonical_path, legacy_raw, ""
-
-    return canonical_path, {}, ""
+    return pii.read_surface_record(surface_root, uid)
 
 
 def _write_surface_record(path: Path, record: dict[str, Any], *, body: str = "") -> None:
-    """Write *record* to *path* in the SAME markdown-frontmatter shape every
-    other writer on the excluded surface uses (issue athenaeum#872) — never a
-    parallel JSON shape only this router wrote."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, render_frontmatter(record) + "\n" + body)
+    """Write a surface record; delegates to :func:`athenaeum.pii.write_surface_record`."""
+    from athenaeum import pii
+
+    pii.write_surface_record(path, record, body=body)
 
 
 def _apply_usage_classification(
