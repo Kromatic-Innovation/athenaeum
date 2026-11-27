@@ -70,6 +70,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Fixed
 
+- Docs: the CLI reference's `athenaeum retire-pages` entry, in the command index and its own section, now opens with "Deprecated alias of `athenaeum retire`, removed in the next release" and links to that command instead of repeating its full description; a backticked command name in command help now renders as a link to that command's section (athenaeum#3212).
 - Docs: the security posture page now says the per-turn recall hook sends the previous user message and the end of the assistant's last reply (each capped at 1,500 characters, read from the session transcript) to the topic extractor model, that this is on by default, and that `ATHENAEUM_PUSH_CONTEXT_CARRYOVER=0` turns it off (athenaeum#3213).
 
 ## [0.31.0] - 2026-11-27
