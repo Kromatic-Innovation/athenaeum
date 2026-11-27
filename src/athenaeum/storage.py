@@ -2081,3 +2081,39 @@ def write_raw_intake(target_dir: Path, content: str) -> Path:
 
     atomic_write_text(filepath, content)
     return filepath
+
+
+def write_raw_intake_screened(
+    target_dir: Path,
+    content: str,
+    *,
+    config: dict[str, Any] | None,
+    knowledge_root: Path,
+    raw_ref: str | None = None,
+) -> Path:
+    """Screen *content*, then persist it as one raw-intake file (athenaeum#3175).
+
+    The entry point intake code uses for content that is not yet screened: any
+    value a ``storage.routes`` / ``sensitivity`` rule routes goes to its vault
+    first and the note carries a pointer; a discarded value is replaced by the
+    fixed marker (or the field is dropped). Only then is the raw note written
+    through :func:`write_raw_intake`. A failed vault write raises
+    :class:`athenaeum.sensitivity_routing.SensitivityRoutingError` and writes
+    nothing. *raw_ref* is a stable reference to the note (the same value on a
+    retry), used to derive the deterministic vault record ids.
+
+    With no rule that applies the bytes written are exactly those
+    :func:`write_raw_intake` would write. :func:`write_raw_intake` stays for
+    content that was already screened.
+    """
+    # sensitivity_routing imports this module at module scope and the import
+    # graph is pinned acyclic (tests/test_import_graph_acyclic.py), so it is
+    # resolved by name at call time, as :func:`_pii_policy` does for pii.
+    screen_intake_content = importlib.import_module(
+        "athenaeum.sensitivity_routing"
+    ).screen_intake_content
+
+    screened = screen_intake_content(
+        content, raw_ref=raw_ref, config=config, knowledge_root=knowledge_root
+    )
+    return write_raw_intake(target_dir, screened)
