@@ -495,6 +495,21 @@ def _find_env_var(info: _ResolverInfo, all_funcs: dict[str, ast.FunctionDef]) ->
     return None
 
 
+def _all_env_vars(info: _ResolverInfo, all_funcs: dict[str, ast.FunctionDef]) -> list[str]:
+    """Every distinct ``ATHENAEUM_*`` literal a resolver (and its ``_resolve*``
+    helpers) mentions, in first-seen order. A resolver's section names only
+    the first (:func:`_find_env_var`); this is the full set."""
+    names: list[str] = []
+    nodes = [info.node] + [
+        all_funcs[h] for h in _called_private_helpers(info.node) if h in all_funcs
+    ]
+    for node in nodes:
+        for name in _ENV_VAR_RE.findall(ast.unparse(node)):
+            if name not in names:
+                names.append(name)
+    return names
+
+
 class AmbiguousYamlKeyError(ValueError):
     """A resolver docstring cites backticked dotted keys but none is the
     resolver's own (issue athenaeum#2104)."""
@@ -820,11 +835,21 @@ def generate() -> str:
         covered_env_vars = {
             row["env_var"].strip("`") for row in rows if row["env_var"] != "—"
         }
+        # A resolver that reads several variables (e.g. a renamed knob plus
+        # its deprecated alias) gets a section naming only the first, so the
+        # appendix would list the sibling(s) but not the one the section
+        # names. List every variable of such a resolver in the appendix.
+        multi_var_resolvers = {
+            name
+            for r in resolvers
+            if len(names := _all_env_vars(r, all_funcs)) > 1
+            for name in names
+        }
         env_by_file = _scan_env_vars_in_tree(SRC_DIR)
         other_env_vars = {
             name: files
             for name, files in env_by_file.items()
-            if name not in covered_env_vars
+            if name not in covered_env_vars or name in multi_var_resolvers
         }
 
         return _render(groups, other_env_vars)
@@ -901,7 +926,9 @@ def _render(
             "from a `config.py` `resolve_*` function — either a resolver in a "
             "different module (e.g. `fingerprint.py`, `clusters.py`, "
             "`batch_state.py`), a per-knob model-routing variable, or a variable "
-            "read directly outside the resolver layer. Listed here (rather than "
+            "read directly outside the resolver layer. A resolver that reads more "
+            "than one variable (a knob and its deprecated alias) lists all of "
+            "them here, since its section names only one. Listed here (rather than "
             "omitted) so this page stays the complete answer to \"what "
             "`ATHENAEUM_*` variables exist\" — the same guarantee "
             "`scripts/check_env_docs.py` enforces in both directions."
