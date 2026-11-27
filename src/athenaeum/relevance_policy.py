@@ -62,8 +62,8 @@ dropped only when the last matching rule is ``never``; ``always`` is a prompt
 hint (a later slice) and exempts nothing here. ``always`` has a second effect,
 on removal (athenaeum#3152): :func:`protecting_rule` is the ONE helper every
 path that removes or proposes removing a page (``retire``,
-``decay-sweep``, the audit's retirement candidates, the raise ``retract``) asks "is this page protected,
-and by which rule", the analogue of :func:`gate_raw_content` for capture. The one exemption is the
+``decay-sweep``, the audit's retirement candidates, the raise ``retract``) asks
+"is this page protected, and by which rule", the analogue of :func:`gate_raw_content` for capture. The one exemption is the
 explicit-remember marker (``explicit_remember: true`` in the item's
 frontmatter, athenaeum#2646): a flagged fact is kept and reported in
 ``overrides`` instead of dropped.

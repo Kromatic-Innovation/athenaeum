@@ -440,13 +440,15 @@ def _remove(
     *forced* is an operator's explicit "remove" on a decision: a copy the relevance
     policy protects is then removed and the override is recorded in the commit.
     """
+    from athenaeum.relevance_policy import RelevancePolicyError
+
     assert msg.raise_id is not None and msg.seq is not None
     cand = RetireCandidate(uid=uid, path=found.path)
     overridden: list[tuple[RetireCandidate, Any]] = []
     if forced:
         try:
             overridden = find_policy_protected(knowledge_root, [cand])
-        except Exception:  # an invalid policy: the operator's answer still stands
+        except RelevancePolicyError:  # an invalid policy: the operator's answer stands
             overridden = []
     report = apply_retirement(
         root,
