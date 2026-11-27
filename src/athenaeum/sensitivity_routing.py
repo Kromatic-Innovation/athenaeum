@@ -643,6 +643,10 @@ def screen_intake_content(
             note_discard(discarded[k])
             continue
         if k in routed:
+            if isinstance(value, str) and _POINTER_RE.fullmatch(value.strip()):
+                # Already a pointer: screened before. Screening is idempotent.
+                new_meta[key] = value
+                continue
             new_meta[key] = _route_one_field(
                 raw_ref=raw_ref,
                 page_type=raw_type,
@@ -655,6 +659,41 @@ def screen_intake_content(
             continue
         new_meta[key] = value
     return render_frontmatter(new_meta) + "\n" + redacted_body
+
+
+def routed_classes_in(
+    content: str, *, config: dict[str, Any] | None
+) -> list[str]:
+    """Names of the classes a screen would act on in *content*, never a value (athenaeum#3178).
+
+    The free-text classes value routing would route or discard, and one
+    ``field_<type>`` name per declared field a ``storage.routes`` rule routes or
+    discards for the note's ``type``. Sorted, de-duplicated; ``[]`` when nothing
+    applies. For a reader that must say what a file holds without quoting it.
+    """
+    meta, body = parse_frontmatter(content)
+    found: set[str] = set()
+    raw_type = str(meta.get("type") or "").strip()
+    if raw_type:
+        try:
+            if not route_for(raw_type, config=config).discarded:
+                for key, value in meta.items():
+                    if isinstance(value, str) and _POINTER_RE.fullmatch(value.strip()):
+                        continue  # already a pointer
+                    decision = route_for(raw_type, str(key), config=config)
+                    if decision.rule is not None and (decision.discarded or decision.targets):
+                        found.add(_field_class_name(raw_type))
+        except StorageConfigError:
+            pass
+    try:
+        routing_cfg = resolve_sensitivity_routing(config)
+        if routing_cfg.get("enabled", False):
+            for m in classify(text=body, frontmatter=meta, config=config):
+                if _class_action(m.sensitivity_class, routing_cfg) == "route":
+                    found.add(m.sensitivity_class)
+    except (ValueError, SensitivityConfigError):
+        pass
+    return sorted(found)
 
 
 def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -> str:

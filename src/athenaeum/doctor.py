@@ -1273,6 +1273,36 @@ def check_multi_target_divergence(config: dict, knowledge_root: Path) -> CheckRe
     )
 
 
+def check_raw_values_in_history(config: dict, knowledge_root: Path) -> CheckResult:
+    """WARN listing committed raw files that hold a routed or discarded value (athenaeum#3178).
+
+    By path and class only, never a value, so an operator can see what history
+    holds. Reads each tracked raw file as committed at ``HEAD``; a value that an
+    earlier commit held and a later one removed is not listed. Read-only.
+    """
+    from athenaeum.raw_screening import committed_raw_with_values, rules_configured
+
+    if not rules_configured(config):
+        return CheckResult(
+            "raw_values_in_history", "ok", "no routing or discard rule is configured"
+        )
+    found = committed_raw_with_values(config, knowledge_root)
+    if not found:
+        return CheckResult(
+            "raw_values_in_history",
+            "ok",
+            "no committed raw file holds a routed or discarded value",
+        )
+    listing = "; ".join(f"{path} ({', '.join(classes)})" for path, classes in found)
+    return CheckResult(
+        "raw_values_in_history",
+        "warn",
+        f"{len(found)} committed raw file(s) hold a routed or discarded value: {listing}",
+        fix="a value already committed stays in history; screening a file does not rewrite "
+        "commits that hold it",
+    )
+
+
 def run_checks(
     knowledge_root: Path,
     *,
@@ -1315,6 +1345,7 @@ def run_checks(
         check_unmarked_vault_locations(config),
         check_storage_history(config, knowledge_root),
         check_multi_target_divergence(config, knowledge_root),
+        check_raw_values_in_history(config, knowledge_root),
     ]
 
 

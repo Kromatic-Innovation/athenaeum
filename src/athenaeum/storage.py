@@ -1601,7 +1601,12 @@ def open_store(
     # surface_repo, ...) that the ``Store`` protocol does not carry. A
     # registered implementation reaches them only if it provides the same
     # attributes; narrowing callers to the protocol is a separate change.
-    return cast(FilesystemStore, _store_factory_for(available_adapters(config))(spec))
+    store = cast(FilesystemStore, _store_factory_for(available_adapters(config))(spec))
+    # athenaeum#3178: with a routing or discard rule configured and
+    # librarian.hold_unscreened_raw on, whole-directory commits leave unscreened
+    # raw files out. Resolved by name at call time (raw_screening imports this module).
+    importlib.import_module("athenaeum.raw_screening").install_raw_hold(config, knowledge_root)
+    return store
 
 
 def _store_factory_for(adapters: Mapping[str, StorageAdapter]) -> StoreFactory:

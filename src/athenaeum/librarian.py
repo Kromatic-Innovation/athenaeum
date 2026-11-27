@@ -96,6 +96,7 @@ from athenaeum import (
     batch_state,
     pii_attribution,
     push_state,
+    raw_screening,
     spend,
     sync_integrate,
     sync_lease,
@@ -152,6 +153,7 @@ from athenaeum.config import (
     resolve_extra_intake_roots,
     resolve_full_compile_every_days,
     resolve_heartbeat_interval,
+    resolve_hold_unscreened_raw,
     resolve_intake_runtime_floor,
     resolve_model_rates,
     resolve_owner_bridge_memory_types,
@@ -6237,6 +6239,8 @@ class RunContext:
     # --- per-phase profiling / summary state ------------------------------
     run_profile: list[tuple[str, float, dict]] = field(default_factory=list)
     summary_emitted: bool = False
+    # athenaeum#3178: the screening phase's report (``None`` until it ran).
+    raw_screen: "raw_screening.RawScreenReport | None" = None
 
     # --- entity-phase accumulators (issue athenaeum#461: shared with auto-memory) --
     total_created: int = 0
@@ -6782,6 +6786,16 @@ class RunContext:
                 self.run_profile.append(("discard", 0.0, {"reason": "completed", **_discards}))
         except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
             log.debug("run-summary: discard counters skipped: %s", exc)
+        # athenaeum#3178: the raw-intake screening phase. Counts and paths only; with
+        # the hold off, each raw file left unscreened (and so committed as it is) is
+        # named. Omitted when no routing or discard rule is configured.
+        try:
+            if self.raw_screen is not None and self.raw_screen.active:
+                self.run_profile.append(
+                    ("raw-screen", 0.0, self.raw_screen.profile_fields())
+                )
+        except Exception as exc:  # noqa: BLE001 — pragma: no cover - defensive
+            log.debug("run-summary: raw screening report skipped: %s", exc)
         # athenaeum#3174: pages written per vault -- vault names and counts only,
         # never a title or body; omitted when no page went to a vault.
         try:
@@ -7597,6 +7611,87 @@ def _resolve_run_config(ctx: RunContext) -> int | None:
     return None
 
 
+def _rekey_content_records(wiki_root: Path, rewrites: "list[raw_screening.RawRewrite]") -> None:
+    """Carry records keyed on a raw file's content across a screening rewrite (athenaeum#3178).
+
+    The stuck-file ledger, the bound-violation ledger and the never-ingest
+    holdout ledger each store a hash of the file's content (or, for the byte
+    bound, of its size and mtime). A rewrite changes both, which would read as a
+    new file and reset a failure count; each entry that matched the old content
+    is moved to the new one. Nothing else about an entry changes.
+    """
+    from types import SimpleNamespace
+
+    if not rewrites:
+        return
+
+    def _fp_hash(fingerprint: str) -> str:
+        return hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:16]
+
+    stuck = _load_stuck_ledger(wiki_root)
+    quarantine = _load_quarantine_candidates(wiki_root)
+    holdouts = _load_never_ingest_holdouts(wiki_root)
+    changed = {"stuck": False, "quarantine": False, "holdout": False}
+    for rw in rewrites:
+        old_hash = _stuck_content_hash(SimpleNamespace(content=rw.old_text))
+        new_hash = _stuck_content_hash(SimpleNamespace(content=rw.new_text))
+        for name, ledger, hashes in (
+            ("stuck", stuck, {old_hash: new_hash}),
+            ("holdout", holdouts, {old_hash: new_hash}),
+            (
+                "quarantine",
+                quarantine,
+                {
+                    old_hash: new_hash,
+                    _fp_hash(rw.old_fingerprint): _fp_hash(rw.new_fingerprint),
+                },
+            ),
+        ):
+            entry = ledger.get(rw.ref)
+            if isinstance(entry, dict) and entry.get("hash") in hashes:
+                entry["hash"] = hashes[entry["hash"]]
+                changed[name] = True
+    if changed["stuck"]:
+        _write_stuck_ledger(wiki_root, stuck)
+    if changed["quarantine"]:
+        _write_quarantine_candidates(wiki_root, quarantine)
+    if changed["holdout"]:
+        _write_never_ingest_holdouts(wiki_root, holdouts)
+
+
+def _run_raw_screen_phase(ctx: RunContext) -> None:
+    """Screen raw intake first in the run, and arm the hold (athenaeum#3178).
+
+    Runs before the first commit of the run, the snapshot a sync takes before it
+    integrates included. With no routing or discard rule configured it does
+    nothing at all, so every commit is what it was. A dry run reads and writes
+    nothing. A failure of the phase itself never stops the run: with the hold on,
+    whatever it did not mark screened stays out of every commit.
+    """
+    config = ctx.config
+    if ctx.dry_run:
+        return
+    raw_screening.install_raw_hold(config, ctx.knowledge_root)
+    if not raw_screening.rules_configured(config):
+        return
+    raw_screening.emit_hold_messages(config, ctx.knowledge_root)
+    try:
+        report = raw_screening.screen_raw_intake(ctx.knowledge_root, config)
+        ctx.raw_screen = report
+        _rekey_content_records(ctx.wiki_root, report.rewritten)
+    except Exception as exc:  # noqa: BLE001 - the run goes on; the hold keeps values out
+        log.warning("raw screening: the phase failed (%s)", type(exc).__name__)
+        return
+    if report.rewritten or report.unscreened:
+        log.info(
+            "raw screening: %d file(s) screened, %d rewritten, %d not screened%s",
+            report.screened,
+            len(report.rewritten),
+            len(report.unscreened),
+            " (held out of commits)" if report.hold_on else " (staged as they are)",
+        )
+
+
 def _run_git_vcs_io(ctx: RunContext) -> None:
     """Pre-run VCS I/O: optional ``git pull --ff-only``, then capture
     ``head_at_start``. Issue athenaeum#399/#284 seam.
@@ -7609,6 +7704,9 @@ def _run_git_vcs_io(ctx: RunContext) -> None:
     # opt-in to a concrete bool (athenaeum#546: narrows the ``bool | None`` field to
     # ``bool`` — a true post-resolution invariant, never fires for a valid run).
     assert ctx.pull_before_run is not None
+    # athenaeum#3178: screen raw intake before anything can commit, the snapshot a
+    # sync takes first included.
+    _run_raw_screen_phase(ctx)
     # Issue athenaeum#399: pull before capturing HEAD so (a) the run starts from
     # origin's latest and (b) head_at_start reflects the post-pull state, so
     # the existing post-run push (issue athenaeum#284) only pushes commits THIS run
@@ -9983,6 +10081,17 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.deferred_refs = outcome.deferred_refs
                     # Issue athenaeum#1144 AC5.
                     ctx.in_flight_refs = outcome.in_flight_refs
+                    # athenaeum#3178: raws the batch finished release their hold.
+                    _unfinished = (
+                        set(outcome.failed_refs)
+                        | set(outcome.deferred_refs)
+                        | set(outcome.in_flight_refs)
+                    )
+                    for _raw in ctx.raw_files:
+                        if _raw.ref not in _unfinished:
+                            raw_screening.mark_processed(
+                                ctx.knowledge_root, ctx.config, _raw.path
+                            )
                 else:
                     # Issue athenaeum#663: the persistent stuck-file ledger for this
                     # phase. A raw file that has failed the same content on
@@ -10789,6 +10898,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 )
                                 ctx.total_drops += 1
                             ctx.processed_count += 1
+                            # athenaeum#3178: a raw that could not be screened
+                            # without being processed is released by it.
+                            if not ctx.dry_run:
+                                raw_screening.mark_processed(
+                                    ctx.knowledge_root, ctx.config, raw.path
+                                )
                             # Issue athenaeum#1295: per-source twin of
                             # `processed_count` above, read back once the loop
                             # ends to compute `stalled_sources` (pending
@@ -13033,6 +13148,13 @@ def run(
         refuse_unrouted_value_classes(ctx.config)
     except SensitivityRoutingError as exc:
         log.error("sensitivity routing: %s", exc)
+        return 1
+
+    # athenaeum#3178: a non-boolean librarian.hold_unscreened_raw is a configuration error.
+    try:
+        resolve_hold_unscreened_raw(ctx.config)
+    except StorageConfigError as exc:
+        log.error("%s", exc)
         return 1
 
     # Issue athenaeum#2933 / athenaeum#2988: resolve the owner's declared store
