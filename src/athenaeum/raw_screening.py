@@ -479,7 +479,8 @@ def unscreened_raw_files(
     knowledge_root = Path(knowledge_root)
     ledger = _load_ledger(raw_screen_ledger_path(knowledge_root, cache_dir))
     found: list[str] = []
-    for path in _iter_raw_files(knowledge_root, _out_of_scope_sources(config)):
+    prefixes = _prefixes(knowledge_root)
+    for path in _iter_raw_files(knowledge_root, _out_of_scope_sources(config), prefixes):
         rel = path.relative_to(knowledge_root).as_posix()
         try:
             digest = _sha(path.read_bytes())
