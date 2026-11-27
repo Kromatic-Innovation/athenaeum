@@ -327,6 +327,72 @@ def test_ac5_removing_an_edited_copy_on_the_answer_carries_the_commit_line(
     ] == ["removed"]
 
 
+# athenaeum#3152 -- a retract is a removal path: an ``always`` rule protects the copy --
+
+
+def _protect_copies(env: RetractEnv, rule_line: str = "| always | principle | policy | |") -> None:
+    schema = env.kr / "wiki" / "_schema"
+    schema.mkdir(parents=True, exist_ok=True)
+    (schema / "types.md").write_text("| Type |\n|---|\n| principle |\n")
+    (schema / "tags.md").write_text("| Tag |\n|---|\n| policy |\n")
+    (schema / "relevance-policy.md").write_text(
+        "| Verdict | Type | Tag | Subject |\n|---|---|---|---|\n" + rule_line + "\n"
+    )
+
+
+def test_retract_consults_the_shared_helper(
+    env: RetractEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[Any] = []
+
+    def fake(knowledge_root: Path, candidates: list[Any], config: Any = None) -> list[Any]:
+        seen.append((knowledge_root, [c.uid for c in candidates]))
+        return []
+
+    monkeypatch.setattr(rr, "find_policy_protected", fake)
+    assert env.retract().status == rr.APPLIED
+    assert seen == [(env.kr, [derived_uid(TARGET, RID)])]
+
+
+def test_retract_keeps_a_policy_protected_copy_and_asks(env: RetractEnv) -> None:
+    _protect_copies(env)
+    head = env.subjects()
+    out = env.retract()
+    assert out.status == "asked" and out.decision
+    assert not env.gone()
+    assert env.subjects() == head  # nothing removed, nothing committed
+    assert env.kinds() == [rr.DECISION_KIND_RETRACT]
+    assert out.decision["detail"]["reason"] == "protected"
+    assert "protected by rule 1" in out.decision["question"]
+
+
+def test_retract_without_a_policy_removes_as_before(env: RetractEnv) -> None:
+    assert not (env.kr / "wiki" / "_schema" / "relevance-policy.md").exists()
+    assert env.retract().status == rr.APPLIED and env.gone()
+
+
+def test_retract_ignores_a_rule_that_does_not_match_the_copy(env: RetractEnv) -> None:
+    _protect_copies(env, "| always | principle | other | |")
+    (env.kr / "wiki" / "_schema" / "tags.md").write_text("| Tag |\n|---|\n| other |\n")
+    assert env.retract().status == rr.APPLIED and env.gone()
+
+
+def test_retract_answered_remove_overrides_protection_and_records_it(env: RetractEnv) -> None:
+    _protect_copies(env)
+    out = env.retract()
+    done = rr.answer_retract(
+        env.kr, target_store_id=TARGET, target_root=env.root, cache_dir=env.cache,
+        decision_id=out.decision["id"], keep=False,  # type: ignore[index]
+    )
+    assert done.status == rr.APPLIED and env.gone()
+    msg = subprocess.run(
+        ["git", "-C", str(env.root), "log", "-1", "--format=%B", done.commit],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "Forced past relevance-policy protection" in msg
+    assert "protected by rule 1" in msg
+
+
 def test_ac5_an_answer_needs_a_pending_retract_decision(env: RetractEnv) -> None:
     _edit_projected(env)
     out = env.retract()

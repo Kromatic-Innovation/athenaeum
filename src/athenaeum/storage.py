@@ -1330,6 +1330,29 @@ def surface_root_for_class(
     return resolve_adapter_for_class(entity_class, config).resolve_root(knowledge_root)
 
 
+def location_for_class(entity_class: str | None, config: dict[str, Any] | None) -> str:
+    """The name of the storage location *entity_class* is held in (athenaeum#3176)."""
+    return resolve_adapter_for_class(entity_class, config).name
+
+
+def surface_read_permitted(
+    check: Callable[[str], bool] | None,
+    surface_class: str,
+    config: dict[str, Any] | None,
+) -> bool:
+    """Whether a sensitive read of *surface_class*'s excluded record may open it.
+
+    *check* is a per-vault predicate (a location name in, a boolean out) a
+    served process supplies for the request it is answering; ``None`` -- a local
+    stdio server and the command line -- means the sensitive-read flag alone
+    decides. A surface class that is not outside the corpus has no vault, so
+    nothing is asked. The check is made before the record is looked up.
+    """
+    if check is None or not is_excluded(surface_class, config):
+        return True
+    return check(location_for_class(surface_class, config))
+
+
 class SurfaceNotIndexedError(StorageConfigError):
     """A compile write was routed to a surface that is not indexed (athenaeum#2618).
 
@@ -1601,7 +1624,12 @@ def open_store(
     # surface_repo, ...) that the ``Store`` protocol does not carry. A
     # registered implementation reaches them only if it provides the same
     # attributes; narrowing callers to the protocol is a separate change.
-    return cast(FilesystemStore, _store_factory_for(available_adapters(config))(spec))
+    store = cast(FilesystemStore, _store_factory_for(available_adapters(config))(spec))
+    # athenaeum#3178: with a routing or discard rule configured and
+    # librarian.hold_unscreened_raw on, whole-directory commits leave unscreened
+    # raw files out. Resolved by name at call time (raw_screening imports this module).
+    importlib.import_module("athenaeum.raw_screening").install_raw_hold(config, knowledge_root)
+    return store
 
 
 def _store_factory_for(adapters: Mapping[str, StorageAdapter]) -> StoreFactory:

@@ -129,8 +129,8 @@ python scripts/gen_cli_reference.py
 - [`athenaeum registry`](#athenaeum-registry) (command) — : compile the source-handle registry.json (entity uid → handle set) from wiki entity frontmatter. Deterministic, no LLM; emits a well-formed registry even when no handles are populated yet.
 - [`athenaeum reindex`](#athenaeum-reindex) (command) — Rebuild the search index (FTS5 or vector, per config). --incremental (default) applies only the hash-diff delta; --full rebuilds from scratch. The incremental delta is keyed off each file's whole-content hash, not off how its frontmatter is parsed, so a page whose on-disk text has not changed since it was last indexed is hash-matched and skipped even after a parser fix lands -- an index built before the block-list aliases:/tags: parser fix (commit 324bb3c4) keeps stale, empty aliases/tags columns for any page an --incremental run does not otherwise touch. Only --full re-parses every page from scratch and refills them. To check the result, run `SELECT COUNT(*) FROM wiki WHERE aliases != ''` against cache-dir/wiki-index.db (swap in tags for the other column). The vector backend disables onnxruntime's telemetry client at import, before it can start its background worker thread, to prevent a shutdown-time crash in that thread.
 - [`athenaeum relate`](#athenaeum-relate) (command) — Set or remove the parent/child page relation by hand. `--child <uid> --parent <uid>` attaches it (via: manual); `--child <uid> --detach` removes it. Runs under the run lock; exits 75 while another process holds it.
-- [`athenaeum relevance-policy`](#athenaeum-relevance-policy) (group) — List the effective relevance-policy rules (always/never capture rules from wiki/_schema/relevance-policy.md) in evaluation order, last match wins. Read-only.
-- [`athenaeum relevance-policy report`](#athenaeum-relevance-policy-report) (command) — List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only).
+- [`athenaeum relevance-policy`](#athenaeum-relevance-policy) (group) — List the effective relevance-policy rules (always/never capture rules from wiki/_schema/relevance-policy.md) in evaluation order, last match wins. An `always` rule also protects matching pages from retire, decay-sweep and audit retirement candidates. Read-only.
+- [`athenaeum relevance-policy report`](#athenaeum-relevance-policy-report) (command) — List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only) and how many live pages each `always` rule protects from retirement.
 - [`athenaeum repair`](#athenaeum-repair) (command) — Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum reresolve-questions`](#athenaeum-reresolve-questions) (command) — Re-resolve open proposal-less pending questions (self-heal transient cap/offline escalations)
 - [`athenaeum retire`](#athenaeum-retire) (command) — Retire information by uid, in whichever store holds it: a wiki page, a contact record or an off-corpus record. Only what the caller can access is retired: a uid on a store the caller cannot read reads as unknown, and one on a store the caller cannot write is refused by name. Default is dry-run; --apply takes a provenance snapshot commit, removes, reindexes and records --reason. Unknown, ambiguous or refused uids abort the whole run before any write. Recovery is git-only: a retired page's or contact record's content lives in the provenance-snapshot commit (HEAD~1 immediately after that store's archive commit) — run `git show <that-commit-sha>:<path>` to recover it, or `git log --diff-filter=D -- <path>` first if you need to find the commit. an off-corpus record is erased, not archived: that store keeps no history, so it cannot be recovered.
@@ -151,6 +151,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum storage lint-pii`](#athenaeum-storage-lint-pii) (command) — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - [`athenaeum storage migrate-pii`](#athenaeum-storage-migrate-pii) (command) — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
 - [`athenaeum storage move-type`](#athenaeum-storage-move-type) (command) — Move every wiki page of one entity type into a configured, indexed surface that lives in its own git repository. Dry-run by default (lists the pages and any link that would break the store-link rule); --apply snapshots both repositories, moves the pages and commits each; --undo restores both repositories.
+- [`athenaeum storage status`](#athenaeum-storage-status) (command) — Report how this installation keeps raw intake out of history: the hold notice, the hold-off warning and the raw-intake-in-git-tree warning. Read-only.
 - [`athenaeum store`](#athenaeum-store) (group) — Store access: 'store access check' compares each declared store's rights with local config and this install's last fetch and push. Read-only.
 - [`athenaeum store-link-lint`](#athenaeum-store-link-lint) (command) — Read-only: list every link from a page to a page on a more private store (lower visibility rank). A link to a more shared store is fine.
 - [`athenaeum store access`](#athenaeum-store-access) (group) — Access to declared stores.
@@ -1689,7 +1690,7 @@ Set or remove the parent/child page relation by hand. `--child <uid> --parent <u
 
 ## `athenaeum relevance-policy`
 
-List the effective relevance-policy rules (always/never capture rules from wiki/_schema/relevance-policy.md) in evaluation order, last match wins. Read-only.
+List the effective relevance-policy rules (always/never capture rules from wiki/_schema/relevance-policy.md) in evaluation order, last match wins. An `always` rule also protects matching pages from retire, decay-sweep and audit retirement candidates. Read-only.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
@@ -1698,11 +1699,11 @@ List the effective relevance-policy rules (always/never capture rules from wiki/
 
 Subcommands:
 
-- `athenaeum relevance-policy report` — List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only).
+- `athenaeum relevance-policy report` — List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only) and how many live pages each `always` rule protects from retirement.
 
 ## `athenaeum relevance-policy report`
 
-List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only).
+List existing wiki pages that match each `never` rule (read-only; a new `never` rule applies forward only) and how many live pages each `always` rule protects from retirement.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
@@ -1753,7 +1754,7 @@ Retire information by uid, in whichever store holds it: a wiki page, a contact r
 | `--backend` | — | fts5, vector | Override the recall index backend for the rebuild (default: read from athenaeum.yaml). --apply only. |
 | `--cache-dir` | — | — | Cache directory for the recall index rebuild, the persisted contact-record index and the off-corpus index shards (default: ~/.cache/athenaeum). --apply only. |
 | `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--force-retire` | off (flag absent) | — | Override a retirement guard: allow retiring the contact records of a uid whose page is live (they would otherwise be its only contact records). The override is recorded in the archive commit message. |
+| `--force-retire` | off (flag absent) | — | Override a retirement guard: retire pages a relevance-policy `always` rule protects, or the contact records of a uid whose page is live (they would otherwise be its only contact records). The override is recorded in the archive commit message, and a policy override also in wiki/_relevance_policy_audit.jsonl. |
 | `--pageless` | off (flag absent) | — | Select every contact record `athenaeum contact-surface-lint` reports as page-less (no live page and no merge record). Prints, per uid, the record count, each value masked, whether the value also lives on a live record, and the commit that added the record; --apply retires the selection. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--reason` | — | — | Why this information is being retired. Recorded verbatim in the archive commit messages, every withdrawn pending-merge proposal's archive note, and the off-corpus retirement ledger (--apply only). |
@@ -1770,7 +1771,7 @@ Retire information by uid, in whichever store holds it: a wiki page, a contact r
 | `--backend` | — | fts5, vector | Override the recall index backend for the rebuild (default: read from athenaeum.yaml). --apply only. |
 | `--cache-dir` | — | — | Cache directory for the recall index rebuild, the persisted contact-record index and the off-corpus index shards (default: ~/.cache/athenaeum). --apply only. |
 | `--force` | off (flag absent) | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--force-retire` | off (flag absent) | — | Override a retirement guard: allow retiring the contact records of a uid whose page is live (they would otherwise be its only contact records). The override is recorded in the archive commit message. |
+| `--force-retire` | off (flag absent) | — | Override a retirement guard: retire pages a relevance-policy `always` rule protects, or the contact records of a uid whose page is live (they would otherwise be its only contact records). The override is recorded in the archive commit message, and a policy override also in wiki/_relevance_policy_audit.jsonl. |
 | `--pageless` | off (flag absent) | — | Select every contact record `athenaeum contact-surface-lint` reports as page-less (no live page and no merge record). Prints, per uid, the record count, each value masked, whether the value also lives on a live record, and the commit that added the record; --apply retires the selection. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--reason` | — | — | Why this information is being retired. Recorded verbatim in the archive commit messages, every withdrawn pending-merge proposal's archive note, and the off-corpus retirement ledger (--apply only). |
@@ -1952,6 +1953,7 @@ Subcommands:
 - `athenaeum storage lint-pii` — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - `athenaeum storage migrate-pii` — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
 - `athenaeum storage move-type` — Move every wiki page of one entity type into a configured, indexed surface that lives in its own git repository. Dry-run by default (lists the pages and any link that would break the store-link rule); --apply snapshots both repositories, moves the pages and commits each; --undo restores both repositories.
+- `athenaeum storage status` — Report how this installation keeps raw intake out of history: the hold notice, the hold-off warning and the raw-intake-in-git-tree warning. Read-only.
 
 ## `athenaeum storage lint-mapping`
 
@@ -2007,6 +2009,14 @@ Move every wiki page of one entity type into a configured, indexed surface that 
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 | `--to` | — | — | Target surface: a storage.adapters name (embedded: true, own git repo). |
 | `--undo` | — | — | Undo a previous --apply: RECORD is the record id --apply printed (found in the cache dir) or the path of its JSON file. Restores both repositories to their pre-move snapshots. |
+
+## `athenaeum storage status`
+
+Report how this installation keeps raw intake out of history: the hold notice, the hold-off warning and the raw-intake-in-git-tree warning. Read-only.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 
 ## `athenaeum store`
 

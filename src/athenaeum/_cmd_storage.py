@@ -420,9 +420,41 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Emit machine-readable JSON findings instead of plain text.",
     )
 
+    status_p = s_sub.add_parser(
+        "status",
+        help=(
+            "Report how this installation keeps raw intake out of history: the hold "
+            "notice, the hold-off warning and the raw-intake-in-git-tree warning "
+            "(athenaeum#3178). Read-only."
+        ),
+    )
+    status_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge root (default: ~/knowledge).",
+    )
+
+
+def _cmd_storage_status(args: argparse.Namespace) -> int:
+    """Print the hold messages (:func:`athenaeum.raw_screening.hold_messages`), read-only."""
+    from athenaeum.raw_screening import hold_messages
+
+    knowledge_root = _resolve_knowledge_root(args)
+    config = load_config(knowledge_root)
+    messages = hold_messages(config, knowledge_root)
+    if not messages:
+        print("No routing or discard rule is configured: no raw file is held.")
+        return 0
+    for message in messages:
+        print(message.text)
+    return 0
+
 
 def cmd_storage(args: argparse.Namespace) -> int:
     sub = getattr(args, "storage_target", None)
+    if sub == "status":
+        return _cmd_storage_status(args)
     if sub == "migrate-pii":
         return _cmd_storage_migrate_pii(args)
     if sub == "lint-pii":
@@ -432,7 +464,7 @@ def cmd_storage(args: argparse.Namespace) -> int:
     if sub == "move-type":
         return _cmd_storage_move_type(args)
     print(
-        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping,move-type} [...]",
+        "usage: athenaeum storage {migrate-pii,lint-pii,lint-mapping,move-type,status} [...]",
         file=sys.stderr,
     )
     return 2

@@ -178,6 +178,10 @@ class RetirePlan:
     unresolved: list[UidResolutionError] = field(default_factory=list)
     refused: list[TargetRefusal] = field(default_factory=list)
     pageless: list[PagelessRecordSummary] = field(default_factory=list)
+    #: ``(uid, rule)`` for each page a relevance-policy ``always`` rule
+    #: protects that ``--force-retire`` overrode (athenaeum#3152). Recorded in
+    #: the archive commit and the relevance-policy audit ledger on apply.
+    forced_protected: list[tuple[str, Any]] = field(default_factory=list)
     #: Problems that stop the run before any write but name no one target
     #: (an off-corpus misconfiguration, a missing contacts surface for
     #: ``--pageless``).
@@ -513,7 +517,44 @@ def plan_retirement(
     ]
     for target in plan.targets:
         plan.refused.extend(_refusals(target, stores, force=force))
+    _check_policy_protection(knowledge_root, plan, config, force=force)
     return plan
+
+
+def _check_policy_protection(
+    knowledge_root: Path, plan: RetirePlan, config: dict[str, Any] | None, *, force: bool
+) -> None:
+    """Refuse (or, under *force*, record) each page an ``always`` rule protects.
+
+    The one shared decision is :func:`athenaeum.relevance_policy.protecting_rule`,
+    reached through :func:`athenaeum.retire_pages.find_policy_protected`
+    (athenaeum#3152). An invalid policy file fails closed: the run is blocked.
+    """
+    from athenaeum.relevance_policy import RelevancePolicyError
+    from athenaeum.retire_pages import find_policy_protected
+
+    pages = [
+        RetireCandidate(uid=t.uid, path=t.paths[0]) for t in plan.targets if t.store == STORE_PAGE
+    ]
+    if not pages:
+        return
+    try:
+        protected = find_policy_protected(knowledge_root, pages, config)
+    except RelevancePolicyError as exc:
+        plan.errors.append(f"relevance policy is invalid, so protection cannot be checked: {exc}")
+        return
+    for cand, rule in protected:
+        if force:
+            plan.forced_protected.append((cand.uid, rule))
+        else:
+            plan.refused.append(
+                TargetRefusal(
+                    cand.uid,
+                    STORE_PAGE,
+                    f"protected by relevance-policy rule {rule.number} (line {rule.line}): "
+                    f"{rule.describe()}; pass --force-retire to retire it anyway",
+                )
+            )
 
 
 def _record_values(meta: dict[str, Any]) -> list[str]:
@@ -639,7 +680,11 @@ def apply_plan(
 
     pages = _page_candidates(plan)
     if pages:
-        page_report = apply_retirement(knowledge_root, pages, reason=reason, config=config)
+        rules = dict(plan.forced_protected)
+        forced = [(c, rules[c.uid]) for c in pages if c.uid in rules]
+        page_report = apply_retirement(
+            knowledge_root, pages, reason=reason, config=config, forced_protected=forced or None
+        )
         report.pages = page_report
         report.errors.extend(page_report.errors)
         report.committed = report.committed or page_report.committed

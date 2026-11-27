@@ -105,6 +105,7 @@ MODULE_LAYER: dict[str, int] = {
     "store_decisions": 2,  # issue athenaeum#2934: per-store decision queue; imports L1, L2
     "store_reviews": 2,  # issue athenaeum#2992: reviews block state; imports L1, L2
     "identity_provider": 3,  # issue athenaeum#3171: request -> principal; imports L2, L1, L0
+    "vault_read_gate": 4,  # issue athenaeum#3176: per-vault read check; imports L3, L1
     "access": 3,  # issue athenaeum#3167: can(); imports store_rights, config (L2)
     "store_rights": 2,  # issue athenaeum#2933: directory adapter + rights; imports L1, L2
     "store_intake": 2,  # issue athenaeum#2936: pure intake accept check
@@ -167,6 +168,7 @@ MODULE_LAYER: dict[str, int] = {
     "recovery_yield": 2,
     "run_summary_log": 2,
     "stuck_ledger": 2,
+    "raw_screening": 4,
     "transcript_receipts": 2,
     "verdicts": 2,
     "wiki_write_guard": 2,

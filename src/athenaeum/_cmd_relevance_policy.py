@@ -46,6 +46,7 @@ def cmd_relevance_policy_report(args: argparse.Namespace) -> int:
     from athenaeum.relevance_policy import (
         RelevancePolicyError,
         load_relevance_policy,
+        report_always_matches,
         report_never_matches,
     )
 
@@ -56,23 +57,51 @@ def cmd_relevance_policy_report(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     matches = report_never_matches(policy, wiki_root)
+    protected = report_always_matches(policy, wiki_root)
     if args.json:
-        sys.stdout.write(json.dumps({"matches": [m.to_dict() for m in matches]}) + "\n")
+        counts: dict[int, int] = {}
+        for p in protected:
+            counts[p.rule.number] = counts.get(p.rule.number, 0) + 1
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "matches": [m.to_dict() for m in matches],
+                    "protected": [p.to_dict() for p in protected],
+                    "protected_counts": {str(k): v for k, v in sorted(counts.items())},
+                }
+            )
+            + "\n"
+        )
         return 0
     if not matches:
         sys.stdout.write("No existing pages match a `never` rule.\n")
-        return 0
-    sys.stdout.write(
-        f"{len(matches)} existing page(s) match a `never` rule "
-        "(report only; nothing was changed):\n"
-    )
+    else:
+        sys.stdout.write(
+            f"{len(matches)} existing page(s) match a `never` rule "
+            "(report only; nothing was changed):\n"
+        )
+        _write_by_rule(matches)
+    if not protected:
+        sys.stdout.write("No existing pages are protected by an `always` rule.\n")
+    else:
+        sys.stdout.write(
+            f"\n{len(protected)} existing page(s) are protected from retirement by an "
+            "`always` rule:\n"
+        )
+        _write_by_rule(protected)
+    return 0
+
+
+def _write_by_rule(matches: list) -> None:
     current = None
     for m in matches:
         if m.rule.number != current:
             current = m.rule.number
-            sys.stdout.write(f"\nrule {m.rule.number} (line {m.rule.line}): {m.rule.describe()}\n")
+            n = sum(1 for x in matches if x.rule.number == current)
+            sys.stdout.write(
+                f"\nrule {m.rule.number} (line {m.rule.line}): {m.rule.describe()} - {n} page(s)\n"
+            )
         sys.stdout.write(f"  {m.path}\n")
-    return 0
 
 
 def add_relevance_policy_subparser(subparsers: argparse._SubParsersAction) -> None:
@@ -81,7 +110,9 @@ def add_relevance_policy_subparser(subparsers: argparse._SubParsersAction) -> No
         "relevance-policy",
         help="List the effective relevance-policy rules (always/never capture "
         "rules from wiki/_schema/relevance-policy.md) in evaluation order, "
-        "last match wins (issue athenaeum#2643). Read-only.",
+        "last match wins (issue athenaeum#2643). An `always` rule also protects "
+        "matching pages from retire, decay-sweep and audit retirement "
+        "candidates (athenaeum#3152). Read-only.",
     )
     parser.add_argument(
         "--path",
@@ -99,7 +130,8 @@ def add_relevance_policy_subparser(subparsers: argparse._SubParsersAction) -> No
     report = sub.add_parser(
         "report",
         help="List existing wiki pages that match each `never` rule "
-        "(read-only; a new `never` rule applies forward only).",
+        "(read-only; a new `never` rule applies forward only) and how many "
+        "live pages each `always` rule protects from retirement.",
     )
     report.add_argument(
         "--path",

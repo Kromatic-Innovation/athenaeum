@@ -197,6 +197,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -643,6 +644,10 @@ def screen_intake_content(
             note_discard(discarded[k])
             continue
         if k in routed:
+            if isinstance(value, str) and _POINTER_RE.fullmatch(value.strip()):
+                # Already a pointer: screened before. Screening is idempotent.
+                new_meta[key] = value
+                continue
             new_meta[key] = _route_one_field(
                 raw_ref=raw_ref,
                 page_type=raw_type,
@@ -655,6 +660,41 @@ def screen_intake_content(
             continue
         new_meta[key] = value
     return render_frontmatter(new_meta) + "\n" + redacted_body
+
+
+def routed_classes_in(
+    content: str, *, config: dict[str, Any] | None
+) -> list[str]:
+    """Names of the classes a screen would act on in *content*, never a value (athenaeum#3178).
+
+    The free-text classes value routing would route or discard, and one
+    ``field_<type>`` name per declared field a ``storage.routes`` rule routes or
+    discards for the note's ``type``. Sorted, de-duplicated; ``[]`` when nothing
+    applies. For a reader that must say what a file holds without quoting it.
+    """
+    meta, body = parse_frontmatter(content)
+    found: set[str] = set()
+    raw_type = str(meta.get("type") or "").strip()
+    if raw_type:
+        try:
+            if not route_for(raw_type, config=config).discarded:
+                for key, value in meta.items():
+                    if isinstance(value, str) and _POINTER_RE.fullmatch(value.strip()):
+                        continue  # already a pointer
+                    decision = route_for(raw_type, str(key), config=config)
+                    if decision.rule is not None and (decision.discarded or decision.targets):
+                        found.add(_field_class_name(raw_type))
+        except StorageConfigError:
+            pass
+    try:
+        routing_cfg = resolve_sensitivity_routing(config)
+        if routing_cfg.get("enabled", False):
+            for m in classify(text=body, frontmatter=meta, config=config):
+                if _class_action(m.sensitivity_class, routing_cfg) == "route":
+                    found.add(m.sensitivity_class)
+    except (ValueError, SensitivityConfigError):
+        pass
+    return sorted(found)
 
 
 def _record_id_for(raw_ref: str, sensitivity_class: str, start: int, end: int) -> str:
@@ -942,6 +982,7 @@ def resolve_sensitive_record(
     knowledge_root: Path,
     *,
     caller_audience: set[str] | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> str | None:
     """Resolve a pointer's ``(sensitivity_class, record_id)`` back to its value.
 
@@ -1054,12 +1095,18 @@ def resolve_sensitive_record(
         if not is_page_authorized(policy_meta, caller_audience):
             return None
 
+        # athenaeum#3176: a served process asks whether this request's
+        # principal holds read on the record's vault, before the record is
+        # looked up. A refusal resolves to nothing, like every other failure.
         try:
-            vault_root = _vault_root_for_class(
+            targets = _vault_targets_for_class(
                 wanted_class, config, knowledge_root, for_read=True
             )
         except SensitivityRoutingError:
             return None
+        if vault_read_allowed is not None and not vault_read_allowed(targets[0][0]):
+            return None
+        vault_root = targets[0][1]
 
         vault_root_resolved = vault_root.resolve()
         record_path = (vault_root / f"{wanted_record_id}.md").resolve()
@@ -1112,6 +1159,7 @@ def resolve_pointers_in_text(
     knowledge_root: Path,
     *,
     caller_audience: set[str] | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> str:
     """Replace each resolvable pointer in *text* with its value (athenaeum#3163).
 
@@ -1129,6 +1177,7 @@ def resolve_pointers_in_text(
             config,
             knowledge_root,
             caller_audience=caller_audience,
+            vault_read_allowed=vault_read_allowed,
         )
         return match.group(0) if value is None else value
 

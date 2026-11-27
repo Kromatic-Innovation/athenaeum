@@ -59,7 +59,12 @@ deterministic pre-tier decision. ``librarian.process_one``,
 pipeline transports cannot drift. It reads only DECLARED metadata (frontmatter
 ``type`` / ``tags`` / ``uid``), never the body and never an LLM. A fact is
 dropped only when the last matching rule is ``never``; ``always`` is a prompt
-hint (a later slice) and exempts nothing here. The one exemption is the
+hint (a later slice) and exempts nothing here. ``always`` has a second effect,
+on removal (athenaeum#3152): :func:`protecting_rule` is the ONE helper every
+path that removes or proposes removing a page (``retire``,
+``decay-sweep``, the audit's retirement candidates, the raise ``retract``) asks
+"is this page protected, and by which rule", the analogue of
+:func:`gate_raw_content` for capture. The one exemption is the
 explicit-remember marker (``explicit_remember: true`` in the item's
 frontmatter, athenaeum#2646): a flagged fact is kept and reported in
 ``overrides`` instead of dropped.
@@ -94,6 +99,7 @@ from athenaeum.intake_decision import (
     CONFIDENCE_HIGH,
     Description,
     RuleLike,
+    always_rule,
     decide,
 )
 from athenaeum.models import load_schema_list, parse_frontmatter
@@ -244,8 +250,17 @@ class RelevancePolicy:
             "present": self.present,
             "hash": self.canonical_hash()[:8] if self.present else None,
             "semantics": "last-match-wins",
+            "removal_protection": REMOVAL_PROTECTION_NOTE,
             "rules": [r.to_dict() for r in self.rules],
         }
+
+
+#: Read-back sentence (CLI and MCP) for the second effect of ``always``.
+REMOVAL_PROTECTION_NOTE = (
+    "an `always` rule is also a capture hint AND protects every page it resolves to "
+    "from retirement: retire refuses it (unless --force-retire), decay-sweep skips it, "
+    "and the audit never lists it as a retirement candidate"
+)
 
 
 def _cell(raw: str) -> str | None:
@@ -401,6 +416,7 @@ def render_policy(policy: RelevancePolicy) -> str:
     ]
     for r in policy.rules:
         lines.append(f"  {r.number}. {r.describe()}")
+    lines.append(f"Note: {REMOVAL_PROTECTION_NOTE}.")
     return "\n".join(lines) + "\n"
 
 
@@ -754,4 +770,60 @@ def report_never_matches(policy: RelevancePolicy, wiki_root: Path) -> list[Never
         decision = decide(Description(type_, tuple(tags), uid), policy)
         if decision.capture == CAPTURE_DROP and decision.rule is not None:
             out.append(NeverMatch(path.name, decision.rule, type_, tuple(tags), uid))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Removal protection (athenaeum#3152)
+# ---------------------------------------------------------------------------
+
+
+def protecting_rule(
+    policy: RelevancePolicy | None, meta: "Mapping[str, object]"
+) -> RelevanceRule | None:
+    """The ``always`` rule that protects a page from removal, or ``None``.
+
+    THE shared decision for every removal path (``retire``,
+    ``decay-sweep``, the audit's retirement candidates): *meta* is the page's
+    frontmatter, matched exactly as capture matches a raw (declared ``type`` /
+    ``tags`` / ``uid`` via :func:`declared_facts`, last matching rule wins). A
+    page is protected only when the LAST matching ``always`` / ``never`` rule
+    is ``always``; a ``never`` exception after it unprotects the page. Pure: no
+    I/O. ``None`` or an empty policy protects nothing, so a deployment with no
+    policy file behaves exactly as before.
+    """
+    if policy is None or not policy.rules or not isinstance(meta, Mapping):
+        return None
+    type_, tags, uid = declared_facts(dict(meta))
+    rule = always_rule(policy, Description(type_, tuple(tags), uid))
+    return rule if isinstance(rule, RelevanceRule) else None
+
+
+class AlwaysMatch(NeverMatch):
+    """One existing wiki page an ``always`` rule protects from removal."""
+
+
+def report_always_matches(policy: RelevancePolicy, wiki_root: Path) -> list[AlwaysMatch]:
+    """Existing wiki pages :func:`protecting_rule` protects, one entry per page.
+
+    The ``always`` counterpart of :func:`report_never_matches`: read-only, same
+    page scan, so an operator sees how many live pages each ``always`` rule
+    protects from retirement.
+    """
+    if not policy.rules or not wiki_root.is_dir():
+        return []
+    out: list[AlwaysMatch] = []
+    for path in sorted(wiki_root.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        rule = protecting_rule(policy, meta)
+        if rule is not None:
+            type_, tags, uid = declared_facts(meta)
+            out.append(AlwaysMatch(path.name, rule, type_, tuple(tags), uid))
     return out
