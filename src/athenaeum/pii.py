@@ -6186,6 +6186,10 @@ def record_placement(
         index = entity_index_for_uid(knowledge_root / "wiki", subject)
         page_path = index.get_by_uid(subject)
         if page_path is None:
+            # A page of a type routed whole to a vault is in no index
+            # (athenaeum#3174); it is still exactly one entity.
+            page_path = vault_page_path(knowledge_root, config, subject)
+        if page_path is None:
             return unplaceable
         frontmatter, _ = parse_frontmatter(page_path.read_text(encoding="utf-8"))
         page_type = str(frontmatter.get("type") or "").strip()

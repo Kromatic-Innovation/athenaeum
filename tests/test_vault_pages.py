@@ -344,3 +344,15 @@ class TestLinkRule:
         wiki.mkdir()
         text = "---\nname: Main\nuid: m-1\nrelated:\n- uid: x\n---\n\nBody\n"
         assert admit_page_write(wiki, wiki / "m.md", text, config={}, source="test") is True
+
+
+def test_record_placement_places_a_record_about_a_vault_page_in_its_vault(
+    tmp_path: Path,
+) -> None:
+    # The page is in no index, but it is one entity: a record about it goes to
+    # the vault its type is routed to, never "unplaceable".
+    cfg = _cfg()
+    _compile(tmp_path, [_entity()], cfg)
+    got = pii.record_placement(tmp_path, cfg, "ref-0001")
+    assert (got.kind, got.targets) == ("vault", ("vault",))
+    assert pii.record_placement(tmp_path, cfg, "no-such-uid", field="x").kind == "unplaceable"
