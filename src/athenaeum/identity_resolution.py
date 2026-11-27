@@ -81,7 +81,7 @@ caller re-derives it.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -582,6 +582,7 @@ def _finish(
     excluded_index: ExcludedRecordIndex | None = None,
     entity_index: EntityIndex | None = None,
     cache_dir: Path | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> HandleResolution:
     """Turn a resolved/unresolved walk outcome into the full response (D5/D6).
 
@@ -627,6 +628,18 @@ def _finish(
     if storage_policy_configured(config) and not is_recallable(page_type, config):
         return _unresolved(handle, _Walk(kind="unresolvable", reason="no-match"), with_pii=with_pii)
 
+    # athenaeum#3176: a served process asks whether this request's principal
+    # holds read on the vault the page's record lives in, before the record is
+    # looked up for values. A refusal is the ``with_pii=False`` read.
+    if with_pii and vault_read_allowed is not None:
+        from athenaeum import pii as _pii
+        from athenaeum.storage import surface_read_permitted
+
+        if not surface_read_permitted(
+            vault_read_allowed, _pii.surface_class_for_page_class(page_type, config), config
+        ):
+            with_pii = False
+
     # D6 step 4 — only now does an excluded-surface lookup happen.
     contact_values, redactions = _assemble_contact_values(
         knowledge_root,
@@ -668,6 +681,7 @@ def resolve_handle_query(
     excluded_index: ExcludedRecordIndex | None = None,
     entity_index: EntityIndex | None = None,
     cache_dir: Path | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> HandleResolution | None:
     """The one entry point both ``recall`` implementations call (D7).
 
@@ -747,6 +761,15 @@ def resolve_handle_query(
     if email_handle is not None:
         from athenaeum import pii
 
+        # athenaeum#3176: the sensitive read of a served process is decided
+        # per vault BEFORE the contact surface's index is built or any record
+        # opened for values. A refusal is the ``with_pii=False`` read.
+        if with_pii and vault_read_allowed is not None:
+            from athenaeum.storage import surface_read_permitted
+
+            if not surface_read_permitted(vault_read_allowed, pii.PII_ENTITY_CLASS, config):
+                with_pii = False
+
         if excluded_index is None:
             # One index for the whole call: the email walk and the contact
             # value join read the same surface in the same read-only window,
@@ -785,6 +808,7 @@ def resolve_handle_query(
             excluded_index=excluded_index,
             entity_index=entity_index,
             cache_dir=cache_dir,
+            vault_read_allowed=vault_read_allowed,
         )
 
     stripped = _strip_interrogative_framing(query)
@@ -811,6 +835,7 @@ def resolve_handle_query(
         excluded_index=excluded_index,
         entity_index=entity_index,
         cache_dir=cache_dir,
+        vault_read_allowed=vault_read_allowed,
     )
 
 
