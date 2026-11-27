@@ -10,6 +10,7 @@ comparison does not pass through ``storage.route_for``.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ from athenaeum import pii
 from athenaeum.corrections import process_correction_record
 from athenaeum.models import EntityIndex, parse_frontmatter
 from athenaeum.sensitivity_routing import SensitivityRoutingError, _vault_root_for_class
-from athenaeum.storage import EXCLUDED, StorageConfigError, UndeclaredVaultDataError
+from athenaeum.storage import EXCLUDED, StorageConfigError
 
 UID = "person-alex"
 
@@ -92,7 +93,7 @@ def test_read_path_join_is_unchanged(tmp_path: Path, name: str) -> None:
     if name in UNDECLARED_READ_CONFIGS:
         # athenaeum#3170: a sensitive read of an off-corpus mapping that no rule
         # declares is refused rather than answered from a built-in field list.
-        with pytest.raises(UndeclaredVaultDataError):
+        with pytest.raises(importlib.import_module("athenaeum.storage").UndeclaredVaultDataError):
             pii.read_entity(root, cfg, UID, surface_class=surface, include_excluded=True)
         return
     read = pii.read_entity(root, cfg, UID, surface_class=surface, include_excluded=True)

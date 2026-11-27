@@ -33,7 +33,13 @@ from athenaeum.storage_migrate import (
     plan_pii_migration,
 )
 
-EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}}}
+# athenaeum#3170: nothing is private unless declared; these fixtures declare
+# the contact fields the previous release kept off the page.
+_CONTACT_FIELDS = ["emails", "phones", "former_emails", "alt_emails"]
+_DECLARED_YAML = "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n"
+EXCLUDED_CONFIG = {
+    "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CONTACT_FIELDS}}
+}
 
 
 def _write_entity_page(
@@ -72,7 +78,7 @@ def _seed_knowledge_root(tmp_path: Path, *, mapped: bool = True) -> Path:
     (root / "wiki").mkdir(parents=True)
     if mapped:
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
     _write_entity_page(root / "wiki")
     return root
@@ -570,7 +576,8 @@ class TestAttributionSeamWiring:
         root = _seed_knowledge_root(tmp_path)
         (root / "athenaeum.yaml").write_text(
             "storage:\n  mapping:\n    pii: excluded\n"
-            "librarian:\n  attribution:\n    mode: enforce\n",
+            + _DECLARED_YAML
+            + "librarian:\n  attribution:\n    mode: enforce\n",
             encoding="utf-8",
         )
         page = root / "wiki" / "jane.md"
@@ -612,7 +619,8 @@ class TestAttributionSeamWiring:
         root = _seed_knowledge_root(tmp_path)
         (root / "athenaeum.yaml").write_text(
             "storage:\n  mapping:\n    pii: excluded\n"
-            "librarian:\n  attribution:\n    mode: observe\n",
+            + _DECLARED_YAML
+            + "librarian:\n  attribution:\n    mode: observe\n",
             encoding="utf-8",
         )
         page = root / "wiki" / "jane.md"
@@ -689,7 +697,7 @@ def _seed_bulk_root(tmp_path: Path, *, mapped: bool = True, n_dirty: int = 3) ->
     (root / "wiki").mkdir(parents=True)
     if mapped:
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
     for i in range(n_dirty):
         _write_entity_page(root / "wiki", filename=f"person{i}.md")
@@ -1322,7 +1330,7 @@ class TestBulkSurfacesNameIsEmailPopulation:
             "Contact-only.",
         )
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
 
         rc = main(["storage", "migrate-pii", "--path", str(root), "--all"])
@@ -1347,7 +1355,7 @@ def _seed_indexable_root(tmp_path: Path) -> Path:
     root = tmp_path / "knowledge"
     (root / "wiki").mkdir(parents=True)
     (root / "athenaeum.yaml").write_text(
-        "storage:\n  mapping:\n    pii: excluded\nsearch_backend: fts5\n",
+        "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML + "search_backend: fts5\n",
         encoding="utf-8",
     )
     # A distinctive local-part in aliases: (an INDEXED fts5 column) so a MATCH
@@ -1693,7 +1701,7 @@ class TestMigratePiiCliRenameNameEmail:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         _write_name_email_page(
             root / "wiki", "jane.doe-at-acme.md", uid="c1", email="jane.doe@acme.example"
@@ -1733,7 +1741,7 @@ class TestMigratePiiCliRenameNameEmail:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         _write_name_email_page(
             root / "wiki", "jane.doe-at-acme.md", uid="c3", email="jane.doe@acme.example"
@@ -1763,7 +1771,7 @@ class TestRenameSliceScopingAndRenameOnly:
     def _seed(root: Path) -> None:
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         # A renameable name-is-an-email page.
         _write_name_email_page(
@@ -1817,7 +1825,7 @@ class TestRenameSliceScopingAndRenameOnly:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         # One page that is BOTH name-is-an-email AND carries a body address.
         page = _write_name_email_page(
@@ -1996,7 +2004,7 @@ class TestLintPiiCleanAfterRename:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         _write_name_email_page(
             root / "wiki", "jane.doe-at-acme.md", uid="d1", email="jane.doe@acme.example"
@@ -2417,7 +2425,7 @@ class TestMigratePiiCliAllowlist:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         page = _write_page(
             root / "wiki",
@@ -2474,7 +2482,7 @@ class TestMigratePiiCliAllowlist:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         page = _write_page(
             root / "wiki",
@@ -2514,7 +2522,7 @@ class TestMigratePiiCliAllowlist:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         page = _write_page(
             root / "wiki",
@@ -2535,7 +2543,7 @@ class TestMigratePiiCliAllowlist:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         page = _write_page(
             root / "wiki",
@@ -2574,7 +2582,7 @@ class TestMigratePiiCliAllowlist:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         page = _write_page(
             root / "wiki",
@@ -2597,7 +2605,7 @@ class TestMigratePiiCliAllowlist:
         root = tmp_path / "knowledge"
         root.mkdir(parents=True, exist_ok=True)
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n" + _DECLARED_YAML, encoding="utf-8"
         )
         _write_page(
             root / "wiki",

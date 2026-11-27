@@ -543,6 +543,12 @@ def _cmd_storage_move_type(args: argparse.Namespace) -> int:
             return 2
         plan = storage_move.plan_move(config, knowledge_root, args.entity_type, args.to_surface)
         if args.apply:
+            # athenaeum#3170: a move rewrites pages; refuse undeclared vault data.
+            from athenaeum.vault_declaration import refuse_if_undeclared
+
+            refused = refuse_if_undeclared(config, knowledge_root)
+            if refused is not None:
+                return refused
             return _apply_move_plan(plan, config, knowledge_root, cache_dir)
     except storage_move.MoveRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -938,6 +944,13 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
 
     config = load_config(knowledge_root)
     wiki_root = knowledge_root / "wiki"
+    # athenaeum#3170: an apply writes records and pages; refuse undeclared vault data.
+    if args.apply:
+        from athenaeum.vault_declaration import refuse_if_undeclared
+
+        refused = refuse_if_undeclared(config, knowledge_root)
+        if refused is not None:
+            return refused
 
     # issue athenaeum#1275: consult the adjudicated allowlist BEFORE planning
     # anything, so a value the operator has already ruled is not PII is never
@@ -1076,6 +1089,13 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     knowledge_root = _resolve_knowledge_root(args)
     wiki_root = knowledge_root / "wiki"
     config = load_config(knowledge_root)
+    # athenaeum#3170: an apply writes records and pages; refuse undeclared vault data.
+    if args.apply:
+        from athenaeum.vault_declaration import refuse_if_undeclared
+
+        refused = refuse_if_undeclared(config, knowledge_root)
+        if refused is not None:
+            return refused
 
     # issue athenaeum#1275: same allowlist consultation as the single-page path —
     # see _load_migrate_pii_allowlist for the missing-vs-malformed distinction.

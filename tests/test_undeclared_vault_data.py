@@ -12,6 +12,7 @@ entries that reproduce the previous behaviour.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import warnings
 from pathlib import Path
@@ -27,7 +28,6 @@ from athenaeum.mcp_server import UNDECLARED_VAULT_NOTICE_KEY, _with_undeclared_v
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.storage import (
     UndeclaredMapping,
-    UndeclaredVaultDataError,
     require_declared_for_sensitive_read,
     route_for,
     undeclared_vault_mappings,
@@ -80,6 +80,15 @@ PREVIOUS_RELEASE_ROUTES = {
     "name": (),
     "notes_field": (),
 }
+
+
+def _undeclared_error() -> type[Exception]:
+    """The error class as the live ``athenaeum.storage`` defines it.
+
+    Resolved at call time: another test module reloads ``athenaeum.storage``,
+    which would leave a class imported at the top of this file stale.
+    """
+    return importlib.import_module("athenaeum.storage").UndeclaredVaultDataError
 
 
 def _write_config(root: Path, config: dict[str, Any]) -> None:
@@ -183,22 +192,24 @@ class TestConfigurationHalf:
 class TestSensitiveReadRaises:
     def test_read_entity_with_sensitive_values_raises(self, tmp_path: Path) -> None:
         root = _fixture(tmp_path)
-        with pytest.raises(UndeclaredVaultDataError) as info:
+        with pytest.raises(_undeclared_error()) as info:
             pii.read_entity(
                 root, OLD_PII_CONFIG, "person-ann", surface_class="pii", include_excluded=True
             )
-        assert info.value.mappings == (UndeclaredMapping("pii", "excluded"),)
+        assert [(m.surface_class, m.location) for m in info.value.mappings] == [
+            ("pii", "excluded")
+        ]
         assert "--suggest-routes" in str(info.value)
 
     def test_read_entities_and_assemble_raise(self, tmp_path: Path) -> None:
         root = _fixture(tmp_path)
-        with pytest.raises(UndeclaredVaultDataError):
+        with pytest.raises(_undeclared_error()):
             list(
                 pii.read_entities(
                     root, OLD_PII_CONFIG, ["person-ann"], surface_class="pii", include_excluded=True
                 )
             )
-        with pytest.raises(UndeclaredVaultDataError):
+        with pytest.raises(_undeclared_error()):
             pii.assemble_excluded_read(
                 root / "wiki" / "person-ann.md",
                 {"uid": "person-ann"},
@@ -245,6 +256,22 @@ WRITING_COMMANDS = [
     pytest.param(
         lambda r: ["repair", "--contact-records", "--apply", "--knowledge-root", r],
         id="contact-records",
+    ),
+    pytest.param(
+        lambda r: ["storage", "migrate-pii", "--all", "--apply", "--path", r],
+        id="migrate-pii-bulk",
+    ),
+    pytest.param(
+        lambda r: [
+            "storage",
+            "migrate-pii",
+            "--page",
+            str(Path(r) / "wiki" / "person-ann.md"),
+            "--apply",
+            "--path",
+            r,
+        ],
+        id="migrate-pii-single",
     ),
 ]
 
