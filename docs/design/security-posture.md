@@ -515,6 +515,50 @@ parameter, so a caller cannot choose who it is. The created server exposes
 `current_principal()` for the request being served. Providers for other
 protocols and group membership from a directory are out of scope.
 
+### 2.8 A read grant on the vault for a sensitive read (athenaeum#3176)
+
+The process ceiling (`serve.sensitive_reads`) is all-or-nothing: a served
+process returns sensitive values to every allowlisted caller or to none. On a
+server reached over the network (a resource server, `serve.auth.*`) a sensitive
+read now also asks the principal of the request, per vault.
+
+- **Order.** The ceiling applies first. With it off, no caller receives a value
+  and no grant is asked. With it on, a caller receives the values held in a
+  vault only when `access.can(principal, vault, "read")` is true for the
+  vault the value lives in. The check is made per vault, before the vault's
+  index is built or any record opened for values, so a caller with read on one
+  vault and not another receives the first vault's values only.
+- **Refusal.** A refused vault is the read that never asked for values:
+  `read_entity` returns the same payload as with the ceiling off (the same
+  markers and the same `sensitive_reads_withheld` key) and `recall` renders no
+  block for the hit and appends the same withheld notice. The two are equal, so
+  a caller cannot tell a missing grant from the ceiling. A request with no
+  principal holds nothing and receives markers. The caller's principal is read
+  from the verified request (section 2.7) and is not a tool parameter.
+- **Where it runs.** At the places a vault's values are read for a caller: the
+  excluded-field join of `recall`, the handle-shaped reverse lookup of
+  `recall`, the excluded read and vault-page read of `read_entity`, and the
+  routed-value pointers `read_entity` resolves in a page body.
+- **Audit.** The server's audit log gets one record per vault per sensitive
+  read: the principal's identity key, the vault and the outcome (`granted` or
+  `denied`), written before the read proceeds. It carries no value and no field
+  name. If the log cannot be written the call fails.
+- **Unchanged.** A local stdio server and the command line have no resource
+  server and no grant check: the sensitive-read flag alone decides.
+
+**Where this is a boundary.** For a caller with no file access to the host: a
+client of the served process can only reach a vault's values through the
+process, and the process refuses them without a grant.
+
+**Where it is not.** Any process running as the account that holds the vault
+can read the vault's files directly, so it is not a boundary against that
+account (the encryption at rest of section 2.6 is the measure for the stolen
+disk or backup, not for the running account). A refused read still reports a
+field as withheld with how many values are on file, as the ceiling does, so it
+opens the record to count them. Per-caller page audiences and write grants
+through the server are out of scope: `caller_audience`, the scopes and the
+owner-only tools cover those.
+
 ## 3. Dependency-upgrade policy
 
 This repo follows the Kromatic maintenance-posture playbook, with one critical adaptation: **the package's own upper-bound caps in `pyproject.toml` define what Dependabot can propose at all.** Auto-merge eligibility is layered on top of those caps.

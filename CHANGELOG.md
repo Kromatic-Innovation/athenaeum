@@ -82,6 +82,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Added
 
+- On a server reached over the network, a sensitive read returns a vault's values only to a principal that holds `read` on that vault (athenaeum#3176). The process ceiling `serve.sensitive_reads` still applies first, the check is per vault and runs before the vault is opened for values, and a caller with no principal or no grant receives the same redaction markers as with the ceiling off. The server's audit log records the principal, the vault and the outcome of each sensitive read and never a value. A local stdio server and the command line are unchanged. `docs/design/security-posture.md` states where this is a boundary and where it is not.
 - `pii.write_record_section` and `pii.delete_record_section` keep engine-written entries on an entity's vault record under a named section and a key (athenaeum#3179). A section name must be registered in `pii.RECORD_SECTIONS`; an unknown name is an error, and `athenaeum status` lists the registered names. The write is idempotent, goes to every target given or raises naming the one that failed, creates a record only in a location a `storage.routes` rule names, and never creates an entity or changes a page. `read_entity` returns the entries as `sections` with the inclusion flag and, without it, one redaction marker per section (`section_redactions`) that names the section and never a key or a payload. Erasing an entity removes its sections with the rest of its vault record, in every target. Section and key are logged; a payload never is. The corrections path's surface-record reader and writer now live in `pii` (`read_surface_record`, `write_surface_record`) and are shared with this one.
 - An `IdentityProvider` protocol turns a request into a principal (the identity key `access.can` takes), with two built-in providers: `local` returns the owner's key and `oidc` returns the key of an already-verified bearer token, matching `asserter_identity_key` for both the `(iss, sub)` and the Microsoft Entra tenant-scoped shapes and reading no role, group, audience or scope claim. `register_identity_provider` cannot shadow a built-in. A stdio server and the command line use `local`, the network server `oidc`, chosen at startup and never a tool parameter (athenaeum#3171).
 - `pii.record_placement(knowledge_root, config, subject_uid, *, field=None, texts=(), sensitive=False, retention_action=None)` answers where an engine-written record about an entity is kept: `ordinary`, `vault` (with targets), `nowhere` or `unplaceable` (athenaeum#3177). It applies the entity's own routes from `storage.route_for` to a field, the whole page type, and free text quoting a value the subject currently holds in a routed field (read through the entity read), and `sensitive=True` sends an otherwise ordinary record to the page type's primary vault. A retention action only tightens the answer. A caller given `nowhere` or `unplaceable` writes nothing and must not substitute a fallback. Text quoting another entity's routed value, or a discarded value, is not detected. No writer uses it yet.
@@ -181,6 +182,19 @@ without notice. From the release after 0.27.2 on, changes to it get their own
   prints a note, and is removed in the next one. The override for the
   command's own guards is `--force-retire`, because `--force` is the run-lock
   flag shared by every locking command.
+- A relevance-policy `always` rule now also protects the pages it matches from
+  removal, not only hints capture. `athenaeum retire` refuses the whole
+  run when a named uid is protected (naming each uid and the rule, writing
+  nothing); `--force-retire` overrides it and records the override in the retire
+  commit message and in `wiki/_relevance_policy_audit.jsonl`. `athenaeum
+  decay-sweep` skips protected pages and counts them. The audit never lists
+  them as retirement candidates and reports `protected by policy: N`. One
+  helper, `relevance_policy.protecting_rule`, decides for all three, and for the
+  raise `retract` that removes a raised copy: a protected copy is kept and a
+  decision asks; answering "remove" is the override, recorded in the removal commit.
+  `athenaeum relevance-policy report` and the `relevance_policy` MCP tool say
+  so, and the report counts the live pages each `always` rule protects. With no
+  policy file nothing changes (athenaeum#3152).
 - A decision answer that does not name the fingerprint of the item it
   answers is no longer applied on an authority-routed item (`confirmation`,
   `proposed-rule`, `auto-apply-threshold`, `dimension-proposal`,

@@ -67,6 +67,8 @@ AUDIT_FILENAME = "_relevance_policy_audit.jsonl"
 PROPOSALS_FILENAME = "_relevance_policy_edit_proposals.jsonl"
 
 OVERRIDE_KIND = "override"
+#: A removal command forced past an ``always`` rule's protection (athenaeum#3152).
+REMOVAL_OVERRIDE_KIND = "removal-override"
 PROPOSAL_KIND = "proposal"
 APPROVE_KIND = "approve"
 REJECT_KIND = "reject"
@@ -362,6 +364,37 @@ def record_override(
             "rule": _rule_dict_from(drop.rule),
             "rule_number": drop.rule.number,
             "rule_line": drop.rule.line,
+        }
+        append_line_durable(
+            audit_path(wiki_root),
+            (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"),
+        )
+    return len(overrides)
+
+
+def record_removal_override(
+    wiki_root: Path,
+    overrides: "Sequence[tuple[str, Any]]",
+    *,
+    command: str,
+    now: datetime | None = None,
+) -> int:
+    """Append one ``removal-override`` record per ``(uid, rule)`` forced past protection.
+
+    The audit trail for ``retire-pages --force`` (athenaeum#3152): names the
+    page uid, the ``always`` rule that protected it, the command and the time.
+    Raises ``OSError`` if the ledger is unwritable.
+    """
+    for uid, rule in overrides:
+        record = {
+            "v": LEDGER_VERSION,
+            "kind": REMOVAL_OVERRIDE_KIND,
+            "at": now_iso(now),
+            "command": command,
+            "uid": uid,
+            "rule": _rule_dict_from(rule),
+            "rule_number": rule.number,
+            "rule_line": rule.line,
         }
         append_line_durable(
             audit_path(wiki_root),
