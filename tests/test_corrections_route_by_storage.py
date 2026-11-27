@@ -267,3 +267,37 @@ def test_non_correction_command_shows_notice_and_keeps_running(
     found = removed_config_keys_in_file(tmp_path)
     assert [k for k, _ in found] == [OLD_KEY]
     assert "athenaeum#3162" in format_removed_key_notice(*found[0])
+
+
+def test_printed_replacement_for_a_self_named_class_loads(tmp_path: Path) -> None:
+    """A class named after its own page type gets a whole-page rule, not a clash.
+
+    `storage.mapping.vendor` plus a `vendor` field route would be refused as a
+    page type named twice, so the refusal prints the whole-page rule and says to
+    delete the mapping entry (athenaeum#3173).
+    """
+    from athenaeum.storage import configured_routes, route_for
+
+    old: dict[str, Any] = {
+        "librarian": {
+            "corrections": {"fields": _fields(), "sensitive_fields": {"iban": "vendor"}}
+        },
+        "storage": {"mapping": {"vendor": "excluded"}},
+    }
+    message = removed_sensitive_fields_message(old)
+    assert message is not None
+    assert "delete `storage.mapping.vendor`" in message
+    lines = message.splitlines()
+    start = lines.index("storage:")
+    end = lines.index("", start)
+    pasted = yaml.safe_load("\n".join(lines[start:end]))
+    cfg = copy.deepcopy(old)
+    del cfg["librarian"]["corrections"]["sensitive_fields"]
+    del cfg["storage"]["mapping"]["vendor"]
+    cfg["storage"].update(pasted["storage"])
+    routes = configured_routes(cfg)
+    assert {(r.page_type, r.fields) for r in routes} == {
+        ("vendor", None),
+        ("vendor", ("iban",)),
+    }
+    assert route_for("vendor", "iban", config=cfg).targets == ("excluded",)

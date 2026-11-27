@@ -231,3 +231,26 @@ def test_the_removed_resolvers_and_default_table_are_deleted() -> None:
     assert not hasattr(config, "resolve_excluded_read_mapping")
     assert not hasattr(pii, "DEFAULT_EXCLUDED_READ_MAPPING")
 
+
+
+# --- the write-time raw screen refuses too (athenaeum#3173) -------------------
+
+
+def test_the_write_time_raw_screen_refuses_and_writes_nothing(tmp_path: Path) -> None:
+    """A raw note must not be written unscreened while a removed key is set.
+
+    The previous release routed these fields off the note; swallowing the
+    refusal would write their values into raw intake instead.
+    """
+    from athenaeum.sensitivity_routing import screen_intake_content
+    from athenaeum.storage import RemovedRoutingKeysError, write_raw_intake_screened
+
+    root = tmp_path / "kb"
+    raw = root / "raw" / "notes"
+    raw.mkdir(parents=True)
+    note = "---\ntype: person\nname: Alex Doe\nemails: [alex@example.org]\n---\n\nNote.\n"
+    with pytest.raises(RemovedRoutingKeysError):
+        screen_intake_content(note, config=OLD, knowledge_root=root)
+    with pytest.raises(RemovedRoutingKeysError):
+        write_raw_intake_screened(raw, note, config=OLD, knowledge_root=root)
+    assert not any(p.is_file() for p in root.rglob("*"))

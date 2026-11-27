@@ -267,6 +267,7 @@ def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | Non
     )
     routes: list[tuple[str, tuple[str, ...] | None, str]] = []
     outside: list[str] = []
+    replaced_mapping: list[str] = []
     for cls, names in by_class.items():
         # There is no built-in list of private fields, so the contact fields the
         # previous release kept off the page for ``pii`` are named explicitly.
@@ -275,6 +276,11 @@ def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | Non
         page_type = next((p for p, c in PREVIOUS_READ_MAPPING.items() if c == cls), cls)
         if is_excluded(cls, config):
             location = location_for_class(cls, config)
+            if page_type == cls:
+                # A page type named by a route cannot also sit in storage.mapping,
+                # so the mapping entry becomes the whole-page rule (athenaeum#3173).
+                routes.append((page_type, None, location))
+                replaced_mapping.append(f"storage.mapping.{cls}")
         else:
             outside.append(cls)
             location = "excluded"
@@ -282,6 +288,12 @@ def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | Non
     lines.append("")
     lines.append(routes_yaml(routes))
     lines.append("")
+    if replaced_mapping:
+        lines.append(
+            "A page type named by a route cannot also sit in `storage.mapping`; delete "
+            + ", ".join(f"`{k}`" for k in sorted(replaced_mapping))
+            + " (the whole-page rule above replaces it)."
+        )
     lines.append(
         "There is no built-in list of private fields, so "
         "each list above already includes the contact fields "
