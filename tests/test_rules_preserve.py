@@ -685,9 +685,13 @@ class TestFactCarriesSourcePointer:
             },
             "storage": {
                 "mapping": {"pii": "excluded"},
-                "excluded_fields": {
-                    "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
-                },
+                "routes": [
+                    {
+                        "page_type": "person",
+                        "fields": ["emails", "phones", "former_emails", "alt_emails", "bounced"],
+                        "to": ["excluded"],
+                    }
+                ],
             },
         }
 

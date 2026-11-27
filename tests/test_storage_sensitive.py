@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from athenaeum import doctor
+from athenaeum import doctor, pii
 from athenaeum.pii import assemble_excluded_read
 from athenaeum.storage import (
     WIKI_MARKDOWN_EMBEDDED,
@@ -19,6 +19,8 @@ from athenaeum.storage import (
     register_adapter,
     route_for,
 )
+
+_CF = ["emails", "phones", "former_emails", "alt_emails"]
 
 
 def _cfg(**entry: Any) -> dict[str, Any]:
@@ -32,7 +34,12 @@ def _cfg(**entry: Any) -> dict[str, Any]:
         "storage": {
             "adapters": {"vault": body},
             "mapping": {"pii": "vault"},
-            "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+            # A field rule needs a sensitive target (athenaeum#3166).
+            **(
+                {"routes": [{"page_type": "person", "fields": _CF, "to": ["vault"]}]}
+                if entry.get("sensitive")
+                else {}
+            ),
         }
     }
 
@@ -114,28 +121,36 @@ def test_route_decision_uses_is_sensitive() -> None:
     declared = {
         "storage": {
             "mapping": {"pii": "excluded"},
-            "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+            "routes": [{"page_type": "person", "fields": _CF, "to": ["excluded"]}],
         }
     }
     assert route_for("pii", config={"storage": {"mapping": {"pii": "excluded"}}}).sensitive
-    assert route_for("pii", "emails", config=declared).sensitive
+    assert route_for("person", "emails", config=declared).sensitive
 
 
-@pytest.mark.parametrize("marked", [False, True])
-def test_read_of_custom_outside_corpus_location_redacts_unless_flag(
-    tmp_path: Path, marked: bool
-) -> None:
-    cfg = _cfg(sensitive=marked)
+def test_read_of_custom_outside_corpus_location_redacts_unless_flag(tmp_path: Path) -> None:
+    # A field rule can only target a sensitive location, so the vault is marked.
+    cfg = _cfg(sensitive=True)
     page = tmp_path / "wiki" / "alex.md"
     page.parent.mkdir(parents=True)
     page.write_text("---\nuid: alex\nname: Alex\n---\n", encoding="utf-8")
     meta = {"uid": "alex", "emails": ["alex@example.org"]}
     fields, redactions, _ = assemble_excluded_read(
-        page, {"uid": "alex"}, meta, config=cfg, surface_class="pii", include_excluded=False
+        page,
+        {"uid": "alex"},
+        meta,
+        config=cfg,
+        surface_class=pii.surface_class_for_page_class("person", cfg),
+        include_excluded=False,
     )
     assert fields == {} and [(m.field, m.value_count) for m in redactions] == [("emails", 1)]
     fields, redactions, _ = assemble_excluded_read(
-        page, {"uid": "alex"}, meta, config=cfg, surface_class="pii", include_excluded=True
+        page,
+        {"uid": "alex"},
+        meta,
+        config=cfg,
+        surface_class=pii.surface_class_for_page_class("person", cfg),
+        include_excluded=True,
     )
     assert fields == {"emails": ["alex@example.org"]} and redactions == ()
 

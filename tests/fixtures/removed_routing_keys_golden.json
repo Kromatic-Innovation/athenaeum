@@ -1,0 +1,250 @@
+{
+  "reads": {
+    "acme:False": {
+      "body": "Acme sells widgets.\n",
+      "classifications": {},
+      "contact": {},
+      "contact_included": false,
+      "contact_record_path": "<root>/excluded/acme.md",
+      "do_not_email": {
+        "marked": false,
+        "observed_at": null,
+        "reason": null,
+        "source": null,
+        "surface": null
+      },
+      "frontmatter": {
+        "name": "Acme Ltd",
+        "type": "vendor",
+        "uid": "acme"
+      },
+      "page_path": "<root>/wiki/acme.md",
+      "redactions": [
+        {
+          "field": "iban",
+          "redacted": true,
+          "value_count": 1
+        }
+      ],
+      "section_redactions": [],
+      "sections": {},
+      "uid": "acme",
+      "validity": {},
+      "withheld": false
+    },
+    "acme:True": {
+      "body": "Acme sells widgets.\n",
+      "classifications": {
+        "iban": [
+          {
+            "identifier": "GB00TEST0000",
+            "observed_at": null,
+            "source": null,
+            "usage_class": "unclassified"
+          }
+        ]
+      },
+      "contact": {
+        "iban": [
+          "GB00TEST0000"
+        ]
+      },
+      "contact_included": true,
+      "contact_record_path": "<root>/excluded/acme.md",
+      "do_not_email": {
+        "marked": false,
+        "observed_at": null,
+        "reason": null,
+        "source": null,
+        "surface": null
+      },
+      "frontmatter": {
+        "name": "Acme Ltd",
+        "type": "vendor",
+        "uid": "acme"
+      },
+      "page_path": "<root>/wiki/acme.md",
+      "redactions": [],
+      "section_redactions": [],
+      "sections": {},
+      "uid": "acme",
+      "validity": {
+        "iban": [
+          {
+            "closed": false,
+            "identifier": "GB00TEST0000",
+            "observed_at": null,
+            "reason": null,
+            "recorded": false,
+            "source": null,
+            "valid_until": null
+          }
+        ]
+      },
+      "withheld": false
+    },
+    "person-alex:False": {
+      "body": "Alex builds widgets.\n",
+      "classifications": {},
+      "contact": {},
+      "contact_included": false,
+      "contact_record_path": "<root>/excluded/person-alex.md",
+      "do_not_email": {
+        "marked": false,
+        "observed_at": null,
+        "reason": null,
+        "source": null,
+        "surface": null
+      },
+      "frontmatter": {
+        "name": "Alex Doe",
+        "type": "person",
+        "uid": "person-alex"
+      },
+      "page_path": "<root>/wiki/alex.md",
+      "redactions": [
+        {
+          "field": "emails",
+          "redacted": true,
+          "value_count": 1
+        },
+        {
+          "field": "phones",
+          "redacted": true,
+          "value_count": 1
+        },
+        {
+          "field": "nickname",
+          "redacted": true,
+          "value_count": 1
+        }
+      ],
+      "section_redactions": [],
+      "sections": {},
+      "uid": "person-alex",
+      "validity": {},
+      "withheld": false
+    },
+    "person-alex:True": {
+      "body": "Alex builds widgets.\n",
+      "classifications": {
+        "emails": [
+          {
+            "identifier": "alex@example.org",
+            "observed_at": null,
+            "source": null,
+            "usage_class": "unclassified"
+          }
+        ],
+        "nickname": [
+          {
+            "identifier": "Al",
+            "observed_at": null,
+            "source": null,
+            "usage_class": "unclassified"
+          }
+        ],
+        "phones": [
+          {
+            "identifier": "+15550100",
+            "observed_at": null,
+            "source": null,
+            "usage_class": "unclassified"
+          }
+        ]
+      },
+      "contact": {
+        "emails": [
+          "alex@example.org"
+        ],
+        "nickname": [
+          "Al"
+        ],
+        "phones": [
+          "+15550100"
+        ]
+      },
+      "contact_included": true,
+      "contact_record_path": "<root>/excluded/person-alex.md",
+      "do_not_email": {
+        "marked": false,
+        "observed_at": null,
+        "reason": null,
+        "source": null,
+        "surface": null
+      },
+      "frontmatter": {
+        "name": "Alex Doe",
+        "type": "person",
+        "uid": "person-alex"
+      },
+      "page_path": "<root>/wiki/alex.md",
+      "redactions": [],
+      "section_redactions": [],
+      "sections": {},
+      "uid": "person-alex",
+      "validity": {
+        "emails": [
+          {
+            "closed": false,
+            "identifier": "alex@example.org",
+            "observed_at": null,
+            "reason": null,
+            "recorded": false,
+            "source": null,
+            "valid_until": null
+          }
+        ],
+        "nickname": [
+          {
+            "closed": false,
+            "identifier": "Al",
+            "observed_at": null,
+            "reason": null,
+            "recorded": false,
+            "source": null,
+            "valid_until": null
+          }
+        ],
+        "phones": [
+          {
+            "closed": false,
+            "identifier": "+15550100",
+            "observed_at": null,
+            "reason": null,
+            "recorded": false,
+            "source": null,
+            "valid_until": null
+          }
+        ]
+      },
+      "withheld": false
+    },
+    "tree": {
+      "excluded/acme.md": "---\nuid: acme\npii: true\niban:\n  - GB00TEST0000\n---\n\nArchival data.\n",
+      "excluded/person-alex.md": "---\nuid: person-alex\npii: true\nemails:\n  - alex@example.org\nphones:\n  - '+15550100'\nnickname: Al\n---\n\nArchival data.\n",
+      "wiki/acme.md": "---\nuid: acme\ntype: vendor\nname: Acme Ltd\n---\n\nAcme sells widgets.\n",
+      "wiki/alex.md": "---\nuid: person-alex\ntype: person\nname: Alex Doe\n---\n\nAlex builds widgets.\n"
+    }
+  },
+  "writes": {
+    "nickname": {
+      "disposition": "routed-elsewhere",
+      "tree": {
+        "excluded/acme.md": "---\nuid: acme\npii: true\niban:\n  - GB00TEST0000\n---\n\nArchival data.\n",
+        "excluded/person-alex.md": "---\nuid: person-alex\npii: true\nemails:\n- alex@example.org\nphones:\n- '+15550100'\nnickname: Lex\nfield_sources:\n  nickname: api:delivery-monitor:2026-08-06\n---\n\nArchival data.\n",
+        "wiki/acme.md": "---\nuid: acme\ntype: vendor\nname: Acme Ltd\n---\n\nAcme sells widgets.\n",
+        "wiki/alex.md": "---\nuid: person-alex\ntype: person\nname: Alex Doe\n---\n\nAlex builds widgets.\n"
+      }
+    },
+    "title": {
+      "disposition": "applied",
+      "tree": {
+        "excluded/acme.md": "---\nuid: acme\npii: true\niban:\n  - GB00TEST0000\n---\n\nArchival data.\n",
+        "excluded/person-alex.md": "---\nuid: person-alex\npii: true\nemails:\n  - alex@example.org\nphones:\n  - '+15550100'\nnickname: Al\n---\n\nArchival data.\n",
+        "wiki/acme.md": "---\nuid: acme\ntype: vendor\nname: Acme Ltd\n---\n\nAcme sells widgets.\n",
+        "wiki/alex.md": "---\nuid: person-alex\ntype: person\nname: Alex Doe\ntitle: Lex\nfield_sources:\n  title: api:delivery-monitor:2026-08-06\nupdated: '2026-11-27'\n---\n\nAlex builds widgets.\n"
+      }
+    }
+  }
+}

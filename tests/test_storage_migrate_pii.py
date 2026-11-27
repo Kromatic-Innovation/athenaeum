@@ -36,9 +36,19 @@ from athenaeum.storage_migrate import (
 # athenaeum#3170: nothing is private unless declared; these fixtures declare
 # the contact fields the previous release kept off the page.
 _CONTACT_FIELDS = ["emails", "phones", "former_emails", "alt_emails"]
-_DECLARED_YAML = "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n"
+_DECLARED_YAML = (
+    "  routes:\n"
+    "    - page_type: person\n"
+    "      fields: [emails, phones, former_emails, alt_emails]\n"
+    "      to: [excluded]\n"
+)
 EXCLUDED_CONFIG = {
-    "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CONTACT_FIELDS}}
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "routes": [
+            {"page_type": "person", "fields": _CONTACT_FIELDS, "to": ["excluded"]}
+        ],
+    }
 }
 
 

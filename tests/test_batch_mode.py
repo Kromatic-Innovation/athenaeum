@@ -777,7 +777,10 @@ class TestBatchSyncEquivalence:
         )
         (root / "athenaeum.yaml").write_text(
             "storage:\n  mapping:\n    pii: excluded\n"
-            "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n",
+            "  routes:\n"
+            "    - page_type: person\n"
+            "      fields: [emails, phones, former_emails, alt_emails]\n"
+            "      to: [excluded]\n",
             encoding="utf-8",
         )
 

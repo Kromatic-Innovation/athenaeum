@@ -35,7 +35,13 @@ from athenaeum.erasure import load_or_create_erasure_key, purge_erasure_key
 EXCLUDED_CONFIG: dict[str, object] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
 

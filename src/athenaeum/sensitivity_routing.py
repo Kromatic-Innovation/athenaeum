@@ -213,6 +213,7 @@ from athenaeum.sensitivity import (
 )
 from athenaeum.storage import (
     EXCLUDED,
+    RemovedRoutingKeysError,
     RouteDecision,
     StorageConfigError,
     StorageTargetError,
@@ -609,6 +610,11 @@ def screen_intake_content(
                         discarded[str(key)] = decision.rule
                     elif decision.targets:
                         routed[str(key)] = decision.targets
+        except RemovedRoutingKeysError:
+            # A removed routing key used to route these fields; writing the note
+            # unscreened would put values on disk the previous release kept off
+            # it. Refuse instead (athenaeum#3173).
+            raise
         except StorageConfigError:
             discarded, routed = {}, {}
 

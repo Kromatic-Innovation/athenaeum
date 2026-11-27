@@ -51,12 +51,19 @@ from athenaeum.pii import (
     read_entities,
     read_entity,
     resolve_excluded_fields,
+    surface_class_for_page_class,
 )
 
 EXCLUDED_CONFIG = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
 
@@ -68,15 +75,25 @@ EXCLUDED_CONFIG = {
 #: mapped to the same adapter deliberately share a directory.
 TWO_SURFACE_CONFIG = {
     "storage": {
-        "mapping": {"pii": "excluded", "vendor": "vendor-excluded"},
-        "excluded_fields": {
-            "pii": ["emails", "phones", "former_emails", "alt_emails"],
-            "vendor": ["account_numbers", "billing_contact"],
-        },
+        "mapping": {"pii": "excluded"},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            },
+            {"page_type": "vendor", "to": ["vendor-excluded"]},
+            {
+                "page_type": "vendor",
+                "fields": ["account_numbers", "billing_contact"],
+                "to": ["vendor-excluded"],
+            },
+        ],
         "adapters": {
             "vendor-excluded": {
                 "backing_store": "markdown",
                 "surface_root": "vendor-excluded",
+                "sensitive": True,
                 "corpus_policy": {
                     "embedded": False,
                     "recallable": False,
@@ -86,6 +103,11 @@ TWO_SURFACE_CONFIG = {
         },
     }
 }
+
+
+#: The surface classes the `person` and `vendor` routes read their records under.
+PERSON_SURFACE = surface_class_for_page_class("person", EXCLUDED_CONFIG)
+VENDOR_SURFACE = surface_class_for_page_class("vendor", TWO_SURFACE_CONFIG)
 
 
 def _write_wiki_entity(
@@ -230,20 +252,19 @@ class TestFieldPolicy:
         config = {
             "storage": {
                 "mapping": {"pii": "excluded"},
-                "excluded_fields": {"pii": ["emails"], "vendor": ["account_numbers"]},
+                "routes": [
+                    {"page_type": "person", "fields": ["emails"], "to": ["excluded"]},
+                    {"page_type": "vendor", "fields": ["account_numbers"], "to": ["excluded"]},
+                ],
             }
         }
+        person = surface_class_for_page_class("person", config)
+        vendor = surface_class_for_page_class("vendor", config)
 
-        assert resolve_excluded_fields("pii", config, {"emails": [], "phones": []}) == ("emails",)
-        assert resolve_excluded_fields("vendor", config, {"account_numbers": [], "other": []}) == (
+        assert resolve_excluded_fields(person, config, {"emails": [], "phones": []}) == ("emails",)
+        assert resolve_excluded_fields(vendor, config, {"account_numbers": [], "other": []}) == (
             "account_numbers",
         )
-
-    def test_explicit_empty_list_is_honoured_literally(self) -> None:
-        """An operator saying "no data fields" differs from not configuring the class."""
-        config = {"storage": {"excluded_fields": {"vendor": []}}}
-
-        assert resolve_excluded_fields("vendor", config, {"anything": ["x"]}) == ()
 
     def test_unknown_class_with_no_record_yields_no_fields(self) -> None:
         assert resolve_excluded_fields("vendor", None, None) == ()
@@ -269,7 +290,8 @@ class TestReadEntitiesBatch:
         original = pii.iter_contact_records
         pii.iter_contact_records = _explode  # type: ignore[assignment]
         try:
-            assert list(read_entities(knowledge, EXCLUDED_CONFIG, [], surface_class="pii")) == []
+            found = read_entities(knowledge, EXCLUDED_CONFIG, [], surface_class=PERSON_SURFACE)
+            assert list(found) == []
         finally:
             pii.iter_contact_records = original  # type: ignore[assignment]
 
@@ -295,7 +317,7 @@ class TestNonPersonSurfaceClass:
             knowledge,
             TWO_SURFACE_CONFIG,
             "acme",
-            surface_class="vendor",
+            surface_class=VENDOR_SURFACE,
             include_excluded=True,
         )
 
@@ -312,7 +334,7 @@ class TestNonPersonSurfaceClass:
         """Honest by construction — no field is silently neither value nor marker."""
         knowledge = self._vendor_corpus(tmp_path)
 
-        read = read_entity(knowledge, TWO_SURFACE_CONFIG, "acme", surface_class="vendor")
+        read = read_entity(knowledge, TWO_SURFACE_CONFIG, "acme", surface_class=VENDOR_SURFACE)
 
         assert read is not None
         assert read.contact == {}
@@ -325,7 +347,7 @@ class TestNonPersonSurfaceClass:
         knowledge = tmp_path / "knowledge"
         _write_wiki_entity(knowledge / "wiki", "acme", entity_type="vendor")
 
-        read = read_entity(knowledge, TWO_SURFACE_CONFIG, "acme", surface_class="vendor")
+        read = read_entity(knowledge, TWO_SURFACE_CONFIG, "acme", surface_class=VENDOR_SURFACE)
 
         assert read is not None
         assert read.contact == {} and read.redactions == ()
@@ -350,7 +372,7 @@ class TestAssemblyFunctionIsEntityIndexFree:
             {"uid": "alex", "type": "person"},
             {"uid": "alex", "emails": ["alex@example.org"]},
             config=EXCLUDED_CONFIG,
-            surface_class="pii",
+            surface_class=PERSON_SURFACE,
             include_excluded=True,
         )
 
@@ -362,7 +384,7 @@ class TestAssemblyFunctionIsEntityIndexFree:
         page = _write_wiki_entity(tmp_path / "wiki", "alex")
 
         assert assemble_excluded_read(
-            page, {"uid": "alex"}, None, surface_class="pii", include_excluded=True
+            page, {"uid": "alex"}, None, surface_class=PERSON_SURFACE, include_excluded=True
         ) == ({}, (), {})
 
     def test_uid_mismatch_warns_but_still_assembles(
@@ -377,7 +399,7 @@ class TestAssemblyFunctionIsEntityIndexFree:
                 {"uid": "alex"},
                 {"uid": "sam", "emails": ["sam@example.org"]},
                 config=EXCLUDED_CONFIG,
-                surface_class="pii",
+                surface_class=PERSON_SURFACE,
                 include_excluded=True,
             )
 
@@ -604,7 +626,7 @@ class TestReadEntityPreparedIndexes:
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=PERSON_SURFACE,
             include_excluded=True,
         )
 
@@ -620,14 +642,14 @@ class TestReadEntityPreparedIndexes:
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=PERSON_SURFACE,
             include_excluded=True,
         )
         prepared = read_entity(
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=PERSON_SURFACE,
             include_excluded=True,
             excluded_index=ExcludedRecordIndex(contacts_root),
             entity_index=EntityIndex(knowledge / "wiki"),
@@ -660,7 +682,7 @@ class TestReadEntityPreparedIndexes:
             knowledge,
             EXCLUDED_CONFIG,
             "alex",
-            surface_class="pii",
+            surface_class=PERSON_SURFACE,
             include_excluded=True,
             excluded_index=ExcludedRecordIndex(contacts_root),
             entity_index=EntityIndex(knowledge / "wiki"),
@@ -719,7 +741,7 @@ class TestReadEntityPreparedIndexes:
                 knowledge,
                 EXCLUDED_CONFIG,
                 uid,
-                surface_class="pii",
+                surface_class=PERSON_SURFACE,
                 include_excluded=True,
                 excluded_index=excluded_index,
                 entity_index=entity_index,

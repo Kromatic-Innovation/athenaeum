@@ -91,7 +91,12 @@ def _old_config() -> dict[str, Any]:
         "librarian": {
             "corrections": {"fields": _fields(), "sensitive_fields": {"bounced": "pii"}}
         },
-        "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+        "storage": {
+            "mapping": {"pii": "excluded"},
+            "routes": [
+                {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+            ],
+        },
     }
 
 
@@ -112,7 +117,9 @@ def _pasted_config() -> dict[str, Any]:
 
 def test_printed_replacement_includes_builtin_contact_fields() -> None:
     cfg = _pasted_config()
-    listed = cfg["storage"]["excluded_fields"]["pii"]
+    (rule,) = cfg["storage"]["routes"]
+    assert rule["page_type"] == "person" and rule["to"] == ["excluded"]
+    listed = rule["fields"]
     assert listed == [*pii.BUILTIN_CONTACT_FIELDS, "bounced"]
 
 
@@ -127,9 +134,13 @@ def test_printed_replacement_reproduces_the_old_routing_byte_for_byte(tmp_path: 
         "librarian": {"corrections": {"fields": _fields()}},
         "storage": {
             "mapping": {"pii": "excluded"},
-            "excluded_fields": {
-                "pii": ["emails", "phones", "former_emails", "alt_emails", "bounced"]
-            },
+            "routes": [
+                    {
+                        "page_type": "person",
+                        "fields": ["emails", "phones", "former_emails", "alt_emails", "bounced"],
+                        "to": ["excluded"],
+                    }
+                ],
         },
     }
     pasted = _root(tmp_path / "pasted")
@@ -152,7 +163,12 @@ def test_default_routes_emails_to_the_separate_location(tmp_path: Path) -> None:
     before = page.read_bytes()
     cfg = {
         "librarian": {"corrections": {"fields": _fields()}},
-        "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
+        "storage": {
+            "mapping": {"pii": "excluded"},
+            "routes": [
+                {"page_type": "person", "fields": _CF, "to": ["excluded"]}
+            ],
+        },
     }
     result = _apply(root, cfg, _record("emails", "add", "alex2@example.org"))
     assert result.disposition == "routed-elsewhere"
@@ -251,3 +267,37 @@ def test_non_correction_command_shows_notice_and_keeps_running(
     found = removed_config_keys_in_file(tmp_path)
     assert [k for k, _ in found] == [OLD_KEY]
     assert "athenaeum#3162" in format_removed_key_notice(*found[0])
+
+
+def test_printed_replacement_for_a_self_named_class_loads(tmp_path: Path) -> None:
+    """A class named after its own page type gets a whole-page rule, not a clash.
+
+    `storage.mapping.vendor` plus a `vendor` field route would be refused as a
+    page type named twice, so the refusal prints the whole-page rule and says to
+    delete the mapping entry (athenaeum#3173).
+    """
+    from athenaeum.storage import configured_routes, route_for
+
+    old: dict[str, Any] = {
+        "librarian": {
+            "corrections": {"fields": _fields(), "sensitive_fields": {"iban": "vendor"}}
+        },
+        "storage": {"mapping": {"vendor": "excluded"}},
+    }
+    message = removed_sensitive_fields_message(old)
+    assert message is not None
+    assert "delete `storage.mapping.vendor`" in message
+    lines = message.splitlines()
+    start = lines.index("storage:")
+    end = lines.index("", start)
+    pasted = yaml.safe_load("\n".join(lines[start:end]))
+    cfg = copy.deepcopy(old)
+    del cfg["librarian"]["corrections"]["sensitive_fields"]
+    del cfg["storage"]["mapping"]["vendor"]
+    cfg["storage"].update(pasted["storage"])
+    routes = configured_routes(cfg)
+    assert {(r.page_type, r.fields) for r in routes} == {
+        ("vendor", None),
+        ("vendor", ("iban",)),
+    }
+    assert route_for("vendor", "iban", config=cfg).targets == ("excluded",)

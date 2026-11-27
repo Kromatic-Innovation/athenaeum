@@ -153,15 +153,17 @@ from athenaeum.provenance import parse_source
 from athenaeum.registry import LIST_HANDLE_KEYS, SOURCE_HANDLE_KEYS
 from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import (
+    PREVIOUS_READ_MAPPING,
     StorageConfigError,
     apply_to_targets,
     available_adapters,
-    configured_excluded_fields,
     discard_rule_for_field_any_type,
     is_excluded,
+    location_for_class,
     note_discard,
     open_store,
     route_for,
+    routes_yaml,
     target_root,
 )
 from athenaeum.store import Store, append_line_durable, note_no_restore_point
@@ -236,12 +238,10 @@ def _removed_sensitive_fields_entries(config: dict[str, Any] | None) -> tuple[bo
 def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | None:
     """The refusal text for a configuration still setting the removed key.
 
-    ``None`` when the key is absent or empty. The replacement is COMPLETE: an
-    explicit ``storage.excluded_fields.<class>`` list replaces the built-in one
-    (:func:`athenaeum.pii.resolve_excluded_fields`), so each class's list is
-    the fields it already carries (the contact fields the previous release
-    kept off the page for ``pii``) plus the fields the old key named for that
-    class.
+    ``None`` when the key is absent or empty. The replacement is COMPLETE: a
+    ``storage.routes`` entry names every field it keeps off the page, so each
+    list is the contact fields the previous release kept off the page for
+    ``pii`` plus the fields the old key named for that class.
     """
     is_set, entries = _removed_sensitive_fields_entries(config)
     if not is_set:
@@ -265,39 +265,49 @@ def removed_sensitive_fields_message(config: dict[str, Any] | None) -> str | Non
         "Delete that key and put this under `storage:` in athenaeum.yaml (merge it with "
         "any `storage:` block you already have):"
     )
-    lines.append("")
-    lines.append("storage:")
-    lines.append("  excluded_fields:")
+    routes: list[tuple[str, tuple[str, ...] | None, str]] = []
+    outside: list[str] = []
+    replaced_mapping: list[str] = []
     for cls, names in by_class.items():
-        # athenaeum#3170: there is no built-in list any more, so the contact
-        # fields the previous release kept off the page for ``pii`` are named
-        # here explicitly rather than read back from the resolver.
-        configured = configured_excluded_fields(config).get(cls)
-        if configured is not None:
-            complete = list(configured)
-        elif cls == pii.PII_ENTITY_CLASS:
-            complete = list(pii.BUILTIN_CONTACT_FIELDS)
-        else:
-            complete = []
+        # There is no built-in list of private fields, so the contact fields the
+        # previous release kept off the page for ``pii`` are named explicitly.
+        complete = list(pii.BUILTIN_CONTACT_FIELDS) if cls == pii.PII_ENTITY_CLASS else []
         complete.extend(n for n in names if n not in complete)
-        lines.append(f"    {json.dumps(cls)}: [{', '.join(json.dumps(n) for n in complete)}]")
+        page_type = next((p for p, c in PREVIOUS_READ_MAPPING.items() if c == cls), cls)
+        if is_excluded(cls, config):
+            location = location_for_class(cls, config)
+            if page_type == cls:
+                # A page type named by a route cannot also sit in storage.mapping,
+                # so the mapping entry becomes the whole-page rule (athenaeum#3173).
+                routes.append((page_type, None, location))
+                replaced_mapping.append(f"storage.mapping.{cls}")
+        else:
+            outside.append(cls)
+            location = "excluded"
+        routes.append((page_type, tuple(complete), location))
     lines.append("")
+    lines.append(routes_yaml(routes))
+    lines.append("")
+    if replaced_mapping:
+        lines.append(
+            "A page type named by a route cannot also sit in `storage.mapping`; delete "
+            + ", ".join(f"`{k}`" for k in sorted(replaced_mapping))
+            + " (the whole-page rule above replaces it)."
+        )
     lines.append(
         "There is no built-in list of private fields, so "
         "each list above already includes the contact fields "
         f"({', '.join(pii.BUILTIN_CONTACT_FIELDS)}) for `pii`."
     )
-    outside = [c for c in by_class if not is_excluded(c, config)]
     if outside:
         lines.append(
-            "These classes are not mapped to a location outside the corpus, so their fields "
-            "would stay on the page: set `storage.mapping.<class>` to a location outside the "
-            f"corpus (for example `excluded`) for {', '.join(json.dumps(c) for c in outside)}."
+            "These classes are not mapped to a location outside the corpus, so `excluded` "
+            "above stands in for the location you choose (a vault, `sensitive: true`): "
+            f"{', '.join(json.dumps(c) for c in outside)}."
         )
     lines.append(
-        "The old key applied to every page type; the storage settings apply to pages whose "
-        "class is the one named (a `person` page is class `pii`). Map any other page type "
-        "with `storage.excluded_read_mapping.<page type>: <class>`."
+        "The old key applied to every page type; a route applies to the page type it "
+        "names. Add a route for each other page type that carries these fields."
     )
     return "\n".join(lines)
 

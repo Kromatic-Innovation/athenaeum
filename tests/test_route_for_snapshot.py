@@ -56,25 +56,33 @@ def _storage(**tables: Any) -> dict[str, Any]:
 
 READ_CONFIGS: dict[str, dict[str, Any]] = {
     "mapping-only": _storage(mapping={"pii": "excluded"}),
-    "explicit-list": _storage(mapping={"pii": "excluded"}, excluded_fields={"pii": ["nickname"]}),
-    "empty-list": _storage(mapping={"pii": "excluded"}, excluded_fields={"pii": []}),
-    "read-mapping-override": _storage(
-        mapping={"pii": "excluded", "ledger": "excluded"},
-        excluded_read_mapping={"person": "pii"},
+    "explicit-list": _storage(
+        mapping={"pii": "excluded"},
+        routes=[{"page_type": "person", "fields": ["nickname"], "to": ["excluded"]}],
+    ),
+    "two-field-rules": _storage(
+        mapping={"pii": "excluded"},
+        routes=[
+            {"page_type": "person", "fields": ["emails"], "to": ["excluded"]},
+            {"page_type": "person", "fields": ["nickname"], "to": ["excluded"]},
+        ],
     ),
 }
 
 
-UNDECLARED_READ_CONFIGS = {"mapping-only", "read-mapping-override"}
+UNDECLARED_READ_CONFIGS = {"mapping-only"}
 
 
 def _reference_read_fields(cfg: dict[str, Any], record: dict[str, Any]) -> dict[str, list[str]]:
     """The old join, from the raw config: surface class, field list, then values."""
     storage = cfg.get("storage") or {}
-    surface = (storage.get("excluded_read_mapping") or {}).get("person", "pii")
-    configured = (storage.get("excluded_fields") or {}).get(surface)
     # athenaeum#3170: no built-in contact-field fallback; undeclared means no fields.
-    names = list(configured) if configured is not None else []
+    names = [
+        name
+        for rule in storage.get("routes") or []
+        if rule.get("page_type") == "person"
+        for name in rule["fields"]
+    ]
     out: dict[str, list[str]] = {}
     for name in names:
         raw = record.get(name)
@@ -143,7 +151,13 @@ def _corrections_cfg(extra_fields: list[str] | None, mapping: dict[str, str]) ->
     """Corrections config routed through the storage keys (athenaeum#3162)."""
     storage: dict[str, Any] = {"mapping": mapping}
     if extra_fields is not None:
-        storage["excluded_fields"] = {"pii": [*pii.BUILTIN_CONTACT_FIELDS, *extra_fields]}
+        storage["routes"] = [
+            {
+                "page_type": "person",
+                "fields": [*pii.BUILTIN_CONTACT_FIELDS, *extra_fields],
+                "to": [mapping["pii"]],
+            }
+        ]
     return {
         "librarian": {
             "corrections": {

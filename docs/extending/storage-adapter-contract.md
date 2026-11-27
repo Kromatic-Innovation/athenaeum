@@ -112,48 +112,43 @@ storage:
         recallable: false
         merge_eligible: false
 
-  # Optionally name which frontmatter fields on an EXCLUDED record hold data
-  # (athenaeum#883). Keyed by SURFACE class — the `mapping` key above, not a
-  # wiki page's `type:`. Unset = the built-in policy below.
-  excluded_fields:
-    pii: [emails, phones, former_emails, alt_emails]
-
-  # Optionally remap a wiki page `type:` onto the SURFACE class whose excluded
-  # record holds that page's excluded fields (athenaeum#885). Unset = identity
-  # for every class, plus the one shipped non-identity entry `person: pii`.
-  excluded_read_mapping:
-    person: pii
+  # Name the fields of a page type that are kept off the page, and where.
+  # A route names its page type and its fields directly; there is no
+  # surface-class indirection. A field rule's target must be a vault
+  # (`sensitive: true`, outside the corpus).
+  routes:
+    - page_type: person
+      fields: [emails, phones, former_emails, alt_emails]
+      to: [excluded]
 ```
 
-### Page class vs surface class
+### Routes name page types
 
-`mapping` and `excluded_read_mapping` are different tables and the difference
-is load-bearing. `mapping` routes an entity class onto a storage *adapter*.
-`excluded_read_mapping` answers a narrower question a read has to ask: given a
-hit whose page says `type: person`, which excluded surface holds that person's
-withheld fields? The answer is `pii` — the page class and the surface class are
-two different names for that entity, and collapsing them would make `person`
-the surface name, which it is not.
+`mapping` routes a whole entity class onto a storage *adapter*; it stays as the
+short form of a whole-page-type route. `routes` answers the narrower question a
+read has to ask: given a hit whose page says `type: person`, which fields are
+withheld, and in which location are they held? The rule names the page type and
+the fields, so no second table is needed to say which excluded surface holds a
+person's withheld fields.
 
-Absent config the mapping is identity (a `type: vendor` page joins a `vendor`
-surface) with the single shipped exception `person: pii`. An operator entry
-wins over the built-in, so `person` can be pointed elsewhere — or back at
-identity — without a code change.
+Absent a rule the page type has no withheld fields, and a read of it performs no
+join and returns nothing, never an error. `storage.is_excluded` gates every join:
+a class whose location is not outside the corpus would otherwise read the corpus
+back as though it were the excluded store.
 
-Resolving a page class to a surface class is **not** the same as deciding a
-join should happen. A class whose mapped surface class is not actually excluded
-resolves to the default wiki adapter, and joining there would read the corpus
-back as though it were the excluded store. `storage.is_excluded` gates every
-join for exactly that reason: a non-excluded class performs no join and returns
-nothing, never an error.
+`storage.excluded_fields` and `storage.excluded_read_mapping` were removed
+(athenaeum#3173). A configuration that still sets either is refused by the first
+command that reads or writes a routed field, with the `storage.routes` entries that
+reproduce what the keys did. Nothing moves on disk: a record written under the old
+keys sits in its location's root and is read through the route that names that
+location.
 
 ### Which fields on an excluded record are data
 
 An excluded record carries both data and its own bookkeeping (`uid`, `type`,
 `pii`, the bounce/classification marks). A read of that record has to know
 which is which. Only declared fields are data: the fields a `storage.routes`
-rule names for a page type, or a `storage.excluded_fields` list for a surface
-class. A class with no declaration has no data fields. There is no built-in
+rule names for a page type. A page type with no rule has no data fields. There is no built-in
 list (athenaeum#3170).
 
 Earlier releases supplied one: `emails`, `phones`, `former_emails` and
@@ -168,8 +163,7 @@ as absent. `athenaeum storage status --suggest-routes` prints the
 `storage.routes` entries that reproduce the previous behaviour, and lists each
 location, field name and record count no rule covers (no values). Ordinary
 recall, `athenaeum doctor` and `athenaeum storage status` keep running and
-report the condition. An explicitly empty `storage.excluded_fields` list is
-honoured literally as "this class has no data fields".
+report the condition.
 
 ### Fail-closed policy defaults
 

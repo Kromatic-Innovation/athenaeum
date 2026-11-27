@@ -84,7 +84,7 @@ from typing import Any
 from athenaeum import pii, pii_attribution
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter
-from athenaeum.storage import require_writable_paths
+from athenaeum.storage import is_excluded, location_for_class, require_writable_paths
 
 log = logging.getLogger(__name__)
 
@@ -795,6 +795,23 @@ def resolve_contacts_root(knowledge_root: Path, config: dict[str, Any] | None) -
     return pii.contacts_surface_root(Path(knowledge_root), config)
 
 
+def _joins_contact_surface(page_type: str, config: dict[str, Any] | None) -> bool:
+    """Whether *page_type*'s excluded fields are held on the ``pii`` contact surface.
+
+    True when the page type's surface class is ``pii``, or when it is a surface
+    outside the corpus held in the same location as ``pii`` (a ``storage.routes``
+    field rule that names the location ``storage.mapping.pii`` names). There is
+    no built-in ``person`` to ``pii`` mapping (athenaeum#3173), so a ``person``
+    page joins by the route that sends its fields there.
+    """
+    surface = pii.surface_class_for_page_class(page_type, config)
+    if surface == pii.PII_ENTITY_CLASS:
+        return True
+    return is_excluded(surface, config) and location_for_class(surface, config) == (
+        location_for_class(pii.PII_ENTITY_CLASS, config)
+    )
+
+
 def fold_contact_records_after_merge(
     knowledge_root: Path,
     absorbed_to_canonical: Iterable[tuple[str, str]],
@@ -828,8 +845,7 @@ def fold_contact_records_after_merge(
             pairs = [
                 (absorbed, canonical)
                 for absorbed, canonical in pairs
-                if pii.surface_class_for_page_class(absorbed_page_types.get(absorbed, ""), config)
-                == pii.PII_ENTITY_CLASS
+                if _joins_contact_surface(absorbed_page_types.get(absorbed, ""), config)
             ]
             if not pairs:
                 return ContactFoldSummary()

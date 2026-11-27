@@ -47,9 +47,18 @@ from athenaeum.mcp_server import recall_search
 EXCLUDED_CONFIG: dict[str, object] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
+
+#: The surface class the `person` route reads its record under.
+ROUTED_SURFACE = pii.surface_class_for_page_class("person", EXCLUDED_CONFIG)
 
 
 def _write_page(wiki_root: Path, uid: str, *, name: str, extra_frontmatter: str = "") -> Path:
@@ -420,7 +429,7 @@ class TestEntityReadCarriesTheFacts:
         knowledge = self._corpus(tmp_path)
 
         read = pii.read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
 
         assert read is not None
@@ -437,7 +446,7 @@ class TestEntityReadCarriesTheFacts:
         knowledge = self._corpus(tmp_path)
 
         read = pii.read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
 
         assert read is not None
@@ -452,7 +461,7 @@ class TestEntityReadCarriesTheFacts:
         knowledge = self._corpus(tmp_path)
 
         read = pii.read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=False
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=False
         )
 
         assert read is not None
@@ -481,7 +490,7 @@ class TestEntityReadCarriesTheFacts:
         )
 
         read = pii.read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
 
         assert read is not None
@@ -494,7 +503,7 @@ class TestEntityReadCarriesTheFacts:
         _write_page(knowledge / "wiki", "sam", name="Sam Example")
 
         read = pii.read_entity(
-            knowledge, EXCLUDED_CONFIG, "sam", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "sam", surface_class=ROUTED_SURFACE, include_excluded=True
         )
 
         assert read is not None
@@ -506,7 +515,7 @@ class TestEntityReadCarriesTheFacts:
 
         knowledge = self._corpus(tmp_path)
         read = pii.read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=ROUTED_SURFACE, include_excluded=True
         )
         assert read is not None
 

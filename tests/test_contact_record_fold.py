@@ -262,6 +262,19 @@ class TestMergeHook:
 # ---------------------------------------------------------------------------
 
 
+#: `pii` mapped outside the corpus, with the `person` route that reads its record
+#: (athenaeum#3173: a person page joins the contact surface by that route).
+_PERSON_ROUTE_YAML = (
+    "storage:\n"
+    "  mapping:\n"
+    "    pii: excluded\n"
+    "  routes:\n"
+    "    - page_type: person\n"
+    "      fields: [emails]\n"
+    "      to: [excluded]\n"
+)
+
+
 class TestAttributionSeamWiring:
     def _context(self, tmp_path: Path, root: Path) -> "pii_attribution.AttributionContext":
         return pii_attribution.build_attribution_context(
@@ -782,7 +795,7 @@ class TestMergePathsCallTheHook:
 
     def test_fold_into_existing_approve_folds_the_absorbed_record(self, tmp_path: Path) -> None:
         (tmp_path / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            _PERSON_ROUTE_YAML, encoding="utf-8"
         )
         wiki = tmp_path / "wiki"
         root = pii.contacts_surface_root(tmp_path, {"storage": {"mapping": {"pii": "excluded"}}})
@@ -802,7 +815,7 @@ class TestMergePathsCallTheHook:
     def test_fold_into_a_uid_prefixed_canonical_page(self, tmp_path: Path) -> None:
         """The real corpus shape: the canonical lives at ``<uid>-<slug>.md``."""
         (tmp_path / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            _PERSON_ROUTE_YAML, encoding="utf-8"
         )
         wiki = tmp_path / "wiki"
         root = pii.contacts_surface_root(tmp_path, {"storage": {"mapping": {"pii": "excluded"}}})
@@ -825,7 +838,7 @@ class TestMergePathsCallTheHook:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         (tmp_path / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            _PERSON_ROUTE_YAML, encoding="utf-8"
         )
         wiki = tmp_path / "wiki"
         wiki.mkdir()

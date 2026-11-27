@@ -42,9 +42,18 @@ from athenaeum.mcp_server import recall_search
 EXCLUDED_CONFIG: dict[str, object] = {
     "storage": {
         "mapping": {"pii": "excluded"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        "routes": [
+            {
+                "page_type": "person",
+                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                "to": ["excluded"],
+            }
+        ],
     }
 }
+
+#: The surface class the `person` route reads its record under.
+PERSON_SURFACE = pii.surface_class_for_page_class("person", EXCLUDED_CONFIG)
 
 RESTRICTED = {"secondary"}
 
@@ -221,7 +230,7 @@ class TestJoinReusesTheAssemblySeam:
             page,
             {"uid": "alex"},
             {"uid": "alex", "emails": ["alex@example.org", "a2@example.org"]},
-            surface_class="pii",
+            surface_class=PERSON_SURFACE,
             config=EXCLUDED_CONFIG,
             include_excluded=False,
         )
@@ -230,21 +239,20 @@ class TestJoinReusesTheAssemblySeam:
 
 
 class TestPageClassToSurfaceClassMapping:
-    def test_person_maps_to_pii_by_default(self) -> None:
-        assert pii.surface_class_for_page_class("person", None) == "pii"
-
-    def test_every_other_class_is_identity_by_default(self) -> None:
+    def test_every_class_is_identity_without_a_route(self) -> None:
+        assert pii.surface_class_for_page_class("person", None) == "person"
         assert pii.surface_class_for_page_class("vendor", None) == "vendor"
         assert pii.surface_class_for_page_class("project", None) == "project"
 
-    def test_operator_override_wins(self) -> None:
-        config = {"storage": {"excluded_read_mapping": {"vendor": "supplier-pii"}}}
+    def test_a_route_with_fields_gives_its_page_type_a_surface_class(self) -> None:
+        config = {
+            "storage": {
+                "mapping": {"pii": "excluded"},
+                "routes": [{"page_type": "vendor", "fields": ["iban"], "to": ["excluded"]}],
+            }
+        }
 
-        assert pii.surface_class_for_page_class("vendor", config) == "supplier-pii"
-
-    def test_operator_can_point_person_back_at_identity(self) -> None:
-        config = {"storage": {"excluded_read_mapping": {"person": "person"}}}
-
+        assert pii.surface_class_for_page_class("vendor", config) != "vendor"
         assert pii.surface_class_for_page_class("person", config) == "person"
 
     def test_blank_page_class_maps_to_nothing(self) -> None:
@@ -341,8 +349,15 @@ class TestLayerOrdering:
         """The athenaeum#532 `recallable` drop is likewise BEFORE the join."""
         knowledge = tmp_path / "knowledge"
         config: dict[str, object] = {
-            "storage": {"mapping": {"pii": "excluded", "person": "unrecallable"},
-        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+            "storage": {"mapping": {"pii": "excluded"},
+                        "routes": [
+                            {"page_type": "person", "to": ["unrecallable"]},
+                            {
+                                "page_type": "person",
+                                "fields": ["emails", "phones", "former_emails", "alt_emails"],
+                                "to": ["excluded"],
+                            },
+                        ],
                         "adapters": {
                             "unrecallable": {
                                 "backing_store": "wiki-markdown",
@@ -578,7 +593,7 @@ class TestHandleShapedPathFieldParity:
             )
         )
         entity_read = pii.read_entity(
-            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class=PERSON_SURFACE, include_excluded=True
         )
 
         assert entity_read is not None
@@ -597,7 +612,7 @@ class TestHandleShapedPathFieldParity:
             )
         )
         entity_read = pii.read_entity(
-            corpus, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+            corpus, EXCLUDED_CONFIG, "alex", surface_class=PERSON_SURFACE, include_excluded=True
         )
 
         assert entity_read is not None

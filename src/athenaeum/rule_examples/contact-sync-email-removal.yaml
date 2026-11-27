@@ -103,18 +103,19 @@
 #           shape: list
 #           writers: ["shape-rule:example-contact-sync-email-removal@1"]
 #   storage:
-#     mapping: {pii: excluded}
-#     excluded_fields:
-#       pii: [emails, phones, former_emails, alt_emails, identifier_validity]
+#     routes:
+#       - page_type: person
+#         fields: [emails, phones, former_emails, alt_emails, identifier_validity]
+#         to: [excluded]
 #
-# An explicit `excluded_fields` list REPLACES the built-in one, which is why
-# the built-in contact fields (emails, phones, former_emails, alt_emails) are
-# listed beside `identifier_validity`.
+# A route names every field it keeps off the page, which is why the contact
+# fields (emails, phones, former_emails, alt_emails) are listed beside
+# `identifier_validity`.
 #
 # Without the allowlist entry every correction this rule emits is rejected
 # with "attribute not on the allowlist" and escalated forever -- the failure
 # mode athenaeum#862 measured across 1,369 corrections. Without the
-# `storage.excluded_fields` entry the close (which embeds an email address)
+# `storage.routes` entry the close (which embeds an email address)
 # would be written to the public wiki page.
 #
 # ROUTING IS NOT THIS RULE'S DECISION. `docs/design/field-corrections.md` §7 is
