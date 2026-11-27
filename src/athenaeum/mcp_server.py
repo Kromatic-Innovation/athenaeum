@@ -125,6 +125,8 @@ from athenaeum.storage import (
     is_recallable,
     resolve_locator_surfaces,
     storage_policy_configured,
+    surface_read_permitted,
+    vault_for_path,
     write_raw_intake,
 )
 
@@ -139,6 +141,7 @@ if TYPE_CHECKING:
     # call site in this module (the existing convention here), so this never
     # pulls the module in at import time.
     from athenaeum.pii import ExcludedRecordIndex
+    from athenaeum.vault_read_gate import VaultReadGate
 
 log = logging.getLogger(__name__)
 
@@ -824,6 +827,7 @@ def recall_search(
     claimed_scope: str | None = None,
     tool_use_id: str | None = None,
     session_resolver: Any | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> str:
     """Search the knowledge wiki for pages relevant to *query*.
 
@@ -984,6 +988,7 @@ def recall_search(
         with_pii=with_pii,
         usage_classes=usage_classes,
         cache_dir=cache_dir,
+        vault_read_allowed=vault_read_allowed,
     )
     if handle_resolution is not None:
         # Issue athenaeum#1002: `contact_values[].source` can carry a raw
@@ -1018,6 +1023,7 @@ def recall_search(
         claimed_scope=claimed_scope,
         tool_use_id=tool_use_id,
         session_resolver=session_resolver,
+        vault_read_allowed=vault_read_allowed,
     )
 
 
@@ -1034,6 +1040,7 @@ def entity_read(
     cache_dir: Path | None = None,
     sensitive_reads: bool = True,
     deprecation_notices: list[str] | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> str:
     """Read one entity's page by uid, with excluded-field inclusion gated by a flag.
 
@@ -1153,7 +1160,8 @@ def entity_read(
     # pii.read_entity finds it by uid in the vault itself.
     # Keyed on the vault page's own type, not on *page_class*'s surface class,
     # which can differ from the type (``person`` is on ``pii``).
-    _vault_read = page_path is None and pii.vault_page_path(knowledge_root, config, uid) is not None
+    _vault_page = pii.vault_page_path(knowledge_root, config, uid) if page_path is None else None
+    _vault_read = _vault_page is not None
     if page_path is None and not _vault_read:
         return json.dumps(
             {"ok": False, "error": f"{not_found_label} not found: uid={uid!r}"}, indent=2
@@ -1177,11 +1185,27 @@ def entity_read(
         if not is_page_authorized(meta, caller_audience):
             return json.dumps(_forbidden_result(), indent=2)
 
+    surface_class = pii.surface_class_for_page_class(page_class, config)
+    if include_excluded and sensitive_reads and vault_read_allowed is not None:
+        # athenaeum#3176: a served process asks, per vault, whether this
+        # request's principal holds read, BEFORE the include path is taken. A
+        # refusal is exactly the serve-time pin: the same read, the same
+        # markers and the same withheld key.
+        if _vault_page is not None:
+            vault = vault_for_path(_vault_page, config, knowledge_root)
+            permitted = vault is None or vault_read_allowed(vault)
+        else:
+            permitted = surface_read_permitted(vault_read_allowed, surface_class, config)
+        if not permitted:
+            sensitive_reads = False
+            include_excluded = False
+            usage_classes = None
+
     result = pii.read_entity(
         knowledge_root,
         config,
         uid,
-        surface_class=pii.surface_class_for_page_class(page_class, config),
+        surface_class=surface_class,
         include_excluded=include_excluded,
         usage_classes=usage_classes,
         entity_index=entity_index,
@@ -1207,7 +1231,11 @@ def entity_read(
         from athenaeum.sensitivity_routing import resolve_pointers_in_text
 
         payload["body"] = resolve_pointers_in_text(
-            payload["body"], config, knowledge_root, caller_audience=caller_audience
+            payload["body"],
+            config,
+            knowledge_root,
+            caller_audience=caller_audience,
+            vault_read_allowed=vault_read_allowed,
         )
     if deprecation_notices:
         payload[DEPRECATION_NOTICE_KEY] = " ".join(deprecation_notices)
@@ -1904,6 +1932,7 @@ def _excluded_block_for_hit(
     config: dict[str, object] | None,
     indexes: dict[str, ExcludedRecordIndex],
     usage_classes: Collection[str] | None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> str:
     """Render one hit's excluded fields (or their redaction markers), or ``""``.
 
@@ -1944,6 +1973,13 @@ def _excluded_block_for_hit(
     # back as though it were the excluded store. Return nothing instead; never
     # an error.
     if not is_excluded(surface_class, config):
+        return ""
+
+    # athenaeum#3176: on a served process the vault holding this record is
+    # asked whether the request's principal may read it, BEFORE the vault is
+    # indexed or any record opened. A refusal renders nothing for the hit: the
+    # same as a read that never asked for sensitive values.
+    if not surface_read_permitted(vault_read_allowed, surface_class, config):
         return ""
 
     knowledge_root = wiki_root.parent
@@ -2096,6 +2132,7 @@ def _recall_via_backend(
     claimed_scope: str | None = None,
     tool_use_id: str | None = None,
     session_resolver: Any | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> str:
     """Delegate recall to a registered search backend, then format results.
 
@@ -2644,6 +2681,7 @@ def _recall_via_backend(
                 config=config,
                 indexes=excluded_indexes,
                 usage_classes=usage_classes,
+                vault_read_allowed=vault_read_allowed,
             )
 
         if isinstance(tags, list):
@@ -4563,6 +4601,46 @@ def create_server(
         env_fallback=_transport_defaults.env_session_attribution
     )
 
+    # Issue athenaeum#3176: on a server reached over the network, a sensitive
+    # read returns a vault's values only to a principal holding read on that
+    # vault. The principal is read from the verified request, never a tool
+    # argument. A stdio server and the command line have no resource-server
+    # configuration, so they get no gate and the flag alone decides.
+    # Issue athenaeum#3171: the identity provider is chosen HERE, once, from
+    # whether this process is a resource server -- never from a tool argument.
+    # `oidc` is only ever asked about the access token FastMCP's verifier
+    # returned for the request; a token that failed verification leaves
+    # `get_access_token()` empty, so no provider sees its claims.
+    from athenaeum.identity_provider import (
+        get_identity_provider,
+        request_principal,
+        startup_provider_name,
+    )
+
+    _identity_provider_name = startup_provider_name(resource_server=serve_auth is not None)
+    _identity_provider = get_identity_provider(_identity_provider_name)
+
+    def _current_principal() -> tuple[str, ...] | None:
+        """The identity key of the request being served, or ``None``."""
+        from fastmcp.server.dependencies import get_access_token
+
+        access = get_access_token() if serve_auth is not None else None
+        return request_principal(_identity_provider, access, config=config)
+
+    def _new_vault_gate(tool_name: str) -> "VaultReadGate | None":
+        """The per-vault read check for one tool call, or ``None`` when ungated."""
+        if serve_auth is None:
+            return None
+        from athenaeum.vault_read_gate import VaultReadGate
+
+        return VaultReadGate(
+            _current_principal(),
+            tool_name=tool_name,
+            config=config,
+            knowledge_root=wiki_root.parent,
+            audit_log_path=audit_log_path,
+        )
+
     def recall(
         query: str,
         top_k: int = 5,
@@ -4617,6 +4695,11 @@ def create_server(
             and remote_policy is not None
             and not remote_policy.sensitive_reads
         )
+        # athenaeum#3176: only a sensitive read that the process ceiling lets
+        # through is asked about vaults.
+        vault_gate = (
+            _new_vault_gate("recall") if include_sensitive_value and not withheld else None
+        )
         rendered = recall_search(
             wiki_root,
             query,
@@ -4631,8 +4714,10 @@ def create_server(
             type_filter=type,
             tool_use_id=active_tool_use_id(),
             session_resolver=_session_resolver,
+            vault_read_allowed=vault_gate,
         )
-        if withheld:
+        if withheld or (vault_gate is not None and vault_gate.denied):
+            # A refused vault reads exactly as the ceiling being off.
             rendered = _with_sensitive_reads_withheld_notice(rendered)
         return _with_deprecation_notices(rendered, deprecation_notices)
 
@@ -5733,6 +5818,9 @@ def create_server(
             # assembly argument, so a caller passing `include_sensitive=True`
             # gets a withheld read rather than an error it could retry around.
             sensitive_reads=(remote_policy is None or remote_policy.sensitive_reads),
+            vault_read_allowed=(
+                _new_vault_gate("read_entity") if include_sensitive_value else None
+            ),
         )
 
     read_entity.__doc__ = read_entity_tool_docstring()
@@ -6141,27 +6229,8 @@ def create_server(
     if remote_policy is not None:
         remote_policy.validate_tool_names(_candidate_tool_names)
 
-    # Issue athenaeum#3171: the identity provider is chosen HERE, once, from
-    # whether this process is a resource server -- never from a tool argument.
-    # `oidc` is only ever asked about the access token FastMCP's verifier
-    # returned for the request; a token that failed verification leaves
-    # `get_access_token()` empty, so no provider sees its claims.
-    from athenaeum.identity_provider import (
-        get_identity_provider,
-        request_principal,
-        startup_provider_name,
-    )
-
-    _identity_provider_name = startup_provider_name(resource_server=serve_auth is not None)
-    _identity_provider = get_identity_provider(_identity_provider_name)
-
-    def _current_principal() -> tuple[str, ...] | None:
-        """The identity key of the request being served, or ``None``."""
-        from fastmcp.server.dependencies import get_access_token
-
-        access = get_access_token() if serve_auth is not None else None
-        return request_principal(_identity_provider, access, config=config)
-
+    # Issue athenaeum#3171: the provider and `_current_principal` are defined
+    # before the tools (athenaeum#3176 reads the principal inside two of them).
     mcp.identity_provider_name = _identity_provider_name  # type: ignore[attr-defined]
     mcp.current_principal = _current_principal  # type: ignore[attr-defined]
     return mcp
