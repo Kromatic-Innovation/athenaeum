@@ -314,6 +314,24 @@ def test_a_path_with_glob_characters_is_matched_literally(tmp_path: Path) -> Non
     assert not _committed(kb, "raw/src/a[2]*.md")
 
 
+def test_the_retirement_snapshot_commits_screened_text_and_skips_unscreened(
+    tmp_path: Path,
+) -> None:
+    from athenaeum.retire import _commit_paths_if_staged
+
+    cfg = _cfg(tmp_path / "vault")
+    kb = _kb(tmp_path, cfg)
+    screened = _put_raw(kb, f"Mail {ROUTED}.\n", "20260101T000000-aaaaaaaa.md")
+    raw_screening.screen_raw_intake(kb, cfg)
+    unscreened = _put_raw(kb, f"Mail {ROUTED}.\n", "20260101T000001-bbbbbbbb.md")
+    open_store(cfg, kb)  # registers the hold
+    rels = [str(p.relative_to(kb)) for p in (screened, unscreened)]
+    assert _commit_paths_if_staged(kb, rels, "provenance") is True
+    assert _committed(kb, rels[0]) and not _committed(kb, rels[1])
+    assert ROUTED not in _all_history(kb)
+    assert _commit_paths_if_staged(kb, [rels[1]], "provenance") is False
+
+
 def test_hold_off_stages_raw_files_as_today_and_names_them(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path / "vault", hold=False)
     kb = _kb(tmp_path, cfg)
