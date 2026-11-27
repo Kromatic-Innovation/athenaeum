@@ -70,6 +70,24 @@ inventing an attribute name**, because a near-synonym of an already-armed attrib
 - A handoff file under `raw/` for each record it refuses, so the refusal is durable and
   triageable rather than lost.
 
+### An escalated correction to a vault field
+
+When a correction is escalated to the decision queue and its field is kept in a vault,
+the question block does not carry the value. Its `Value:` line reads `vault:<ref>`, the
+`Correction ID:` line is the same `<ref>`, and the `Target:` line names the entity by uid
+even if the correction named it by email address. `<ref>` is random; nothing about the
+value, the field or the target is used to make it.
+
+The proposed value, with the field, the op, the source and the observation time, is kept
+on the target's vault record, in the `pending_corrections` section under `<ref>`, and is
+written before the block. Listings of pending questions show the value only to a caller
+the entity read would give it to and a redaction marker naming the field to any other
+caller. Answering the question reads the value back through the entity read and applies
+exactly that value; if it cannot be read the answer is held and nothing is written. Once
+the question is ratified or rejected the entry is removed from the vault record. A
+correction to a field no rule sends to a vault produces the same block as before, and
+blocks written earlier still parse and apply.
+
 ## What it refuses
 
 Every refusal produces `disposition: raised-tier` with a reason. **A refused correction is

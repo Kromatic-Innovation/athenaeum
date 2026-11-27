@@ -197,6 +197,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -981,6 +982,7 @@ def resolve_sensitive_record(
     knowledge_root: Path,
     *,
     caller_audience: set[str] | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> str | None:
     """Resolve a pointer's ``(sensitivity_class, record_id)`` back to its value.
 
@@ -1093,12 +1095,18 @@ def resolve_sensitive_record(
         if not is_page_authorized(policy_meta, caller_audience):
             return None
 
+        # athenaeum#3176: a served process asks whether this request's
+        # principal holds read on the record's vault, before the record is
+        # looked up. A refusal resolves to nothing, like every other failure.
         try:
-            vault_root = _vault_root_for_class(
+            targets = _vault_targets_for_class(
                 wanted_class, config, knowledge_root, for_read=True
             )
         except SensitivityRoutingError:
             return None
+        if vault_read_allowed is not None and not vault_read_allowed(targets[0][0]):
+            return None
+        vault_root = targets[0][1]
 
         vault_root_resolved = vault_root.resolve()
         record_path = (vault_root / f"{wanted_record_id}.md").resolve()
@@ -1151,6 +1159,7 @@ def resolve_pointers_in_text(
     knowledge_root: Path,
     *,
     caller_audience: set[str] | None = None,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> str:
     """Replace each resolvable pointer in *text* with its value (athenaeum#3163).
 
@@ -1168,6 +1177,7 @@ def resolve_pointers_in_text(
             config,
             knowledge_root,
             caller_audience=caller_audience,
+            vault_read_allowed=vault_read_allowed,
         )
         return match.group(0) if value is None else value
 

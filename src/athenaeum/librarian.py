@@ -174,9 +174,14 @@ from athenaeum.config import (
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
 from athenaeum.corrections import (
+    discard_pending_value,
+    find_open_pending_ref,
+    new_pending_ref,
     open_correction_ids,
+    pending_vault_targets,
     render_correction_id_marker,
     run_correction_phase,
+    store_pending_value,
 )
 from athenaeum.delta import (
     _relpath_for,
@@ -314,6 +319,7 @@ from athenaeum.sensitivity_routing import (
 from athenaeum.storage import (
     ReadOnlySurfaceError,
     StorageConfigError,
+    StorageTargetError,
     apply_to_targets,
     discard_counts,
     discarded_page_types,
@@ -8920,6 +8926,17 @@ def _run_store_intake_phase(ctx: RunContext) -> None:
         )
 
 
+def _entity_page_type(entity_path: Path | None) -> str:
+    """The ``type:`` of the page a correction resolved to; ``""`` when it cannot be read."""
+    if entity_path is None:
+        return ""
+    try:
+        meta, _ = parse_frontmatter(entity_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return str(meta.get("type") or "").strip()
+
+
 def _run_correction_phase(ctx: RunContext) -> None:
     """Field-correction fast path (issue athenaeum#797, `docs/design/field-corrections.md`).
 
@@ -8980,17 +8997,76 @@ def _run_correction_phase(ctx: RunContext) -> None:
             json.dumps(result.target, sort_keys=True) if result.target else "?"
         )
         is_schema_proposal = result.disposition == "held-schema-proposal"
+        value_line = f"{result.value!r}"
+        marker_id = result.correction_id
+        # athenaeum#3180: a value the operator keeps in a vault is kept out of
+        # this file. It goes on the target's vault record under a random
+        # reference, BEFORE the block is written; the block carries the
+        # reference, the entity uid in place of the target as submitted (which
+        # may be an email handle) and the reference in place of the id computed
+        # from the value. No vault rule: the block is exactly what it was.
+        if result.entity_uid and result.field and result.op:
+            try:
+                vault_targets = pending_vault_targets(
+                    ctx.knowledge_root,
+                    ctx.config,
+                    result.entity_uid,
+                    str(result.field),
+                    _entity_page_type(result.entity_path),
+                )
+                if vault_targets is not None:
+                    ref = find_open_pending_ref(
+                        ctx.knowledge_root,
+                        ctx.config,
+                        result.entity_uid,
+                        field_name=str(result.field),
+                        op=str(result.op),
+                        value=result.value,
+                        open_refs=open_ids,
+                    )
+                    if ref is not None:
+                        return True  # already open under its reference (§8/§10.2)
+                    ref = new_pending_ref()
+                    store_pending_value(
+                        ctx.knowledge_root,
+                        ctx.config,
+                        result.entity_uid,
+                        ref,
+                        targets=vault_targets,
+                        field_name=str(result.field),
+                        op=str(result.op),
+                        value=result.value,
+                        source=result.source,
+                        observed_at=result.observed_at,
+                        schema_version=(getattr(outcome, "envelope", None) or {}).get(
+                            "schema_version"
+                        ),
+                    )
+                    value_line = f"vault:{ref}"
+                    marker_id = ref
+                    target_desc = json.dumps({"uid": result.entity_uid}, sort_keys=True)
+            except (ValueError, OSError, StorageTargetError) as exc:
+                log.warning(
+                    "corrections: escalation for field=%s not recorded; its value has no "
+                    "home to be kept in (%s)",
+                    result.field,
+                    type(exc).__name__,
+                )
+                return False
+        stored_ref: tuple[str, tuple[str, ...]] | None = None
+        if marker_id != result.correction_id:
+            stored_ref = (marker_id, vault_targets or ())
         description_lines = [
             f"Target: {target_desc}",
             f"Field: {result.field}",
             f"Op: {result.op}",
-            f"Value: {result.value!r}",
+            f"Value: {value_line}",
             f"Source: {result.source}",
             f"Reason: {result.reason}",
         ]
         if result.note:
             description_lines.append(f"Note: {result.note}")
-        description_lines.append(render_correction_id_marker(result.correction_id))
+        description_lines.append(render_correction_id_marker(marker_id))
         item = EscalationItem(
             raw_ref=f"{outcome.source}/{outcome.path.name}",
             entity_name=result.entity_name or "unknown",
@@ -8999,11 +9075,29 @@ def _run_correction_phase(ctx: RunContext) -> None:
             ),
             description="\n".join(description_lines),
         )
-        tier4_escalate(
-            [item], pending_path, config=ctx.config, projects_root=ctx.projects_root
-        )
-        open_ids.add(result.correction_id)
-        escalated_this_run.add(result.correction_id)
+        try:
+            tier4_escalate(
+                [item], pending_path, config=ctx.config, projects_root=ctx.projects_root
+            )
+        except Exception:
+            if stored_ref is not None:
+                # The block was not written: take its value back off the record.
+                try:
+                    discard_pending_value(
+                        ctx.knowledge_root,
+                        ctx.config,
+                        result.entity_uid,
+                        stored_ref[0],
+                        targets=stored_ref[1],
+                    )
+                except Exception as exc:  # noqa: BLE001 — the original error is the one raised
+                    log.warning(
+                        "corrections: pending value not removed after a failed escalation (%s)",
+                        type(exc).__name__,
+                    )
+            raise
+        open_ids.add(marker_id)
+        escalated_this_run.add(marker_id)
         return True
 
     _corrections_share = resolve_corrections_runtime_share(ctx.config)

@@ -301,6 +301,9 @@ class StatusInfo(TypedDict):
     # ``targets``, ``target_count`` and ``in_git`` (the targets inside a git
     # repository, where an erasure does not reach history). Empty without routes.
     storage_routes: list[dict[str, Any]]
+    # Issue athenaeum#3179: the registered names of the sections an entity's vault
+    # record can hold (``pii.RECORD_SECTIONS``).
+    record_sections: list[str]
 
 
 #: Printed for a :data:`StatusInfo` ``page_recompile`` field whose producer
@@ -613,6 +616,16 @@ def scan_unmarked_sentences(
             out.append((fpath.name, coverage.unmarked, coverage.total))
     out.sort(key=lambda item: (item[1] / item[2], item[1]), reverse=True)
     return out
+
+
+def _record_section_names() -> list[str]:
+    try:
+        from athenaeum.pii import record_section_names
+
+        return list(record_section_names())
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug("status: record-section list skipped (%s): %s", type(exc).__name__, exc)
+        return []
 
 
 def status(knowledge_root: Path) -> StatusInfo:
@@ -1039,6 +1052,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "drop_log_enabled": drop_log_enabled,
         "recent_drop_count": recent_drop_count,
         "storage_routes": storage_routes,
+        "record_sections": _record_section_names(),
     }
 
 
@@ -1362,6 +1376,10 @@ def format_status(info: StatusInfo, *, verbose: bool = False) -> str:
                     f"    [warn] target {name!r} is inside a git repository: an erasure "
                     "does not reach its history"
                 )
+
+    record_sections = info.get("record_sections") or []
+    if record_sections:
+        lines.append(f"Record sections:      {', '.join(record_sections)}")
 
     if info["last_commit_date"]:
         lines.append(f"Last commit:          {info['last_commit_date']}")

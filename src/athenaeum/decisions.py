@@ -1262,8 +1262,15 @@ def list_pending_decisions(
     caller_audience: set[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    include_sensitive: bool = False,
 ) -> list[dict]:
     """Unified list of pending questions + merges, oldest first.
+
+    Issue athenaeum#3180: a field-correction block whose field is kept in a vault
+    carries a reference, not the value. With *include_sensitive* (and an owner
+    caller, ``caller_audience is None``) the item shows the value, read through
+    the entity read; for any other caller it shows a redaction marker naming the
+    field.
 
     ``wiki_root`` is the directory holding ``_pending_questions.md`` and
     ``_pending_merges.md`` (i.e. ``<knowledge>/wiki``). Items are sorted by
@@ -1363,8 +1370,50 @@ def list_pending_decisions(
         live_ids={d["id"] for d in decisions if isinstance(d.get("id"), str)},
     )
     decisions.sort(key=lambda d: d["created_at"] or "")
+    page = paginate(decisions, offset=offset, limit=limit)["items"]
+    _resolve_value_refs(
+        page, wiki_root, include_sensitive=include_sensitive and caller_audience is None
+    )
+    return page
 
-    return paginate(decisions, offset=offset, limit=limit)["items"]
+
+def _replace_in_strings(node: object, views: dict[str, str]) -> object:
+    if isinstance(node, str):
+        for ref, shown in views.items():
+            node = node.replace(f"vault:{ref}", shown)
+        return node
+    if isinstance(node, list):
+        return [_replace_in_strings(x, views) for x in node]
+    if isinstance(node, dict):
+        return {k: _replace_in_strings(v, views) for k, v in node.items()}
+    return node
+
+
+def _resolve_value_refs(items: list[dict], wiki_root: Path, *, include_sensitive: bool) -> None:
+    """Replace a field-correction reference in each item, in place (athenaeum#3180).
+
+    Done on the page being returned, after the store and the framing, so the
+    stored queue and presentations only ever hold the reference.
+    """
+    from athenaeum.config import load_config
+    from athenaeum.corrections import description_value_views
+
+    knowledge_root = wiki_root.parent
+    config = None
+    for position, item in enumerate(items):
+        payload = item.get("payload")
+        description = payload.get("description") if isinstance(payload, dict) else None
+        if not isinstance(description, str) or "vault:" not in description:
+            continue
+        if config is None:
+            config = load_config(knowledge_root)
+        views = description_value_views(
+            description, knowledge_root, config, include_sensitive=include_sensitive
+        )
+        if views:
+            replaced = _replace_in_strings(item, views)
+            assert isinstance(replaced, dict)
+            items[position] = replaced
 
 
 def collect_unframed_decisions(
@@ -1554,6 +1603,7 @@ def list_pending_decisions_page(
     caller_audience: set[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
+    include_sensitive: bool = False,
 ) -> dict:
     """Bounded, self-describing page of :func:`list_pending_decisions`.
 
@@ -1587,6 +1637,7 @@ def list_pending_decisions_page(
         max_sources_per_merge=max_sources_per_merge,
         max_item_context_tokens=max_item_context_tokens,
         caller_audience=caller_audience,
+        include_sensitive=include_sensitive,
     )
     return paginate(all_decisions, offset=offset, limit=limit)
 

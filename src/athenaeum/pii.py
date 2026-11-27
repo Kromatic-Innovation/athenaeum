@@ -193,6 +193,8 @@ from athenaeum.models import (
     valid_until_expired,
 )
 from athenaeum.storage import (
+    apply_to_targets,
+    configured_routes,
     inside_git_repository,
     route_for,
     surface_root_for_class,
@@ -5492,6 +5494,8 @@ EXCLUDED_RECORD_BOOKKEEPING_FIELDS: frozenset[str] = frozenset(
         "observed_at",
         "valid_until",
         "bounce_diagnostic",
+        # Engine-written named sections (athenaeum#3179): never a data field.
+        "sections",
     }
 )
 
@@ -5815,6 +5819,13 @@ class EntityRead:
     #: (athenaeum#3174): the page exists, nothing of it is returned. ``page_path``
     #: is then the vault's directory, never the page's own file name.
     withheld: bool = False
+    #: Engine-written entries kept on the record, ``{section: {key: payload}}``
+    #: (athenaeum#3179). Filled only when the read carried the inclusion flag.
+    sections: dict[str, dict[str, Any]] = dataclass_field(default_factory=dict)
+    #: One marker per section when the flag was off: ``field`` is
+    #: ``sections.<name>`` and ``value_count`` how many entries it holds. No key
+    #: and no payload.
+    section_redactions: tuple[RedactionMarker, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable dict: paths as ``str``, redactions as a list of dicts.
@@ -5853,6 +5864,12 @@ class EntityRead:
             },
             "do_not_email": self.do_not_email.to_dict(),
             **({"withheld": True} if self.withheld else {}),
+            **({"sections": self.sections} if self.sections else {}),
+            **(
+                {"section_redactions": [m.to_dict() for m in self.section_redactions]}
+                if self.section_redactions
+                else {}
+            ),
         }
 
 
@@ -6028,6 +6045,9 @@ def _entity_read_from_indexes(
         include_excluded=include_excluded,
         usage_classes=wanted_classes,
     )
+    sections, section_redactions = assemble_record_sections(
+        record_meta, include_excluded=include_excluded
+    )
 
     return EntityRead(
         uid=uid,
@@ -6040,6 +6060,8 @@ def _entity_read_from_indexes(
         contact_record_path=record_path,
         classifications=classifications,
         validity=assemble_excluded_validity(record_meta, fields),
+        sections=sections,
+        section_redactions=section_redactions,
         # Populated even when the read is redacted — see `EntityRead`: the mark
         # carries no contact value to withhold. Reads BOTH surfaces (issue
         # athenaeum#960): the page's own frontmatter is already in hand as
@@ -6251,6 +6273,324 @@ def record_placement(
         return RecordPlacement("nowhere", (), "sensitive-no-vault")
 
     return finish(RecordPlacement("ordinary", (), "no-rule"))
+
+
+# ---------------------------------------------------------------------------
+# Named sections on an entity's vault record (athenaeum#3179)
+# ---------------------------------------------------------------------------
+
+#: The record key holding engine-written entries: ``sections.<section>.<key>``.
+RECORD_SECTIONS_FIELD = "sections"
+
+#: Section names the engine may write, declared here and nowhere else, so an
+#: unknown name is an error and the status command can list what exists. Each
+#: value says what the section is for.
+RECORD_SECTIONS: dict[str, str] = {
+    "test_section": "Entries used by the tests of the section writer.",
+    "pending_corrections": (
+        "A proposed value of a vault field, held while its correction question "
+        "is open (athenaeum#3180)."
+    ),
+}
+
+
+class RecordSectionError(ValueError):
+    """A section write or delete refused; the message never carries a payload."""
+
+
+def record_section_names() -> tuple[str, ...]:
+    """The registered section names, sorted."""
+    return tuple(sorted(RECORD_SECTIONS))
+
+
+def read_surface_record(surface_root: Path, uid: str) -> tuple[Path, dict[str, Any], str]:
+    """Resolve *uid*'s record under *surface_root* (athenaeum#872, moved from corrections).
+
+    Reached through :func:`resolve_contact_record_for_uid` -- the SAME uid-keyed
+    resolution :func:`read_entity` uses -- so a value a writer puts on the
+    record is visible to every reader of it.
+
+    Returns ``(path, meta, body)``:
+
+    - an EXISTING record already carrying *uid*, parsed; or
+    - a read-through of a legacy ``{uid}.json`` record when no ``.md`` record
+      carries the uid but that file exists. *path* is still the canonical
+      ``{uid}.md``, so the next write upgrades it; the legacy file is left
+      untouched; or
+    - the deterministic ``{uid}.md`` path with empty ``meta``/``body`` when
+      neither exists (the mint case).
+    """
+    existing_path = resolve_contact_record_for_uid(surface_root, uid)
+    if existing_path is not None:
+        meta, body = parse_frontmatter(existing_path.read_text(encoding="utf-8"))
+        return existing_path, (meta if isinstance(meta, dict) else {}), body
+
+    canonical_path = surface_root / f"{uid}.md"
+    legacy_path = surface_root / f"{uid}.json"
+    if legacy_path.exists():
+        try:
+            legacy_raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            legacy_raw = None
+        if isinstance(legacy_raw, dict):
+            return canonical_path, legacy_raw, ""
+
+    return canonical_path, {}, ""
+
+
+def write_surface_record(path: Path, record: dict[str, Any], *, body: str = "") -> None:
+    """Write *record* to *path* in the markdown-frontmatter shape every writer on
+    the excluded surface uses (athenaeum#872, moved from corrections)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, render_frontmatter(record) + "\n" + body)
+
+
+def _section_checked(section: str) -> str:
+    name = str(section or "").strip()
+    if name not in RECORD_SECTIONS:
+        raise RecordSectionError(
+            f"unknown record section {name!r}; registered sections: {list(record_section_names())}"
+        )
+    return name
+
+
+def _section_key_checked(key: str) -> str:
+    text = str(key or "").strip()
+    if not text:
+        raise RecordSectionError("a record section key must be a non-empty string")
+    return text
+
+
+def _rule_target_names(
+    config: dict[str, Any] | None, page_type: str | None = None
+) -> frozenset[str]:
+    """Locations a ``storage.routes`` rule names; with *page_type*, only rules that
+    apply to that page type (a rule for a sensitivity class applies to any)."""
+    return frozenset(
+        name
+        for rule in configured_routes(config)
+        if page_type is None or rule.page_type in (None, page_type)
+        for name in rule.to
+    )
+
+
+def _entity_page_type(knowledge_root: Path, config: dict[str, Any] | None, uid: str) -> str | None:
+    """The ``type:`` of *uid*'s page, or ``None`` when no page of that uid exists."""
+    from athenaeum.entity_index_cache import entity_index_for_uid
+
+    page = entity_index_for_uid(knowledge_root / "wiki", uid).get_by_uid(uid)
+    if page is None:
+        page = vault_page_path(knowledge_root, config, uid)
+    if page is None:
+        return None
+    try:
+        meta, _ = parse_frontmatter(page.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return str(meta.get("type") or "").strip()
+
+
+def write_record_section(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    section: str,
+    key: str,
+    payload: Any,
+    *,
+    targets: Iterable[str],
+) -> bool:
+    """Store *payload* on *uid*'s record in each of *targets*, at ``sections.<section>.<key>``.
+
+    *targets* are location names, typically from :func:`record_placement`'s
+    ``vault`` answer. Rules:
+
+    - *section* must be registered in :data:`RECORD_SECTIONS`.
+    - The entity must already exist; this never creates an entity and never
+      changes a page.
+    - A record is created for an entity that has none only in a location a
+      ``storage.routes`` rule names; otherwise the write is refused.
+    - The same section, key and payload written twice changes nothing. With
+      several targets, each is written in order and the first failure raises
+      :class:`athenaeum.storage.StorageTargetError` naming it; a re-run
+      completes the rest.
+
+    Returns ``True`` when any target changed. Section and key are logged; the
+    payload never is, and no error message carries it.
+    """
+    name = _section_checked(section)
+    entry = _section_key_checked(key)
+    target_list = list(dict.fromkeys(str(t) for t in targets))
+    if not target_list:
+        raise RecordSectionError("no target given for a record section write")
+    subject = str(uid or "").strip()
+    if not subject:
+        raise RecordSectionError("a record section write needs the entity uid")
+    page_type = _entity_page_type(knowledge_root, config, subject)
+    if page_type is None:
+        raise RecordSectionError(f"no entity {subject!r}; a section never creates one")
+    named = _rule_target_names(config, page_type)
+    changed: list[bool] = []
+
+    def _write_one(target: str) -> None:
+        root = target_root(target, config, knowledge_root)
+        path, meta, body = read_surface_record(root, subject)
+        if not path.exists() and target not in named:
+            raise RecordSectionError(
+                f"no storage rule names target {target!r}; a record is not created there"
+            )
+        sections = meta.get(RECORD_SECTIONS_FIELD)
+        sections = dict(sections) if isinstance(sections, dict) else {}
+        held = sections.get(name)
+        held = dict(held) if isinstance(held, dict) else {}
+        if entry in held and held[entry] == payload and path.exists():
+            return
+        held[entry] = payload
+        sections[name] = held
+        merged = dict(meta)
+        merged.setdefault("uid", subject)
+        merged[RECORD_SECTIONS_FIELD] = sections
+        # A payload the record cannot hold and read back as it was is refused
+        # before anything is written (and without echoing it).
+        try:
+            stored: Any = parse_frontmatter(render_frontmatter(merged))[0]
+            readable = stored[RECORD_SECTIONS_FIELD][name][entry] == payload
+        except Exception:  # noqa: BLE001 — any failure means it cannot be held
+            readable = False
+        if not readable:
+            raise RecordSectionError(
+                f"the payload for section {name!r} key {entry!r} cannot be stored on a "
+                "record and read back unchanged (use plain strings, numbers, lists and mappings)"
+            )
+        write_surface_record(path, merged, body=body)
+        changed.append(True)
+        log.info("record section written: section=%s key=%s target=%s", name, entry, target)
+
+    apply_to_targets(target_list, _write_one)
+    return bool(changed)
+
+
+def delete_record_section(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    section: str,
+    key: str | None = None,
+    *,
+    targets: Iterable[str],
+) -> bool:
+    """Remove one entry (*key*) or the whole *section* from *uid*'s record in every target.
+
+    Idempotent: a target with no such record or entry is left as it is. A
+    target whose root is not reachable raises
+    :class:`athenaeum.storage.StorageTargetError` naming it. Returns ``True``
+    when any target changed.
+    """
+    name = _section_checked(section)
+    entry = _section_key_checked(key) if key is not None else None
+    target_list = list(dict.fromkeys(str(t) for t in targets))
+    if not target_list:
+        raise RecordSectionError("no target given for a record section delete")
+    subject = str(uid or "").strip()
+    changed: list[bool] = []
+
+    def _delete_one(target: str) -> None:
+        root = target_root(target, config, knowledge_root)
+        if not root.is_dir():
+            raise FileNotFoundError(f"target root of {target!r} is not reachable")
+        path, meta, body = read_surface_record(root, subject)
+        sections = meta.get(RECORD_SECTIONS_FIELD)
+        if not path.exists() or not isinstance(sections, dict) or name not in sections:
+            return
+        sections = dict(sections)
+        held = sections[name]
+        if entry is None:
+            del sections[name]
+        else:
+            if not isinstance(held, dict) or entry not in held:
+                return
+            held = {k: v for k, v in held.items() if k != entry}
+            if held:
+                sections[name] = held
+            else:
+                del sections[name]
+        merged = dict(meta)
+        if sections:
+            merged[RECORD_SECTIONS_FIELD] = sections
+        else:
+            merged.pop(RECORD_SECTIONS_FIELD, None)
+        write_surface_record(path, merged, body=body)
+        changed.append(True)
+        log.info(
+            "record section removed: section=%s key=%s target=%s",
+            name,
+            entry if entry is not None else "*",
+            target,
+        )
+
+    apply_to_targets(target_list, _delete_one, action="delete")
+    return bool(changed)
+
+
+def assemble_record_sections(
+    record_meta: Mapping[str, Any] | None, *, include_excluded: bool
+) -> tuple[dict[str, dict[str, Any]], tuple[RedactionMarker, ...]]:
+    """``(sections, redactions)`` from a record's frontmatter, gated by the read flag.
+
+    With the flag: the entries, ``{section: {key: payload}}``. Without it: one
+    marker per non-empty section (``field`` is ``sections.<name>``,
+    ``value_count`` the number of entries), never a key or a payload.
+    """
+    raw = record_meta.get(RECORD_SECTIONS_FIELD) if record_meta else None
+    if not isinstance(raw, dict):
+        return {}, ()
+    sections: dict[str, dict[str, Any]] = {}
+    markers: list[RedactionMarker] = []
+    for name, entries in raw.items():
+        if not isinstance(entries, dict) or not entries:
+            continue
+        if include_excluded:
+            sections[str(name)] = {str(k): v for k, v in entries.items()}
+        else:
+            markers.append(RedactionMarker(field=f"sections.{name}", value_count=len(entries)))
+    return sections, tuple(markers)
+
+
+def entity_read_by_uid(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    *,
+    include_excluded: bool,
+) -> EntityRead | None:
+    """:func:`read_entity` for *uid* without the caller naming the surface class.
+
+    Finds the page (wiki index, else a vault page), takes its ``type:``, maps it
+    to its surface class and reads with *include_excluded*. ``None`` when the uid
+    resolves to no page or the read fails.
+    """
+    from athenaeum.entity_index_cache import entity_index_for_uid
+
+    subject = str(uid or "").strip()
+    if not subject:
+        return None
+    try:
+        index = entity_index_for_uid(knowledge_root / "wiki", subject)
+        page_path = index.get_by_uid(subject) or vault_page_path(knowledge_root, config, subject)
+        if page_path is None:
+            return None
+        frontmatter, _ = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+        surface = surface_class_for_page_class(str(frontmatter.get("type") or "").strip(), config)
+        return read_entity(
+            knowledge_root,
+            config,
+            subject,
+            surface_class=surface,
+            include_excluded=include_excluded,
+            entity_index=index,
+        )
+    except (ValueError, OSError):
+        return None
 
 
 def read_entity(
@@ -6968,6 +7308,16 @@ __all__ = [
     "vault_page_path",
     "RecordPlacement",
     "record_placement",
+    "RECORD_SECTIONS",
+    "RECORD_SECTIONS_FIELD",
+    "RecordSectionError",
+    "record_section_names",
+    "read_surface_record",
+    "write_surface_record",
+    "write_record_section",
+    "delete_record_section",
+    "assemble_record_sections",
+    "entity_read_by_uid",
     "read_entities",
     "CONTACT_CLASSIFICATION_FIELD",
     "USAGE_CLASS_OBSERVED",
