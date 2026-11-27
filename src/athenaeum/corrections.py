@@ -3854,6 +3854,22 @@ def resolve_pending_value(
     )
 
 
+def discard_pending_value(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    ref: str,
+    *,
+    targets: Sequence[str],
+) -> None:
+    """Undo :func:`store_pending_value` for a block that was never written."""
+    from athenaeum import pii
+
+    pii.delete_record_section(
+        knowledge_root, config, uid, PENDING_CORRECTIONS_SECTION, ref, targets=targets
+    )
+
+
 def drop_pending_value(
     parsed: EscalatedCorrection, knowledge_root: Path, config: dict[str, Any] | None
 ) -> None:

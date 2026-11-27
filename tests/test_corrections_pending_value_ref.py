@@ -312,3 +312,19 @@ def test_old_blocks_still_parse() -> None:
     )
     parsed = corrections.parse_escalated_correction(old)
     assert not isinstance(parsed, str) and parsed.value == "v" and parsed.value_ref is None
+
+
+def test_a_failed_escalation_leaves_no_pending_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import athenaeum.librarian as librarian_mod
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(librarian_mod, "tier4_escalate", boom)
+    _seed(tmp_path)
+    _batch_file(tmp_path, {"uid": UID})
+    with pytest.raises(OSError, match="disk full"):
+        _escalate(tmp_path, _config())
+    assert _entries(tmp_path) == {}

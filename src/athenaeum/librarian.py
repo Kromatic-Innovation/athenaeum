@@ -172,6 +172,7 @@ from athenaeum.config import (
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
 from athenaeum.corrections import (
+    discard_pending_value,
     find_open_pending_ref,
     new_pending_ref,
     open_correction_ids,
@@ -8951,6 +8952,9 @@ def _run_correction_phase(ctx: RunContext) -> None:
                     type(exc).__name__,
                 )
                 return False
+        stored_ref: tuple[str, tuple[str, ...]] | None = None
+        if marker_id != result.correction_id:
+            stored_ref = (marker_id, vault_targets or ())
         description_lines = [
             f"Target: {target_desc}",
             f"Field: {result.field}",
@@ -8970,9 +8974,27 @@ def _run_correction_phase(ctx: RunContext) -> None:
             ),
             description="\n".join(description_lines),
         )
-        tier4_escalate(
-            [item], pending_path, config=ctx.config, projects_root=ctx.projects_root
-        )
+        try:
+            tier4_escalate(
+                [item], pending_path, config=ctx.config, projects_root=ctx.projects_root
+            )
+        except Exception:
+            if stored_ref is not None:
+                # The block was not written: take its value back off the record.
+                try:
+                    discard_pending_value(
+                        ctx.knowledge_root,
+                        ctx.config,
+                        result.entity_uid,
+                        stored_ref[0],
+                        targets=stored_ref[1],
+                    )
+                except Exception as exc:  # noqa: BLE001 — the original error is the one raised
+                    log.warning(
+                        "corrections: pending value not removed after a failed escalation (%s)",
+                        type(exc).__name__,
+                    )
+            raise
         open_ids.add(marker_id)
         escalated_this_run.add(marker_id)
         return True
