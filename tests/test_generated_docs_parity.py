@@ -544,3 +544,50 @@ class TestSectionMatchesYamlPath:
         assert _section_path_mismatches(text) == [
             "resolve_bad: 'asserter.grants' filed under ## librarian"
         ]
+
+
+class TestMultiVariableResolverEnvVars:
+    """A resolver reading a variable and its deprecated alias must surface both."""
+
+    SRC = (
+        "def _resolve_helper():\n"
+        "    return os.environ.get('ATHENAEUM_HELPER_VAR')\n"
+        "def resolve_thing():\n"
+        '    """Reads ``ATHENAEUM_NEW_NAME``."""\n'
+        "    old = os.environ.get('ATHENAEUM_OLD_NAME')\n"
+        "    new = os.environ.get('ATHENAEUM_NEW_NAME')\n"
+        "    return _resolve_helper() or old or new\n"
+        "def resolve_single():\n"
+        "    return os.environ.get('ATHENAEUM_ONLY_VAR')\n"
+    )
+
+    def _funcs(self):
+        import ast
+
+        tree = ast.parse(self.SRC)
+        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        return funcs
+
+    def test_all_env_vars_lists_every_distinct_variable(self) -> None:
+        funcs = self._funcs()
+        info = gen_config_reference._ResolverInfo(
+            "resolve_thing", funcs["resolve_thing"], None, ""
+        )
+        assert gen_config_reference._all_env_vars(info, funcs) == [
+            "ATHENAEUM_NEW_NAME",
+            "ATHENAEUM_OLD_NAME",
+            "ATHENAEUM_HELPER_VAR",
+        ]
+
+    def test_single_variable_resolver_has_one(self) -> None:
+        funcs = self._funcs()
+        info = gen_config_reference._ResolverInfo(
+            "resolve_single", funcs["resolve_single"], None, ""
+        )
+        assert gen_config_reference._all_env_vars(info, funcs) == ["ATHENAEUM_ONLY_VAR"]
+
+    def test_committed_table_lists_both_serve_variables(self) -> None:
+        text = CONFIG_REFERENCE_DOC.read_text(encoding="utf-8")
+        table = text.split("## Other environment variables", 1)[1]
+        assert "| `ATHENAEUM_SERVE_SENSITIVE_READS` |" in table
+        assert "| `ATHENAEUM_SERVE_EXCLUDED_FIELDS` |" in table

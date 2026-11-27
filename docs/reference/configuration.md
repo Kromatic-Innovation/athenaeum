@@ -6568,7 +6568,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 
 ## Other environment variables
 
-`ATHENAEUM_*` variables read somewhere in `src/` that are NOT sourced from a `config.py` `resolve_*` function — either a resolver in a different module (e.g. `fingerprint.py`, `clusters.py`, `batch_state.py`), a per-knob model-routing variable, or a variable read directly outside the resolver layer. Listed here (rather than omitted) so this page stays the complete answer to "what `ATHENAEUM_*` variables exist" — the same guarantee `scripts/check_env_docs.py` enforces in both directions.
+`ATHENAEUM_*` variables read somewhere in `src/` that are NOT sourced from a `config.py` `resolve_*` function — either a resolver in a different module (e.g. `fingerprint.py`, `clusters.py`, `batch_state.py`), a per-knob model-routing variable, or a variable read directly outside the resolver layer. A resolver that reads more than one variable (a knob and its deprecated alias) lists all of them here, since its section names only one. Listed here (rather than omitted) so this page stays the complete answer to "what `ATHENAEUM_*` variables exist" — the same guarantee `scripts/check_env_docs.py` enforces in both directions.
 
 | Env var | Referenced in |
 |---|---|
@@ -6647,6 +6647,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_SCOPE_SAMENESS_MAX_TOKENS` | `src/athenaeum/decision_answers.py` |
 | `ATHENAEUM_SCOPE_SAMENESS_THINKING` | `src/athenaeum/decision_answers.py` |
 | `ATHENAEUM_SERVE_EXCLUDED_FIELDS` | `src/athenaeum/_cmd_serve.py`, `src/athenaeum/config.py` |
+| `ATHENAEUM_SERVE_SENSITIVE_READS` | `src/athenaeum/_cmd_serve.py`, `src/athenaeum/config.py` |
 | `ATHENAEUM_SESSION_END_RUNTIME_MARGIN` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_BACKOFF_BASE_SECONDS` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_STUCK_FILE_THRESHOLD` | `src/athenaeum/librarian.py` |
