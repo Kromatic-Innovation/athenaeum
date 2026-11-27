@@ -224,3 +224,21 @@ def test_status_lists_the_registered_sections(tmp_path: Path) -> None:
     info = status(tmp_path)
     assert "test_section" in info["record_sections"]
     assert "test_section" in format_status(info)
+
+
+def test_a_payload_the_record_cannot_hold_is_refused_before_any_write(root: Path) -> None:
+    for bad in (("a", "b"), object()):
+        with pytest.raises(StorageTargetError) as err:
+            _write(root, payload=bad)
+        assert "cannot be stored" in str(err.value.__cause__)
+    assert not (root / "vault_a" / f"{UID}.md").exists()
+
+
+def test_a_record_is_minted_only_for_a_rule_that_applies_to_the_entity_type(
+    root: Path,
+) -> None:
+    cfg = _cfg()
+    cfg["storage"]["routes"] = [{"page_type": "vendor", "fields": ["emails"], "to": ["vault_a"]}]
+    with pytest.raises(StorageTargetError, match="vault_a"):
+        _write(root, config=cfg, targets=("vault_a",))
+    assert not (root / "vault_a" / f"{UID}.md").exists()

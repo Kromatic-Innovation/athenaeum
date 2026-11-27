@@ -6357,16 +6357,33 @@ def _section_key_checked(key: str) -> str:
     return text
 
 
-def _rule_target_names(config: dict[str, Any] | None) -> frozenset[str]:
-    return frozenset(name for rule in configured_routes(config) for name in rule.to)
+def _rule_target_names(
+    config: dict[str, Any] | None, page_type: str | None = None
+) -> frozenset[str]:
+    """Locations a ``storage.routes`` rule names; with *page_type*, only rules that
+    apply to that page type (a rule for a sensitivity class applies to any)."""
+    return frozenset(
+        name
+        for rule in configured_routes(config)
+        if page_type is None or rule.page_type in (None, page_type)
+        for name in rule.to
+    )
 
 
-def _entity_exists(knowledge_root: Path, config: dict[str, Any] | None, uid: str) -> bool:
+def _entity_page_type(knowledge_root: Path, config: dict[str, Any] | None, uid: str) -> str | None:
+    """The ``type:`` of *uid*'s page, or ``None`` when no page of that uid exists."""
     from athenaeum.entity_index_cache import entity_index_for_uid
 
-    if entity_index_for_uid(knowledge_root / "wiki", uid).get_by_uid(uid) is not None:
-        return True
-    return vault_page_path(knowledge_root, config, uid) is not None
+    page = entity_index_for_uid(knowledge_root / "wiki", uid).get_by_uid(uid)
+    if page is None:
+        page = vault_page_path(knowledge_root, config, uid)
+    if page is None:
+        return None
+    try:
+        meta, _ = parse_frontmatter(page.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return str(meta.get("type") or "").strip()
 
 
 def write_record_section(
@@ -6405,9 +6422,10 @@ def write_record_section(
     subject = str(uid or "").strip()
     if not subject:
         raise RecordSectionError("a record section write needs the entity uid")
-    if not _entity_exists(knowledge_root, config, subject):
+    page_type = _entity_page_type(knowledge_root, config, subject)
+    if page_type is None:
         raise RecordSectionError(f"no entity {subject!r}; a section never creates one")
-    named = _rule_target_names(config)
+    named = _rule_target_names(config, page_type)
     changed: list[bool] = []
 
     def _write_one(target: str) -> None:
@@ -6428,6 +6446,18 @@ def write_record_section(
         merged = dict(meta)
         merged.setdefault("uid", subject)
         merged[RECORD_SECTIONS_FIELD] = sections
+        # A payload the record cannot hold and read back as it was is refused
+        # before anything is written (and without echoing it).
+        try:
+            stored: Any = parse_frontmatter(render_frontmatter(merged))[0]
+            readable = stored[RECORD_SECTIONS_FIELD][name][entry] == payload
+        except Exception:  # noqa: BLE001 — any failure means it cannot be held
+            readable = False
+        if not readable:
+            raise RecordSectionError(
+                f"the payload for section {name!r} key {entry!r} cannot be stored on a "
+                "record and read back unchanged (use plain strings, numbers, lists and mappings)"
+            )
         write_surface_record(path, merged, body=body)
         changed.append(True)
         log.info("record section written: section=%s key=%s target=%s", name, entry, target)
