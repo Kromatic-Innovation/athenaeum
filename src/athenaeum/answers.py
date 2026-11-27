@@ -1813,12 +1813,26 @@ def _apply_field_correction(
         return "held", parsed
 
     if answer_token == "reject":
+        if parsed.value_ref is not None:
+            # athenaeum#3180: the question is resolved; its pending value goes.
+            try:
+                corrections.drop_pending_value(parsed, knowledge_root, config)
+            except Exception as exc:  # noqa: BLE001 — held, retried next run
+                return "held", f"pending value could not be removed ({type(exc).__name__})"
         return "rejected", f"operator rejected correction {parsed.correction_id}; no write"
 
     # answer_token == "ratify"
     # athenaeum#3162: a configuration still setting the removed corrections
     # routing key applies no correction.
     corrections.refuse_removed_sensitive_fields(config)
+    if parsed.value_ref is not None:
+        # athenaeum#3180: the value is on the target's vault record; fetched
+        # now, through the entity read, never at parse time. Unreadable or not
+        # this block's own: held, nothing written.
+        resolved = corrections.resolve_pending_value(parsed, knowledge_root, config)
+        if isinstance(resolved, str):
+            return "held", resolved
+        parsed = resolved
     index = EntityIndex(wiki_root)
     registry_entities = corrections.load_registry(knowledge_root)
     # Issue athenaeum#1850: the ratified write is attributed to the OPERATOR,
@@ -1865,6 +1879,11 @@ def _apply_field_correction(
         attribution_context=attribution_context,
     )
     if result.disposition in ("applied", "routed-elsewhere", "recorded-as-prose", "noop"):
+        if parsed.value_ref is not None:
+            try:
+                corrections.drop_pending_value(parsed, knowledge_root, config)
+            except Exception as exc:  # noqa: BLE001 — held, a re-run re-applies as a noop
+                return "held", f"applied; pending value could not be removed ({type(exc).__name__})"
         page_name = result.entity_path.name if result.entity_path is not None else "?"
         return "applied", f"{result.disposition} to {page_name} ({result.reason})"
     return "held", result.reason

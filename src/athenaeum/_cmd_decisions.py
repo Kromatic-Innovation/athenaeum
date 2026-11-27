@@ -522,6 +522,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         with_proposal=with_proposal,
         max_sources_per_merge=max_sources_per_merge,
         max_item_context_tokens=max_item_context_tokens,
+        include_sensitive=bool(getattr(args, "include_sensitive", False)),
     )
 
     if sub == "count":
@@ -1023,6 +1024,14 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
                 help=(
                     "Include the (optional) `**Proposed resolution**` block "
                     "on question items (athenaeum#126)."
+                ),
+            )
+            parser.add_argument(
+                "--include-sensitive",
+                action="store_true",
+                help=(
+                    "Show the proposed value of a field-correction question whose "
+                    "field is kept in a vault (default: a redaction marker)."
                 ),
             )
 

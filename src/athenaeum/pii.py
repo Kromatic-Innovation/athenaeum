@@ -6287,6 +6287,10 @@ RECORD_SECTIONS_FIELD = "sections"
 #: value says what the section is for.
 RECORD_SECTIONS: dict[str, str] = {
     "test_section": "Entries used by the tests of the section writer.",
+    "pending_corrections": (
+        "A proposed value of a vault field, held while its correction question "
+        "is open (athenaeum#3180)."
+    ),
 }
 
 
@@ -6520,6 +6524,43 @@ def assemble_record_sections(
         else:
             markers.append(RedactionMarker(field=f"sections.{name}", value_count=len(entries)))
     return sections, tuple(markers)
+
+
+def entity_read_by_uid(
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    *,
+    include_excluded: bool,
+) -> EntityRead | None:
+    """:func:`read_entity` for *uid* without the caller naming the surface class.
+
+    Finds the page (wiki index, else a vault page), takes its ``type:``, maps it
+    to its surface class and reads with *include_excluded*. ``None`` when the uid
+    resolves to no page or the read fails.
+    """
+    from athenaeum.entity_index_cache import entity_index_for_uid
+
+    subject = str(uid or "").strip()
+    if not subject:
+        return None
+    try:
+        index = entity_index_for_uid(knowledge_root / "wiki", subject)
+        page_path = index.get_by_uid(subject) or vault_page_path(knowledge_root, config, subject)
+        if page_path is None:
+            return None
+        frontmatter, _ = parse_frontmatter(page_path.read_text(encoding="utf-8"))
+        surface = surface_class_for_page_class(str(frontmatter.get("type") or "").strip(), config)
+        return read_entity(
+            knowledge_root,
+            config,
+            subject,
+            surface_class=surface,
+            include_excluded=include_excluded,
+            entity_index=index,
+        )
+    except (ValueError, OSError):
+        return None
 
 
 def read_entity(
@@ -7246,6 +7287,7 @@ __all__ = [
     "write_record_section",
     "delete_record_section",
     "assemble_record_sections",
+    "entity_read_by_uid",
     "read_entities",
     "CONTACT_CLASSIFICATION_FIELD",
     "USAGE_CLASS_OBSERVED",

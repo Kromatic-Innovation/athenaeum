@@ -582,6 +582,7 @@ List all pending decisions, oldest first.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
+| `--include-sensitive` | off (flag absent) | — | Show the proposed value of a field-correction question whose field is kept in a vault (default: a redaction marker). |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | `0` | — | Truncate to first N (default: 0 = unlimited). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
@@ -602,6 +603,7 @@ Show the oldest pending decision (single block).
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
+| `--include-sensitive` | off (flag absent) | — | Show the proposed value of a field-correction question whose field is kept in a vault (default: a redaction marker). |
 | `--json` | off (flag absent) | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--with-proposal` | off (flag absent) | — | Include the (optional) `**Proposed resolution**` block on question items. |

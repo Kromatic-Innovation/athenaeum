@@ -114,6 +114,7 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 ### Changed
 
+- An escalated field correction whose field is kept in a vault no longer puts the proposed value in the question block (athenaeum#3180). The block's `Value:` line reads `vault:<ref>`, its `Correction ID:` is the same random `<ref>` (not computed from the value), and its `Target:` names the entity by uid even when the correction named an email address. The value is kept on the target's vault record under the `pending_corrections` section, written before the block, read back through the entity read when the answer is applied, and removed when the question is ratified or rejected; an unreadable value holds the answer and writes nothing. `athenaeum decisions list` and the `list_pending_decisions` tool show a redaction marker naming the field unless the caller passes `--include-sensitive` / `include_sensitive` and may read sensitive values. A field with no vault rule gets the same block as before, and blocks written earlier still parse and apply.
 - The flag that returns sensitive values is named `include_sensitive` on every
   read (athenaeum#3163): the `recall`, `read_entity` and `enumerate_entities`
   MCP tools, and `athenaeum recall`, `athenaeum entity` and `athenaeum
