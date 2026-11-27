@@ -56,24 +56,27 @@ def add_retire_subparser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_one(subparsers: argparse._SubParsersAction, name: str) -> None:
-    alias_note = (
-        " Deprecated alias of `athenaeum retire` (issue athenaeum#3151); it is "
-        "removed in the next release."
-        if name == _DEPRECATED_ALIAS
-        else ""
-    )
-    parser = subparsers.add_parser(
-        name,
-        help="Retire information by uid, in whichever store holds it: a wiki "
-        "page, a contact record or an off-corpus record (issues athenaeum#1625, "
-        "athenaeum#3151). Only what the caller can access is retired: a uid on "
-        "a store the caller cannot read reads as unknown, and one on a store "
-        "the caller cannot write is refused by name. Default is dry-run; "
-        "--apply takes a provenance snapshot commit, removes, reindexes and "
-        "records --reason. Unknown, ambiguous or refused uids abort the whole "
-        f"run before any write. Recovery is git-only: {_RECOVERY_HINT} "
-        f"{_OFF_CORPUS_HINT}{alias_note}",
-    )
+    if name == _DEPRECATED_ALIAS:
+        # Alias help is short and leads with the deprecation; the full
+        # description lives on `athenaeum retire`.
+        help_text = (
+            "Deprecated alias of `athenaeum retire`, removed in the next "
+            "release (issue athenaeum#3151). Takes the same flags; see "
+            "`athenaeum retire` for what it does."
+        )
+    else:
+        help_text = (
+            "Retire information by uid, in whichever store holds it: a wiki "
+            "page, a contact record or an off-corpus record (issues athenaeum#1625, "
+            "athenaeum#3151). Only what the caller can access is retired: a uid on "
+            "a store the caller cannot read reads as unknown, and one on a store "
+            "the caller cannot write is refused by name. Default is dry-run; "
+            "--apply takes a provenance snapshot commit, removes, reindexes and "
+            "records --reason. Unknown, ambiguous or refused uids abort the whole "
+            f"run before any write. Recovery is git-only: {_RECOVERY_HINT} "
+            f"{_OFF_CORPUS_HINT}"
+        )
+    parser = subparsers.add_parser(name, help=help_text)
     select = parser.add_mutually_exclusive_group(required=True)
     select.add_argument(
         "--uids",
