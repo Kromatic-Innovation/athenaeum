@@ -87,7 +87,7 @@ import warnings
 from collections.abc import Iterable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
 # The ``memory_class`` vocabulary + rule map live in the leaf module
 # :mod:`athenaeum.memory_class` (issue athenaeum#996) so the WRITE model
@@ -102,7 +102,7 @@ from athenaeum.memory_class import (  # noqa: F401 — re-exported, see above
     TYPE_TO_MEMORY_CLASS,
     memory_class_for_type,
 )
-from athenaeum.pii import CONTACT_FRONTMATTER_FIELDS, is_pii_flagged
+from athenaeum.pii import is_pii_flagged
 from athenaeum.provenance import validate_field_sources, validate_source_value
 
 
@@ -272,28 +272,50 @@ class WikiBase(BaseModel):
         return validate_field_sources(v)
 
     @model_validator(mode="after")
-    def _warn_inline_contact_fields(self) -> "WikiBase":
-        """Flag durable-identifier-only entity pages carrying inline PII (athenaeum#427).
+    def _warn_inline_contact_fields(self, info: ValidationInfo) -> "WikiBase":
+        """Flag a page that carries a value some storage rule keeps off the page.
+
+        Nothing is private unless the operator declares it (athenaeum#3170):
+        a field is flagged only when a rule routes it (to a location or to
+        nowhere, ``to: []``) and a value is nevertheless on the page. The rules
+        come from the configuration passed as the validation context
+        (``validate_wiki_meta(..., config=...)``); without one no rule is
+        known and nothing is flagged.
 
         Recoverable — a :class:`UserWarning`, not a raise — mirroring the athenaeum#93
         ``KNOWN_TYPES`` / athenaeum#424 ``memory_class`` precedent. Skips the check
         entirely when the page is ``pii: true``-flagged: that flag is the
         explicit acknowledgment every corpus consumer already keys off of
-        (:func:`athenaeum.pii.is_pii_flagged`), so warning here too would be
-        noise, not signal. Frontmatter-only (the ``emails``/``phones`` fields)
-        — inline body text is checked separately by the corpus-wide scan
-        (:func:`athenaeum.pii.scan_corpus_pii`, ``athenaeum storage lint-pii``),
-        which has access to the page body this schema-boundary validator
-        does not.
+        (:func:`athenaeum.pii.is_pii_flagged`). Frontmatter-only — inline body
+        text is checked separately by the corpus-wide scan
+        (:func:`athenaeum.pii.scan_corpus_pii`, ``athenaeum storage lint-pii``).
         """
+        context = info.context if isinstance(info.context, dict) else None
+        if context is None or "config" not in context:
+            return self
         meta = self.model_dump(exclude_none=True)
         if is_pii_flagged(meta):
             return self
-        present = [f for f in CONTACT_FRONTMATTER_FIELDS if meta.get(f)]
+        page_type = str(meta.get("type") or "").strip()
+        if not page_type:
+            return self
+        from athenaeum.storage import StorageConfigError, route_for
+
+        present: list[str] = []
+        for name, value in meta.items():
+            if not isinstance(name, str) or value in (None, "", [], {}):
+                continue
+            try:
+                decision = route_for(page_type, name, config=context["config"])
+            except StorageConfigError:
+                return self
+            if decision.targets or decision.discarded:
+                present.append(name)
         if present:
             warnings.warn(
                 f"inline contact data on entity page: frontmatter field(s) "
-                f"{sorted(present)!r} (durable identifiers only — see athenaeum#427)",
+                f"{sorted(present)!r} are routed off the page by a storage rule "
+                "but carry a value on it (see athenaeum#427)",
                 UserWarning,
                 stacklevel=2,
             )
@@ -405,7 +427,10 @@ KNOWN_TYPES: frozenset[str] = frozenset(_BY_TYPE) | FALLBACK_TYPES
 
 
 def validate_wiki_meta(
-    meta: dict[str, Any], declared_types: Iterable[str] | None = None
+    meta: dict[str, Any],
+    declared_types: Iterable[str] | None = None,
+    *,
+    config: dict[str, Any] | None = None,
 ) -> WikiBase:
     """Validate a frontmatter dict against the appropriate schema.
 
@@ -423,6 +448,11 @@ def validate_wiki_meta(
     fires only outside ``KNOWN_TYPES`` union *declared_types*. ``None`` (every
     caller that holds no declared list) keeps the original behaviour exactly.
     Dispatch to the per-type model is unchanged.
+
+    Issue athenaeum#3170: *config* is the installation's configuration. With it,
+    the inline-contact lint warns about each field a storage rule routes off
+    the page that nevertheless carries a value on it; without it no rule is
+    known and the lint says nothing.
     """
     etype = meta.get("type", "")
     declared = frozenset(declared_types) if declared_types is not None else frozenset()
@@ -433,7 +463,10 @@ def validate_wiki_meta(
             stacklevel=2,
         )
     model_cls = _BY_TYPE.get(etype, WikiBase)
-    return model_cls.model_validate(meta)
+    if config is None:
+        return model_cls.model_validate(meta)
+    # athenaeum#3170: the inline-contact lint reads the storage rules from here.
+    return model_cls.model_validate(meta, context={"config": config})
 
 
 def is_untyped_memory_class(meta: dict[str, Any]) -> bool:

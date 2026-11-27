@@ -441,6 +441,41 @@ def _with_deprecation_notices(rendered: str, notices: list[str]) -> str:
     return rendered + f"\n_Deprecated: {text}_\n"
 
 
+#: JSON key (and markdown lead-in) carrying the undeclared-vault-data notice an
+#: ordinary recall returns (athenaeum#3170): recall keeps running and says so.
+UNDECLARED_VAULT_NOTICE_KEY = "undeclared_vault_data"
+
+
+def _with_undeclared_vault_notice(rendered: str, config: dict[str, Any] | None) -> str:
+    """Attach the undeclared-vault-data notice to a ``recall`` result of EITHER shape.
+
+    Configuration only (no file access). Nothing to report returns *rendered*
+    untouched.
+    """
+    from athenaeum.storage import undeclared_vault_mappings, undeclared_vault_summary
+
+    try:
+        mappings = undeclared_vault_mappings(config)
+    except Exception:  # noqa: BLE001 - a bad table is reported where it is used
+        return rendered
+    if not mappings:
+        return rendered
+    text = undeclared_vault_summary(mappings)
+    if rendered.lstrip().startswith("{"):
+        try:
+            payload = json.loads(rendered)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            from athenaeum import pii
+
+            payload[UNDECLARED_VAULT_NOTICE_KEY] = text
+            return json.dumps(
+                payload, indent=2, sort_keys=True, default=pii.json_date_default
+            )
+    return rendered + f"\n_Notice: {text}_\n"
+
+
 # Default wiki-level source stamped onto remember() writes when the caller
 # does not supply ``sources``. ``claude:inferred`` is intentionally
 # distinct from any session-id format so downstream provenance audits
@@ -4719,6 +4754,7 @@ def create_server(
         if withheld or (vault_gate is not None and vault_gate.denied):
             # A refused vault reads exactly as the ceiling being off.
             rendered = _with_sensitive_reads_withheld_notice(rendered)
+        rendered = _with_undeclared_vault_notice(rendered, config)
         return _with_deprecation_notices(rendered, deprecation_notices)
 
     # Issue athenaeum#964: the docstring — and therefore the ``type`` parameter's

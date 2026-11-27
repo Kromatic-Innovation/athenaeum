@@ -752,8 +752,11 @@ class TestReindexGateOnStaleness:
             "        embedded: false\n"
             "        recallable: false\n"
             "        merge_eligible: false\n"
-            "  mapping:\n"
-            "    note: notes-unembedded\n"
+            # athenaeum#3170: a whole-page rule rather than storage.mapping, so
+            # the off-corpus location is declared (the same placement).
+            "  routes:\n"
+            "    - page_type: note\n"
+            "      to: [notes-unembedded]\n"
         )
         _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
         cache = tmp_path / "cache"

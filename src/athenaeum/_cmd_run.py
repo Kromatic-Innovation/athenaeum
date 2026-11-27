@@ -321,6 +321,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     knowledge_root = args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT
     _warn_removed_config_keys(knowledge_root)
+    # athenaeum#3170: refuse undeclared vault data before the lock or any write.
+    from athenaeum.config import load_config as _load_config
+    from athenaeum.vault_declaration import refuse_if_undeclared
+
+    refused = refuse_if_undeclared(_load_config(knowledge_root), knowledge_root)
+    if refused is not None:
+        return refused
     raw_root = args.raw_root or (knowledge_root / "raw")
     wiki_root = args.wiki_root or (knowledge_root / "wiki")
 

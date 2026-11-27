@@ -157,6 +157,11 @@ def cmd_correct_notes(args: argparse.Namespace) -> int:
         return 0
 
     cfg = load_config(knowledge_root)
+    from athenaeum.vault_declaration import refuse_if_undeclared
+
+    refused = refuse_if_undeclared(cfg, knowledge_root)
+    if refused is not None:
+        return refused
     lock = _acquire_or_exit(knowledge_root, args, cfg)
     if isinstance(lock, int):
         return lock

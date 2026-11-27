@@ -28,7 +28,13 @@ def _cfg(**entry: Any) -> dict[str, Any]:
         "corpus_policy": {"embedded": False, "recallable": False, "merge_eligible": False},
         **entry,
     }
-    return {"storage": {"adapters": {"vault": body}, "mapping": {"pii": "vault"}}}
+    return {
+        "storage": {
+            "adapters": {"vault": body},
+            "mapping": {"pii": "vault"},
+            "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        }
+    }
 
 
 def test_default_false_and_carried() -> None:
@@ -105,7 +111,14 @@ def test_route_decision_uses_is_sensitive() -> None:
     assert route_for("pii", config=_cfg(sensitive=True)).sensitive is True
     # Outside the corpus but unmarked (an archive): not sensitive.
     assert route_for("pii", config=_cfg()).sensitive is False
+    declared = {
+        "storage": {
+            "mapping": {"pii": "excluded"},
+            "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+        }
+    }
     assert route_for("pii", config={"storage": {"mapping": {"pii": "excluded"}}}).sensitive
+    assert route_for("pii", "emails", config=declared).sensitive
 
 
 @pytest.mark.parametrize("marked", [False, True])

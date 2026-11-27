@@ -56,7 +56,10 @@ from athenaeum.pii import (
     read_entity,
 )
 
-EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}}}
+# athenaeum#3170: nothing is private unless declared; these tests declare the contact fields.
+_CF = ["emails", "phones", "former_emails", "alt_emails"]
+
+EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}}}
 
 OBSERVED_ADDRESS = "alex@example.org"
 PROVIDER_ADDRESS = "alex.example@corp.example"

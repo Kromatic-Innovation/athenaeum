@@ -50,8 +50,9 @@ from athenaeum.storage import (
     route_for,
 )
 from athenaeum.store_access import StoreDeclaration, StoreDeclarationInvalid, load_store_declaration
+from athenaeum.vault_declaration import undeclared_report
 
-__all__ = ["build_status", "format_status"]
+__all__ = ["build_status", "format_status", "format_suggest_routes"]
 
 VAULT_IN_GIT_WARNING = (
     "Vault {name!r} is inside a git working tree: an erasure does not reach its history."
@@ -80,6 +81,14 @@ HISTORY_MEANING = {
         "retirement": "Retirement removes a raw file with no way to get it back.",
     },
 }
+UNDECLARED_WARNING = (
+    "Undeclared vault data: {what}. Writing commands refuse to start until it is "
+    "declared; `athenaeum storage status --suggest-routes` prints the rules."
+)
+UNCOVERED_WARNING = (
+    "{count} field(s) held outside the corpus are covered by no rule; "
+    "`athenaeum storage status --suggest-routes` lists them."
+)
 OWNER_ONLY = "owner only"
 KEPT_ON_PAGE = "kept on the page"
 DISCARDED = "discarded"
@@ -193,6 +202,16 @@ def build_status(config: dict[str, Any] | None, knowledge_root: Path) -> dict[st
             }
         )
 
+    undeclared = undeclared_report(config, knowledge_root)
+    if undeclared["mappings"]:
+        what = ", ".join(
+            f"storage.mapping.{m['surface_class']} -> {m['location']} has no rule"
+            for m in undeclared["mappings"]
+        )
+        warnings.append(UNDECLARED_WARNING.format(what=what))
+    elif undeclared["uncovered_fields"]:
+        warnings.append(UNCOVERED_WARNING.format(count=len(undeclared["uncovered_fields"])))
+
     history = resolve_storage_history(config)
     unscreened = unscreened_raw_files(knowledge_root, config)
     in_tree = raw_in_git_tree(knowledge_root)
@@ -221,6 +240,7 @@ def build_status(config: dict[str, Any] | None, knowledge_root: Path) -> dict[st
         "locations": locations,
         "routes": routes,
         "contact_fields": contact_fields,
+        "undeclared": undeclared,
         "vaults": vaults,
         "raw_intake": raw_intake,
         "machine_access": MACHINE_ACCESS_LINE,
@@ -260,6 +280,7 @@ def format_status(status: dict[str, Any]) -> list[str]:
     lines.append("Built-in contact fields:")
     for row in status["contact_fields"]:
         lines.append(f"  {row['page_type']}.{row['field']}: {row['disposition']}")
+    lines.extend(_undeclared_lines(status["undeclared"]))
     lines.append("Vaults (who may read):")
     if not status["vaults"]:
         lines.append("  (none)")
@@ -281,4 +302,51 @@ def format_status(status: dict[str, Any]) -> list[str]:
     for notice in status["notices"]:
         lines.append(f"  {notice}")
     lines.append(status["machine_access"])
+    return lines
+
+
+def _undeclared_lines(undeclared: dict[str, Any]) -> list[str]:
+    lines = ["Undeclared vault data:"]
+    if not undeclared["undeclared"]:
+        lines.append("  (none)")
+        return lines
+    for mapping in undeclared["mappings"]:
+        lines.append(
+            f"  storage.mapping.{mapping['surface_class']} -> {mapping['location']}: no rule"
+        )
+    for row in undeclared["uncovered_fields"]:
+        lines.append(
+            f"  {row['location']}: field {row['field']}, {row['records']} record(s), no rule"
+        )
+    return lines
+
+
+def format_suggest_routes(status: dict[str, Any]) -> list[str]:
+    """``storage status --suggest-routes``: the rules a refusal prints, and what no rule covers.
+
+    Counts and field names only, never a value. Never a refusal.
+    """
+    undeclared = status["undeclared"]
+    lines: list[str] = []
+    if undeclared["suggested_routes_text"]:
+        lines.append(
+            "storage.routes entries that keep the previous behaviour "
+            "(add them to athenaeum.yaml; athenaeum does not edit it):"
+        )
+        lines.append("")
+        lines.extend(undeclared["suggested_routes_text"].splitlines())
+        replaced = sorted(
+            {key for route in undeclared["suggested_routes"] for key in route["replaces"]}
+        )
+        if replaced:
+            lines.append("")
+            lines.append("and remove these keys, which the rules replace: " + ", ".join(replaced))
+    else:
+        lines.append("storage.routes entries to add: (none)")
+    lines.append("")
+    lines.append("Fields held outside the corpus that no rule covers:")
+    if not undeclared["uncovered_fields"]:
+        lines.append("  (none)")
+    for row in undeclared["uncovered_fields"]:
+        lines.append(f"  {row['location']}: {row['field']} ({row['records']} record(s))")
     return lines

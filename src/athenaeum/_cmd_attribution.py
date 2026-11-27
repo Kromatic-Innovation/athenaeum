@@ -381,6 +381,12 @@ def _cmd_place(args: argparse.Namespace) -> int:
 
     knowledge_root, config, contacts_root = _resolve_roots(args)
     wiki_root = knowledge_root / "wiki"
+    # athenaeum#3170: refuse undeclared vault data before writing a record.
+    from athenaeum.vault_declaration import refuse_if_undeclared
+
+    refused = refuse_if_undeclared(config, knowledge_root)
+    if refused is not None:
+        return refused
 
     try:
         verdict, owner_uid, alias_relation = _parse_as_form(args.as_)

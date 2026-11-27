@@ -439,6 +439,15 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Emit the report as JSON; the warnings are in its `warnings` list.",
     )
+    status_p.add_argument(
+        "--suggest-routes",
+        action="store_true",
+        help=(
+            "Print the storage.routes entries that keep the previous behaviour for "
+            "undeclared vault data, and each location, field name and record count "
+            "no rule covers (no values). Never edits athenaeum.yaml."
+        ),
+    )
 
 
 def _cmd_storage_status(args: argparse.Namespace) -> int:
@@ -449,10 +458,17 @@ def _cmd_storage_status(args: argparse.Namespace) -> int:
     """
     import json
 
-    from athenaeum.storage_status import build_status, format_status
+    from athenaeum.storage_status import build_status, format_status, format_suggest_routes
 
     knowledge_root = _resolve_knowledge_root(args)
     status = build_status(load_config(knowledge_root), knowledge_root)
+    if getattr(args, "suggest_routes", False):
+        if getattr(args, "json", False):
+            sys.stdout.write(json.dumps(status["undeclared"], indent=2, sort_keys=True) + "\n")
+        else:
+            for line in format_suggest_routes(status):
+                print(line)
+        return 0
     if getattr(args, "json", False):
         sys.stdout.write(json.dumps(status, indent=2, sort_keys=True) + "\n")
     else:
@@ -527,6 +543,12 @@ def _cmd_storage_move_type(args: argparse.Namespace) -> int:
             return 2
         plan = storage_move.plan_move(config, knowledge_root, args.entity_type, args.to_surface)
         if args.apply:
+            # athenaeum#3170: a move rewrites pages; refuse undeclared vault data.
+            from athenaeum.vault_declaration import refuse_if_undeclared
+
+            refused = refuse_if_undeclared(config, knowledge_root)
+            if refused is not None:
+                return refused
             return _apply_move_plan(plan, config, knowledge_root, cache_dir)
     except storage_move.MoveRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -922,6 +944,13 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
 
     config = load_config(knowledge_root)
     wiki_root = knowledge_root / "wiki"
+    # athenaeum#3170: an apply writes records and pages; refuse undeclared vault data.
+    if args.apply:
+        from athenaeum.vault_declaration import refuse_if_undeclared
+
+        refused = refuse_if_undeclared(config, knowledge_root)
+        if refused is not None:
+            return refused
 
     # issue athenaeum#1275: consult the adjudicated allowlist BEFORE planning
     # anything, so a value the operator has already ruled is not PII is never
@@ -1060,6 +1089,13 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     knowledge_root = _resolve_knowledge_root(args)
     wiki_root = knowledge_root / "wiki"
     config = load_config(knowledge_root)
+    # athenaeum#3170: an apply writes records and pages; refuse undeclared vault data.
+    if args.apply:
+        from athenaeum.vault_declaration import refuse_if_undeclared
+
+        refused = refuse_if_undeclared(config, knowledge_root)
+        if refused is not None:
+            return refused
 
     # issue athenaeum#1275: same allowlist consultation as the single-page path —
     # see _load_migrate_pii_allowlist for the missing-vs-malformed distinction.

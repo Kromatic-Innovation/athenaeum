@@ -12,6 +12,12 @@ from athenaeum import pii, storage
 from athenaeum.storage import RouteDecision, StorageConfigError, route_for
 
 PII_EXCLUDED: dict[str, Any] = {"storage": {"mapping": {"pii": "excluded"}}}
+PII_DECLARED: dict[str, Any] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 
 def _reference_field_targets(
@@ -30,7 +36,16 @@ FIELD_CASES: list[tuple[str, dict[str, Any] | None, str, str, tuple[str, ...], s
     # id, config, page_type, field, targets, rule
     ("nothing-configured", None, "person", "emails", (), None),
     ("nothing-configured-empty", {}, "person", "emails", (), None),
-    ("mapping-only-listed", PII_EXCLUDED, "person", "emails", ("excluded",), "storage.mapping.pii"),
+    # athenaeum#3170: a mapping alone declares no fields, so nothing is routed.
+    ("mapping-only-undeclared-routes-nothing", PII_EXCLUDED, "person", "emails", (), None),
+    (
+        "mapping-with-declared-contact-fields",
+        PII_DECLARED,
+        "person",
+        "emails",
+        ("excluded",),
+        "storage.excluded_fields.pii",
+    ),
     ("mapping-only-unlisted", PII_EXCLUDED, "person", "title", (), None),
     (
         "explicit-list-replaces-builtin",
@@ -84,12 +99,13 @@ FIELD_CASES: list[tuple[str, dict[str, Any] | None, str, str, tuple[str, ...], s
         None,
     ),
     (
-        "class-with-no-field-list-uses-record",
+        # athenaeum#3170: no record-derived fallback; an undeclared class routes nothing.
+        "class-with-no-field-list-routes-nothing",
         {"storage": {"mapping": {"vault": "excluded"}}},
         "vault",
         "secret",
-        ("excluded",),
-        "storage.mapping.vault",
+        (),
+        None,
     ),
     ("page-class-not-excluded", PII_EXCLUDED, "company", "emails", (), None),
 ]
@@ -192,7 +208,7 @@ def test_assemble_excluded_read_consults_route_for(monkeypatch: pytest.MonkeyPat
         {},
         {"uid": "u", "emails": ["a@example.com"], "nickname": "x"},
         surface_class="pii",
-        config=PII_EXCLUDED,
+        config=PII_DECLARED,
         include_excluded=True,
     )
     assert fields == {"emails": ["a@example.com"]}

@@ -48,6 +48,9 @@ from athenaeum.trust_graph import NO_ATTESTATION, AttestedClaim, TrustGraphConfi
 # ---------------------------------------------------------------------------
 
 
+# athenaeum#3170: nothing is private unless declared; these tests declare the contact fields.
+_CF = ["emails", "phones", "former_emails", "alt_emails"]
+
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args], cwd=str(root), capture_output=True, text=True, check=True
@@ -2084,7 +2087,7 @@ class TestSensitivityRoutingUsageClass:
                     },
                 }
             },
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
         }
 
     def _record(self, **overrides) -> dict:
@@ -2801,7 +2804,7 @@ class TestEmailKeyedApply:
 
     def _config(self) -> dict:
         return {
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
             "librarian": {
                 "corrections": {
                     "fields": {
@@ -2879,7 +2882,7 @@ class TestEmailHandleRaisedReasonInHandoff:
 
     def _config(self) -> dict:
         return {
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
             "librarian": {
                 "corrections": {
                     "fields": {
@@ -2971,7 +2974,7 @@ class TestEmailHandleRaisedReasonInHandoff:
 class TestParkedEmailNoMatchCorrections:
     def _config(self) -> dict:
         return {
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
             "librarian": {
                 "corrections": {
                     "fields": {
@@ -3413,7 +3416,7 @@ class TestRemoveDropsOrphanedContactFacts:
                     },
                 }
             },
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
         }
 
     def _write_surface(self, excluded_root: Path, lines: list[str]) -> Path:
@@ -3523,7 +3526,7 @@ class TestAttributionSeamWiring:
                     },
                 }
             },
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
         }
 
     def _add(
@@ -3638,7 +3641,7 @@ class TestEnforceModeEscalatesASuspectValue:
                 },
                 "attribution": {"mode": mode},
             },
-            "storage": {"mapping": {"pii": "excluded"}},
+            "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
         }
 
     def _add(

@@ -21,6 +21,9 @@ from athenaeum.corrections import (
 )
 from athenaeum.models import EntityIndex, parse_frontmatter
 
+# athenaeum#3170: nothing is private unless declared; these tests declare the contact fields.
+_CF = ["emails", "phones", "former_emails", "alt_emails"]
+
 UID = "person-alex"
 OLD_KEY = "librarian.corrections.sensitive_fields"
 
@@ -88,7 +91,7 @@ def _old_config() -> dict[str, Any]:
         "librarian": {
             "corrections": {"fields": _fields(), "sensitive_fields": {"bounced": "pii"}}
         },
-        "storage": {"mapping": {"pii": "excluded"}},
+        "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
     }
 
 
@@ -149,7 +152,7 @@ def test_default_routes_emails_to_the_separate_location(tmp_path: Path) -> None:
     before = page.read_bytes()
     cfg = {
         "librarian": {"corrections": {"fields": _fields()}},
-        "storage": {"mapping": {"pii": "excluded"}},
+        "storage": {"mapping": {"pii": "excluded"}, "excluded_fields": {"pii": _CF}},
     }
     result = _apply(root, cfg, _record("emails", "add", "alex2@example.org"))
     assert result.disposition == "routed-elsewhere"

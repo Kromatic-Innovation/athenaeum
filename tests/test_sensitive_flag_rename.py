@@ -29,7 +29,12 @@ from athenaeum.config import (
 from athenaeum.remote_policy import RemotePolicyError
 from athenaeum.sensitivity_routing import resolve_pointers_in_text, route_sensitive_values
 
-EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 EMAIL = "alex@example.org"
 
 
@@ -39,7 +44,11 @@ def corpus(tmp_path: Path) -> Path:
     wiki = knowledge / "wiki"
     wiki.mkdir(parents=True)
     (knowledge / "athenaeum.yaml").write_text(
-        "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        (
+            "storage:\n  mapping:\n    pii: excluded\n"
+            "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n"
+        ),
+        encoding="utf-8",
     )
     (wiki / "alex.md").write_text(
         "---\nuid: alex\nname: Alex Widget\ntype: person\n---\n\n"

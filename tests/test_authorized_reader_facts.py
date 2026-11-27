@@ -44,7 +44,12 @@ from athenaeum import pii
 from athenaeum.mcp_server import recall_search
 
 #: `pii` routed off-corpus, as in the live `~/knowledge/athenaeum.yaml`.
-EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 
 def _write_page(wiki_root: Path, uid: str, *, name: str, extra_frontmatter: str = "") -> Path:

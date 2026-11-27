@@ -1664,7 +1664,7 @@ def tier0_handle_upsert(
 
     # Schema-gate the merged frontmatter before write — same guarantee tier0
     # passthrough gives. Source-handle keys ride through via extra="allow".
-    validate_wiki_meta(merged_meta, declared_types=valid_types)
+    validate_wiki_meta(merged_meta, declared_types=valid_types, config=config)
 
     if dry_run:
         return entity, True
@@ -1941,7 +1941,7 @@ def tier0_bounce_verdict_mark(
     # dry-run short-circuit, so a dry-run preview also catches a schema
     # violation rather than reporting success on a merge that would fail to
     # write.
-    validate_wiki_meta(merged_meta)
+    validate_wiki_meta(merged_meta, config=config)
 
     if dry_run:
         return entity, True
@@ -2119,7 +2119,7 @@ def tier0_do_not_email_mark(
     # tier0_handle_upsert gives, and (like that sibling) BEFORE the dry-run
     # short-circuit, so a dry-run preview also catches a schema violation
     # rather than reporting success on a merge that would fail to write.
-    validate_wiki_meta(merged_meta)
+    validate_wiki_meta(merged_meta, config=config)
 
     if dry_run:
         return entity, True
@@ -2847,7 +2847,11 @@ def _apply_tier3_results(
         # NOT collapse to validating ``entity`` directly without first
         # re-parsing ``rendered``.
         rendered_meta, _ = parse_frontmatter(rendered)
-        validate_wiki_meta(rendered_meta, declared_types=resolve_admitted_wiki_types(wiki_root))
+        validate_wiki_meta(
+            rendered_meta,
+            declared_types=resolve_admitted_wiki_types(wiki_root),
+            config=config,
+        )
         # Write-boundary type guard (issue athenaeum#1196): a backstop BEHIND
         # validate_wiki_meta's UserWarning-only check above — a type outside
         # declared ∪ KNOWN_TYPES is refused here regardless of whether any
@@ -13245,6 +13249,13 @@ def run(
         refuse_unrouted_value_classes(ctx.config)
     except SensitivityRoutingError as exc:
         log.error("sensitivity routing: %s", exc)
+        return 1
+
+    # athenaeum#3170: undeclared vault data is refused at load, before anything
+    # is compiled or any correction is processed. The message prints the rules.
+    from athenaeum.vault_declaration import refuse_if_undeclared
+
+    if refuse_if_undeclared(ctx.config, knowledge_root) is not None:
         return 1
 
     # athenaeum#3178: a non-boolean librarian.hold_unscreened_raw is a configuration error.

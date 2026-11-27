@@ -52,7 +52,12 @@ from athenaeum.remote_policy import (
 
 #: `pii` routed off-corpus; the shape of the live `~/knowledge/athenaeum.yaml`
 #: and of `tests/test_recall_with_pii.py`'s own fixture config.
-EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 #: The fixture's excluded values. Asserted LITERALLY — a test that only
 #: checked `with_pii`/`contact_included` would pass against a renderer that

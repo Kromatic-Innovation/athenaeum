@@ -776,7 +776,9 @@ class TestBatchSyncEquivalence:
             encoding="utf-8",
         )
         (root / "athenaeum.yaml").write_text(
-            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+            "storage:\n  mapping:\n    pii: excluded\n"
+            "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n",
+            encoding="utf-8",
         )
 
         _clean_env(monkeypatch)

@@ -645,7 +645,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
-    return args.func(args)
+    try:
+        return args.func(args)
+    except RuntimeError as exc:
+        # athenaeum#3170: a sensitive read on undeclared vault data raises a
+        # typed error; print it as a refusal instead of a traceback. Imported
+        # here so the version/help paths pay nothing for it.
+        from athenaeum.storage import UndeclaredVaultDataError
+
+        if not isinstance(exc, UndeclaredVaultDataError):
+            raise
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 def _get_version() -> str:

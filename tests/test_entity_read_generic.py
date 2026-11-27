@@ -41,7 +41,6 @@ import pytest
 from athenaeum import pii
 from athenaeum.models import EntityIndex, RawFile
 from athenaeum.pii import (
-    CONTACT_DATA_FIELDS,
     EXCLUDED_RECORD_BOOKKEEPING_FIELDS,
     ExcludedRecordIndex,
     RedactionMarker,
@@ -54,7 +53,12 @@ from athenaeum.pii import (
     resolve_excluded_fields,
 )
 
-EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}}}
+EXCLUDED_CONFIG = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 #: A second excluded surface for a NON-person class — the shape the whole
 #: issue exists to make readable. ``vendor`` is a plain class name; nothing in
@@ -65,6 +69,10 @@ EXCLUDED_CONFIG = {"storage": {"mapping": {"pii": "excluded"}}}
 TWO_SURFACE_CONFIG = {
     "storage": {
         "mapping": {"pii": "excluded", "vendor": "vendor-excluded"},
+        "excluded_fields": {
+            "pii": ["emails", "phones", "former_emails", "alt_emails"],
+            "vendor": ["account_numbers", "billing_contact"],
+        },
         "adapters": {
             "vendor-excluded": {
                 "backing_store": "markdown",
@@ -186,14 +194,15 @@ class TestSurfaceClassParameterization:
 class TestFieldPolicy:
     """``resolve_excluded_fields``' three-step resolution order."""
 
-    def test_pii_default_is_contact_data_fields_verbatim(self) -> None:
-        """Rule 2 — a person read must be byte-identical to before athenaeum#883."""
-        assert resolve_excluded_fields("pii", None, {"emails": ["a@example.org"]}) == (
-            CONTACT_DATA_FIELDS
-        )
+    def test_pii_without_a_declaration_has_no_fields(self) -> None:
+        """athenaeum#3170: nothing is private unless the operator declares it.
 
-    def test_unknown_class_defaults_to_denylist_complement(self) -> None:
-        """Rule 3 — every field on the record MINUS the bookkeeping denylist."""
+        The old built-in contact-field fallback for ``pii`` is removed.
+        """
+        assert resolve_excluded_fields("pii", None, {"emails": ["a@example.org"]}) == ()
+
+    def test_unknown_class_without_a_declaration_has_no_fields(self) -> None:
+        """athenaeum#3170: the record-minus-denylist fallback is removed too."""
         record = {
             "uid": "acme",
             "type": "vendor",
@@ -203,24 +212,21 @@ class TestFieldPolicy:
             "billing_contact": ["ap@example.org"],
         }
 
-        fields = resolve_excluded_fields("vendor", None, record)
+        assert resolve_excluded_fields("vendor", None, record) == ()
 
-        assert fields == ("account_numbers", "billing_contact")
-        assert not set(fields) & EXCLUDED_RECORD_BOOKKEEPING_FIELDS
-
-    def test_every_bookkeeping_field_is_denied(self) -> None:
-        """The denylist is the complement's whole safety property — pin it."""
+    def test_record_meta_is_not_consulted(self) -> None:
+        """athenaeum#3170: bookkeeping fields never appear, because nothing is inferred."""
         record = {name: "x" for name in EXCLUDED_RECORD_BOOKKEEPING_FIELDS}
         record["real_field"] = ["kept"]
 
-        assert resolve_excluded_fields("vendor", None, record) == ("real_field",)
+        assert resolve_excluded_fields("vendor", None, record) == ()
 
     def test_contact_classification_is_never_returned_as_a_field(self) -> None:
         """It is metadata ABOUT a field — consulted to classify, never a value."""
         assert "contact_classification" in EXCLUDED_RECORD_BOOKKEEPING_FIELDS
 
-    def test_explicit_config_override_wins_over_both_defaults(self) -> None:
-        """Rule 1 — including for ``pii``, whose built-in default it replaces."""
+    def test_explicit_config_declaration_is_the_only_source(self) -> None:
+        """The declared list is the only source — including for ``pii``."""
         config = {
             "storage": {
                 "mapping": {"pii": "excluded"},
@@ -343,6 +349,7 @@ class TestAssemblyFunctionIsEntityIndexFree:
             page,
             {"uid": "alex", "type": "person"},
             {"uid": "alex", "emails": ["alex@example.org"]},
+            config=EXCLUDED_CONFIG,
             surface_class="pii",
             include_excluded=True,
         )
@@ -369,6 +376,7 @@ class TestAssemblyFunctionIsEntityIndexFree:
                 page,
                 {"uid": "alex"},
                 {"uid": "sam", "emails": ["sam@example.org"]},
+                config=EXCLUDED_CONFIG,
                 surface_class="pii",
                 include_excluded=True,
             )

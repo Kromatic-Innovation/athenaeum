@@ -361,6 +361,12 @@ def _cmd_repair_bounce_fold(args: argparse.Namespace) -> int:
 
     knowledge_root = _resolve_knowledge_root(args, attr="knowledge_root")
     cfg = load_config(knowledge_root)
+    # athenaeum#3170: refuse undeclared vault data before writing a record.
+    from athenaeum.vault_declaration import refuse_if_undeclared
+
+    refused = refuse_if_undeclared(cfg, knowledge_root)
+    if refused is not None:
+        return refused
     contacts_root = (
         args.contacts_root.expanduser().resolve()
         if args.contacts_root
@@ -496,6 +502,12 @@ def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
 
     knowledge_root = _resolve_knowledge_root(args, attr="knowledge_root")
     cfg = load_config(knowledge_root)
+    # athenaeum#3170: refuse undeclared vault data before writing a record.
+    from athenaeum.vault_declaration import refuse_if_undeclared
+
+    refused = refuse_if_undeclared(cfg, knowledge_root)
+    if refused is not None:
+        return refused
     contacts_root = (
         args.contacts_root.expanduser().resolve()
         if args.contacts_root

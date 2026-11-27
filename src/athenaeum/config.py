@@ -7420,11 +7420,10 @@ def resolve_excluded_fields_config(
     (the ``storage.mapping`` key, e.g. ``pii`` — not a wiki page's ``type:``)
     hold data rather than the record's own bookkeeping.
 
-    Returns an EMPTY dict when unset — the code default that leaves ``pii`` on
-    its built-in :data:`athenaeum.pii.CONTACT_DATA_FIELDS` allowlist and every
-    other class on the denylist-complement, so an unconfigured base is
-    byte-identical (``resolve_storage_mapping``'s precedent: no seed in
-    ``_DEFAULTS``, so this default stays reachable).
+    Returns an EMPTY dict when unset. A class with no entry (and no
+    ``storage.routes`` field rule) has no data fields: there is no built-in
+    list (athenaeum#3170). ``resolve_storage_mapping``'s precedent applies: no
+    seed in ``_DEFAULTS``, so this default stays reachable.
 
     A class mapped to an EMPTY list is honoured literally as "this class has no
     data fields" — that is an operator saying so, which is a different

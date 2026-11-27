@@ -45,7 +45,10 @@ def _seed_root(tmp_path: Path) -> Path:
     root = tmp_path / "knowledge"
     (root / "wiki").mkdir(parents=True)
     (root / "athenaeum.yaml").write_text(
-        "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        "storage:\n  mapping:\n    pii: excluded\n"
+        # athenaeum#3170: declare the contact fields kept off the page.
+        "  excluded_fields:\n    pii: [emails, phones, former_emails, alt_emails]\n",
+        encoding="utf-8",
     )
     return root
 

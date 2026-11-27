@@ -2668,7 +2668,7 @@ def process_batch_run(
                 # Same schema gate as process_one: re-parse the rendered
                 # frontmatter so the validator sees the on-disk bytes.
                 rendered_meta, _ = parse_frontmatter(rendered)
-                validate_wiki_meta(rendered_meta, declared_types=valid_types)
+                validate_wiki_meta(rendered_meta, declared_types=valid_types, config=config)
                 # Write-boundary type guard (issue athenaeum#1196): same
                 # backstop as process_one/_apply_tier3_results — refuse a
                 # type outside declared ∪ KNOWN_TYPES regardless of whether

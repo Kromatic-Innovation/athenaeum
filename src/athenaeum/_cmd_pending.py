@@ -466,6 +466,13 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
 
     cfg = load_config(target)
 
+    # athenaeum#3170: refuse undeclared vault data before writing anything.
+    from athenaeum.vault_declaration import refuse_if_undeclared
+
+    refused = refuse_if_undeclared(cfg, target)
+    if refused is not None:
+        return refused
+
     # Issue athenaeum#210/#330: build the LLM client via the provider seam so free-text
     # answers trigger the LLM-backed source-edit proposer. Returns None for the
     # ``api`` backend with no ANTHROPIC_API_KEY (offline annotation fallback);

@@ -12,7 +12,12 @@ from athenaeum._cmd_index import cmd_registry
 from athenaeum.mcp_server import recall_search
 from athenaeum.registry import BODY_EMAIL_INDEX_NAME
 
-CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
+CONFIG: dict[str, object] = {
+    "storage": {
+        "mapping": {"pii": "excluded"},
+        "excluded_fields": {"pii": ["emails", "phones", "former_emails", "alt_emails"]},
+    }
+}
 
 
 def _page(
