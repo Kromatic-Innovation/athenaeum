@@ -100,7 +100,8 @@ def test_report_cli_text_and_json_change_nothing(tmp_path, capsys):
     before = _snapshot(root)
     assert main(["relevance-policy", "report", "--path", str(root)]) == 0
     out = capsys.readouterr().out
-    assert "ada.md" in out and "ben.md" not in out and "cy.md" not in out
+    never_part = out.split("protected from retirement")[0]
+    assert "ada.md" in out and "cy.md" not in out and "ben.md" not in never_part
     assert main(["relevance-policy", "report", "--path", str(root), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert [m["path"] for m in data["matches"]] == ["ada.md"]

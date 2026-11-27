@@ -181,6 +181,37 @@ list the effective rules in order. When the file exists the librarian run
 summary reports `relevance_policy=<8-hex hash>` next to `schema_fragments=`
 (`invalid` if the file fails validation).
 
+**Two effects of `always`.** An `always` row is (1) a capture hint: the
+classifier is told this deployment wants matching facts kept; and (2)
+**protection from removal**: a wiki page whose last matching rule is `always`
+(same `type` / `tag` / `subject` matching, last match wins) is exempt from
+every command that removes pages. To protect every `person` page carrying a
+tag:
+
+```markdown
+| Verdict | Type | Tag | Subject |
+|---------|------|-----|---------|
+| always  | person | some/tag | |
+```
+
+- `athenaeum retire` refuses the whole run when any named uid is
+  protected, naming each protected uid and the rule, and writes nothing (a dry
+  run reports it too). `--force-retire` retires them anyway; the override is recorded
+  in the retire commit message and as a `removal-override` record in
+  `wiki/_relevance_policy_audit.jsonl`.
+- `athenaeum decay-sweep` skips a protected page and counts it in its
+  `protected by policy` line.
+- A raise `retract` never removes a protected copy by rule: the copy is kept and a
+  decision asks. Answering "remove" is the override and is recorded in the removal
+  commit message.
+- The audit (`athenaeum audit`) never lists a protected page as a retirement
+  candidate and reports `protected by policy: N` in its summary.
+
+With no policy file every removal command behaves as before. A policy file that
+fails validation stops `retire` and `decay-sweep`. `athenaeum
+relevance-policy report` also lists how many live pages each `always` rule
+protects.
+
 **Enforcement of `never`.** Before any tier runs (including the deterministic
 passthrough and structured-upsert paths), the librarian, the batch transport
 and the auto-memory phase check each fact's *declared* `type`, `tags` and
@@ -237,7 +268,10 @@ top-level `wiki/*.md` page it reads the frontmatter `type`, `tags` and `uid`,
 matches them the way the gate matches a raw note, and lists each page whose
 deciding rule is a `never` rule, grouped by rule. A page that a later `always`
 exception rescues is not listed. The command is read-only: it writes nothing and
-needs no run lock. What to do about a listed page is your call.
+needs no run lock. What to do about a listed page is your call. The same
+report also lists the existing pages each `always` rule protects from
+retirement, with a per-rule count (`protected` and `protected_counts` in the
+`--json` output).
 
 ## Per-type librarian guidance (`wiki/_schema/_type-guidance-<type>.md`)
 

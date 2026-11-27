@@ -105,6 +105,7 @@ def cmd_decay_sweep(args: argparse.Namespace) -> int:
     # authoritatively (routed off-corpus instead of archived).
     print(f"  routed off-corpus: {len(report.routed_off_corpus)}")
     print(f"  retained:        {len(report.retained)}")
+    print(f"  protected by policy: {len(report.protected)}")
 
     if report.kill:
         print("\n  KILL-LIST:")
@@ -114,6 +115,10 @@ def cmd_decay_sweep(args: argparse.Namespace) -> int:
         print("\n  ROUTED OFF-CORPUS:")
         for cand in report.routed_off_corpus:
             print(f"    {cand.path.name}: {cand.reason}")
+    if report.protected:
+        print("\n  PROTECTED BY POLICY (skipped):")
+        for path, why in report.protected:
+            print(f"    {path.name}: {why}")
     if report.retained:
         print("\n  RETAINED:")
         for path, reason in report.retained:
