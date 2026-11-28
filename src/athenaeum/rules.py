@@ -111,6 +111,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic import ValidationError as PydanticValidationError
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.compiled_exempt import mark_exempt
 from athenaeum.config import (
     load_config,
@@ -141,7 +142,6 @@ from athenaeum.store import (
     StoreKey,
     append_line_durable,
     note_no_restore_point,
-    now_iso,
 )
 
 log = logging.getLogger(__name__)

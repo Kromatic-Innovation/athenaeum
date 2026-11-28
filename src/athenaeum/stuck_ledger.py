@@ -203,7 +203,7 @@ def write_stuck_ledger(wiki_root: Path, ledger: dict[str, dict[str, Any]]) -> No
     manifest). An empty ledger removes the file so a corpus that has recovered
     leaves no stale stuck record behind."""
     from athenaeum.atomic_io import atomic_write_text
-    from athenaeum.store import now_iso
+    from athenaeum.clock import now_iso
 
     path = wiki_root / STUCK_MANIFEST_NAME
     if not ledger:
@@ -409,7 +409,7 @@ def write_never_ingest_holdouts(wiki_root: Path, ledger: dict[str, dict[str, Any
     never-ingest matches left leaves no stale file behind.
     """
     from athenaeum.atomic_io import atomic_write_text
-    from athenaeum.store import now_iso
+    from athenaeum.clock import now_iso
 
     path = wiki_root / NEVER_INGEST_HOLDOUT_MANIFEST_NAME
     if not ledger:

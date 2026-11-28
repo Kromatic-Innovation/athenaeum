@@ -164,6 +164,7 @@ from athenaeum.authority import (
     find_duplicate_source,
     load_authority_manifest,
 )
+from athenaeum.clock import now_iso
 from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
     DEFAULT_REASONING_T2_MODEL,
@@ -176,7 +177,7 @@ from athenaeum.pending_merges import PendingMerge
 from athenaeum.pii import is_pii_flagged
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

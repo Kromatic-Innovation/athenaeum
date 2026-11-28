@@ -763,7 +763,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 "trigger": trigger_reason,
             }
             if trigger_reason == "quiesced" and quiesce_state is not None:
-                from athenaeum.store import now_iso
+                from athenaeum.clock import now_iso
 
                 expires_at_iso = now_iso(quiesce_state.expires_at)
                 noop_summary["quiesce_holder"] = quiesce_state.holder
@@ -1151,7 +1151,7 @@ def cmd_session_end(args: argparse.Namespace) -> int:
 
     quiesce_state = read_quiesce_state(knowledge_root)
     if quiesce_state is not None:
-        from athenaeum.store import now_iso
+        from athenaeum.clock import now_iso
 
         print(
             json.dumps(

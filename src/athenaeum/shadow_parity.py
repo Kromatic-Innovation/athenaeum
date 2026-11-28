@@ -87,6 +87,7 @@ import yaml
 
 from athenaeum import comparator as comparator_mod
 from athenaeum import contradictions
+from athenaeum.clock import now_iso
 from athenaeum.cluster_comparator import (
     ClusterComparatorResult,
     candidate_pairs,
@@ -106,7 +107,6 @@ from athenaeum.models import (
 from athenaeum.provider import resolve_max_tokens
 from athenaeum.runlock import RunLock
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
-from athenaeum.store import now_iso
 from athenaeum.verdicts import VERDICT_VALUES
 
 if TYPE_CHECKING:

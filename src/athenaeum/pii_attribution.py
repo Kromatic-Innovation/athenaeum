@@ -114,6 +114,7 @@ from athenaeum.calibration import (
     sample_tier_decision,
 )
 from athenaeum.calibration import AUDIT_KIND as _CALIBRATION_AUDIT_KIND
+from athenaeum.clock import now_iso
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     EntityIndex,
@@ -132,7 +133,7 @@ from athenaeum.provider import (
     response_text,
 )
 from athenaeum.storage import StorageConfigError, note_discard, route_for
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 if TYPE_CHECKING:
     from anthropic.types import MessageParam, ThinkingConfigParam

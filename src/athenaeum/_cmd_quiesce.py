@@ -60,6 +60,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+from athenaeum.clock import now_iso
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 from athenaeum.quiesce import (
     QuiesceDurationExceeded,
@@ -69,7 +70,6 @@ from athenaeum.quiesce import (
     release_quiesce,
     write_quiesce,
 )
-from athenaeum.store import now_iso
 
 
 def _parse_duration(value: str) -> timedelta:

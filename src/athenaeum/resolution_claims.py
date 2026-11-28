@@ -63,7 +63,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.clock import now_iso
+from athenaeum.store import append_line_durable
 
 if TYPE_CHECKING:  # pragma: no cover - type-checking only
     from athenaeum.runlock import RunLock

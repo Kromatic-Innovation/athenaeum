@@ -64,6 +64,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.page_recompile_plan import (
     PAGE_RECOMPILE_LEDGER_VERSION,
     PLAN_KIND,
@@ -74,7 +75,6 @@ from athenaeum.page_recompile_plan import (
     read_page_recompile_ledger,
     split_disposition,
 )
-from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 

@@ -108,6 +108,7 @@ from athenaeum.calibration import (
     attribution_threshold_action_id,
     calibration_summary,
 )
+from athenaeum.clock import now_iso
 from athenaeum.config import (
     resolve_attribution_accuracy_floor,
     resolve_attribution_thresholds,
@@ -116,7 +117,7 @@ from athenaeum.config import (
 )
 from athenaeum.pii_attribution import threshold_for_class
 from athenaeum.resolutions import resolve_auto_apply_threshold_for
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

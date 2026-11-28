@@ -38,10 +38,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.config import load_config
 from athenaeum.models import EntityIndex, PageLocator, parse_frontmatter
 from athenaeum.storage import resolve_locator_surfaces, surface_visibility, vault_page_roots
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 from athenaeum.store_boundary import (
     StoreBoundaryLinkError,
     link_forbidden,

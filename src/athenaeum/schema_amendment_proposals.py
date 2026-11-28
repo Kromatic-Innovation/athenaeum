@@ -59,7 +59,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.clock import now_iso
+from athenaeum.store import append_line_durable
 
 if TYPE_CHECKING:
     from athenaeum.structured_upsert import FieldGroupMisfit

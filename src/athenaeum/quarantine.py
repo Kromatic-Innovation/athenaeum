@@ -68,8 +68,9 @@ import logging
 import os
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.storage import open_store
-from athenaeum.store import Store, StoreKey, now_iso
+from athenaeum.store import Store, StoreKey
 
 log = logging.getLogger(__name__)
 

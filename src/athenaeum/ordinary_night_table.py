@@ -63,6 +63,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from athenaeum.clock import now_iso
 from athenaeum.config import load_config
 from athenaeum.drain_advisor import observed_calls_per_file
 from athenaeum.intake import discover_raw_files
@@ -70,7 +71,6 @@ from athenaeum.librarian import librarian_max_api_calls, librarian_max_runtime
 from athenaeum.measurement_docs import append_measurement_section
 from athenaeum.run_summary_log import entity_phase_wall_clock_per_file
 from athenaeum.spend import read_ledger, resolve_ledger_path
-from athenaeum.store import now_iso
 
 SECTION_HEADING = "## Ordinary-night steady state"
 REPRODUCE_COMMAND = "athenaeum measure ordinary-night"

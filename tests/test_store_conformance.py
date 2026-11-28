@@ -37,6 +37,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum import storage
+from athenaeum.clock import now_iso
 from athenaeum.storage import StorageConfigError
 from athenaeum.store import (
     FilesystemStore,
@@ -47,7 +48,6 @@ from athenaeum.store import (
     StoreKey,
     StoreKeyError,
     append_line_durable,
-    now_iso,
 )
 from athenaeum.store_conformance import StoreConformanceTests
 from tests.store_fakes import InMemoryStore

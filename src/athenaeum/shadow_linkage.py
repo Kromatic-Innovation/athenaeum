@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.clusters import (
     Cluster,
     _build_adjacency,
@@ -67,7 +68,6 @@ from athenaeum.clusters import (
 from athenaeum.config import load_config
 from athenaeum.measurement_docs import append_measurement_section
 from athenaeum.models import AutoMemoryFile
-from athenaeum.store import now_iso
 from athenaeum.wiki_dedupe import _resolve_wiki_embeddings, discover_wiki_dedupe_candidates
 
 #: The section this artifact writes into ``docs/measurements/memory-model-measurements.md``.

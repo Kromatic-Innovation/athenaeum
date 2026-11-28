@@ -209,7 +209,7 @@ def build_audit_record(
     tool's return value, scanned only by :func:`extract_page_uids` — never
     stored itself.
     """
-    from athenaeum.store import now_iso
+    from athenaeum.clock import now_iso
 
     if outcome not in VALID_OUTCOMES:
         raise ValueError(f"outcome={outcome!r} must be one of {sorted(VALID_OUTCOMES)}")
@@ -280,7 +280,7 @@ def build_sensitive_read_record(
     page text: the check happens before any value is read, so there is none to
     leave out by accident.
     """
-    from athenaeum.store import now_iso
+    from athenaeum.clock import now_iso
 
     if outcome not in SENSITIVE_READ_OUTCOMES:
         raise ValueError(f"outcome={outcome!r} must be one of {sorted(SENSITIVE_READ_OUTCOMES)}")

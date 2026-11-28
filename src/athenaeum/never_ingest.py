@@ -114,8 +114,8 @@ from athenaeum.authority import (
     AuthorityManifest,
     find_duplicate_source,
 )
+from athenaeum.clock import now_iso
 from athenaeum.models import parse_frontmatter
-from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 

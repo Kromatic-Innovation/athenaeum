@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from athenaeum.clock import now_iso
 from athenaeum.fold_target_repair import repair_dangling_fold_targets
 from athenaeum.models import parse_frontmatter, tombstone_target
 from athenaeum.provenance import default_merge_provenance_path, read_merge_provenance
-from athenaeum.store import now_iso
 from athenaeum.unfold import _path_for_slug, can_unfold_directly, find_fold_record
 from athenaeum.verdicts import content_hash
 

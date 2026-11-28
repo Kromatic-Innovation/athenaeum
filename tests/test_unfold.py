@@ -19,9 +19,9 @@ import json
 from pathlib import Path
 
 from athenaeum import provenance
+from athenaeum.clock import now_iso
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.models import is_tombstone, parse_frontmatter, render_frontmatter, stamp_tombstone
-from athenaeum.store import now_iso
 from athenaeum.unfold import (
     UNFOLD_DIRECT,
     UNFOLD_QUEUED,

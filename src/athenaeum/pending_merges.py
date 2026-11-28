@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     # write path that never runs an audit (`audit_counters=None`, every
     # pre-athenaeum#1627 caller).
     from athenaeum.audit_on_touch import AuditOnTouchCounters
+from athenaeum.clock import now_iso
 from athenaeum.provenance import record_merge_provenance
 from athenaeum.sidecar_blocks import (
     MARKDOWN_FENCE_OPEN_RE,
@@ -145,7 +146,6 @@ from athenaeum.sidecar_blocks import (
     split_blocks,
 )
 from athenaeum.storage import refuse_read_only_write
-from athenaeum.store import now_iso
 from athenaeum.store_boundary import (
     CrossStoreMergeError,
     assert_same_surface,

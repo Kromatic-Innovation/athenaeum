@@ -62,6 +62,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.config import load_config
 from athenaeum.drain_advisor import (
     DEFAULT_AVG_INPUT_TOKENS_PER_FILE,
@@ -74,7 +75,6 @@ from athenaeum.intake import discover_raw_files
 from athenaeum.measurement_docs import append_measurement_section
 from athenaeum.run_summary_log import entity_phase_wall_clock_per_file
 from athenaeum.spend import read_ledger, resolve_ledger_path
-from athenaeum.store import now_iso
 
 SECTION_HEADING = "## Backlog price sheet"
 REPRODUCE_COMMAND = "athenaeum measure backlog-price"

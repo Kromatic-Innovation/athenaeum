@@ -189,7 +189,7 @@ def record_resolution(
     # in :func:`find_resolved_record`. :func:`athenaeum.store.now_iso` is the
     # single shared rendering of the UTC-ISO timestamp rule (issue
     # athenaeum#1348).
-    from athenaeum.store import now_iso
+    from athenaeum.clock import now_iso
 
     record = {
         "fingerprint": fingerprint,

@@ -256,12 +256,14 @@ class TestStaleProposalsExcludedFromPendingListing:
         # already covers end to end).
         import json
 
+        from athenaeum.clock import now_iso
         from athenaeum.dimension_proposals import (
             DIMENSION_PROPOSALS_LEDGER_VERSION,
             STALE_KIND,
             default_dimension_proposals_ledger_path,
         )
-        from athenaeum.store import append_line_durable, now_iso
+        from athenaeum.store import append_line_durable
+
 
         event = {
             "v": DIMENSION_PROPOSALS_LEDGER_VERSION,

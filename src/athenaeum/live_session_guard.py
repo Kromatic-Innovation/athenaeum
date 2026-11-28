@@ -68,9 +68,9 @@ from datetime import datetime
 from pathlib import Path
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.models import parse_frontmatter
 from athenaeum.session_recovery import SessionRecoverer, written_at_from_frontmatter
-from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 

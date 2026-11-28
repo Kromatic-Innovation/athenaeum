@@ -84,6 +84,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from athenaeum._retry import with_retry
+from athenaeum.clock import now_iso
 from athenaeum.config import (
     DEFAULT_CLASSIFY_MODEL,
     DEFAULT_VERIFY_MODEL,
@@ -97,7 +98,7 @@ from athenaeum.models import EntityIndex, TokenUsage, cache_usage_counts
 from athenaeum.page_recompile import SegmentResult, Unit, check_conservation
 from athenaeum.prompt_safety import fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

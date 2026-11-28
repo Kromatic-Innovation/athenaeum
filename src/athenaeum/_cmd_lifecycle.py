@@ -510,8 +510,8 @@ def cmd_spend(args: argparse.Namespace) -> int:
     import json
 
     from athenaeum import spend
+    from athenaeum.clock import now_iso
     from athenaeum.config import load_config, resolve_cache_dir
-    from athenaeum.store import now_iso
 
     target = args.path.expanduser().resolve()
     config = load_config(target) if target.exists() else None

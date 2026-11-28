@@ -40,6 +40,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.raise_messages import (
     KIND_ATTEST,
     KIND_PROPOSE_FACT,
@@ -48,7 +49,7 @@ from athenaeum.raise_messages import (
     RECORD_KINDS,
 )
 from athenaeum.raise_projection import is_message_id, is_raise_id
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 from athenaeum.store_access import is_store_id
 
 __all__ = [

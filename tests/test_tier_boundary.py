@@ -394,7 +394,7 @@ def test_transitional_targets_are_reported_but_never_fail(tmp_path: Path) -> Non
     src = _tree(
         tmp_path,
         {
-            "models.py": "from athenaeum.store import now_iso\n",
+            "models.py": "from athenaeum.store import put\n",
             "store.py": "",
             "storage/__init__.py": "",
             "storage/routing.py": "",

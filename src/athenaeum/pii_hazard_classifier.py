@@ -59,8 +59,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.config import resolve_cache_dir
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 from athenaeum.yesno import (
     SubprocessYesNoScorer,
     YesNoScorer,
