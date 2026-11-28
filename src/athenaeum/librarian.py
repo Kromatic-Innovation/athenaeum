@@ -7307,7 +7307,8 @@ def _degraded_phases_without_key() -> str:
 
 def _run_preconditions(ctx: RunContext) -> int | None:
     """Git/config preconditions gate: provider resolution + preflight, the
-    ANTHROPIC_API_KEY/wiki-root/.git existence checks. Issue athenaeum#330/#545/#783 seam.
+    ANTHROPIC_API_KEY/wiki-root existence checks and the store history-capability
+    check (athenaeum#3219). Issue athenaeum#330/#545/#783 seam.
 
     Returns a nonzero exit code to short-circuit ``run()`` on failure, or
     ``None`` to continue. Mutates ``ctx.provider``.
@@ -7424,19 +7425,33 @@ def _run_preconditions(ctx: RunContext) -> int | None:
         log.error("Wiki root does not exist: %s", ctx.wiki_root)
         return 1
 
-    if (
-        not ctx.dry_run
-        and not ctx.skip_entity_tiers
-        and not (ctx.knowledge_root / ".git").exists()
-    ):
-        log.error(
-            "No .git in %s — refusing to run without a writable git repo. "
-            "The librarian's pre-processing snapshot is load-bearing for raw-file "
-            "recovery. Either point knowledge_root at a real git repo, or pass "
-            "dry_run=True to inspect without writing.",
-            ctx.knowledge_root,
-        )
-        return 1
+    if not ctx.dry_run and not ctx.skip_entity_tiers:
+        # Issue athenaeum#3219: decide from the store's DECLARED history
+        # capability, not from a ``.git`` probe of our own. A store declared
+        # ``storage.history: none`` (``athenaeum init --no-history``) has no
+        # repository by choice, so the run proceeds without the pre-run
+        # snapshot; a store that declares ``git`` but is not versioned is
+        # missing its repository and is still refused.
+        try:
+            caps = open_store(ctx.config, ctx.knowledge_root).capabilities
+        except StorageConfigError as exc:
+            log.error("%s", exc)
+            return 1
+        if caps.declares_no_history:
+            log.info(
+                "storage.history is none at %s: no pre-run snapshot on this store, "
+                "so raw-file recovery from a snapshot is not available for this run.",
+                ctx.knowledge_root,
+            )
+        elif not caps.versioned:
+            log.error(
+                "No .git in %s — refusing to run without a writable git repo. "
+                "The librarian's pre-processing snapshot is load-bearing for raw-file "
+                "recovery. Either point knowledge_root at a real git repo, or pass "
+                "dry_run=True to inspect without writing.",
+                ctx.knowledge_root,
+            )
+            return 1
     return None
 
 

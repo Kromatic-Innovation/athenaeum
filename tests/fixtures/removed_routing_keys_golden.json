@@ -243,7 +243,7 @@
         "excluded/acme.md": "---\nuid: acme\npii: true\niban:\n  - GB00TEST0000\n---\n\nArchival data.\n",
         "excluded/person-alex.md": "---\nuid: person-alex\npii: true\nemails:\n  - alex@example.org\nphones:\n  - '+15550100'\nnickname: Al\n---\n\nArchival data.\n",
         "wiki/acme.md": "---\nuid: acme\ntype: vendor\nname: Acme Ltd\n---\n\nAcme sells widgets.\n",
-        "wiki/alex.md": "---\nuid: person-alex\ntype: person\nname: Alex Doe\ntitle: Lex\nfield_sources:\n  title: api:delivery-monitor:2026-08-06\nupdated: '2026-11-27'\n---\n\nAlex builds widgets.\n"
+        "wiki/alex.md": "---\nuid: person-alex\ntype: person\nname: Alex Doe\ntitle: Lex\nfield_sources:\n  title: api:delivery-monitor:2026-08-06\nupdated: '<today>'\n---\n\nAlex builds widgets.\n"
       }
     }
   }

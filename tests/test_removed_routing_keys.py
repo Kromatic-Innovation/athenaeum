@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -75,9 +76,18 @@ def _fixture_root(root: Path) -> Path:
     return root
 
 
+#: A write stamps ``updated:`` with the day the test runs. The golden was
+#: recorded on one day, so the stamp is replaced with a fixed token before the
+#: comparison (the golden added for athenaeum#3173 failed on every day
+#: after the one the golden was recorded on).
+_UPDATED_STAMP = re.compile(r"^updated: '\d{4}-\d{2}-\d{2}'$", re.MULTILINE)
+
+
 def _tree(root: Path) -> dict[str, str]:
     return {
-        str(p.relative_to(root)): p.read_text(encoding="utf-8")
+        str(p.relative_to(root)): _UPDATED_STAMP.sub(
+            "updated: '<today>'", p.read_text(encoding="utf-8")
+        )
         for p in sorted(root.rglob("*.md"))
     }
 
