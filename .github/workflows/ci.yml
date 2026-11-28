@@ -489,6 +489,53 @@ jobs:
       - name: Check pyproject.toml / requirements-ci.txt exact-pin parity
         run: python3 scripts/check_exact_pin_parity.py
 
+      # athenaeum#3230 — tests/fixtures/tier_exceptions.txt only shrinks. Fail a
+      # pull request that adds a line to it unless the PR carries the
+      # `layering-exception` label. Compared with the merge base of the PR
+      # head and its base branch. Labels are read from the event payload, so
+      # adding the label after the run needs a re-run of this job.
+      - name: Tier exceptions only shrink
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HAS_EXCEPTION_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'layering-exception') }}
+        run: |
+          # Each `git show` writes a file first, so a failed read
+          # stops the step under `set -e` before anything reads its output.
+          set -eu
+          file=tests/fixtures/tier_exceptions.txt
+          # The checkout is shallow; fetch full history so merge-base resolves.
+          git fetch --no-tags --quiet --unshallow origin "$BASE_SHA" "$HEAD_SHA"
+          merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          if ! git cat-file -e "$merge_base:$file" 2>/dev/null; then
+            echo "$file does not exist at the merge base $merge_base; nothing to compare."
+            exit 0
+          fi
+          # One `[section] importer -> target` line per entry, comments dropped.
+          entries() {
+            awk '{ sub(/#.*/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
+                 /^\[.*\]$/ { section = $0; next }
+                 NF { print section " " $0 }' | LC_ALL=C sort -u
+          }
+          git show "$merge_base:$file" > /tmp/tier-exceptions-base.raw
+          git show "$HEAD_SHA:$file" > /tmp/tier-exceptions-head.raw
+          entries < /tmp/tier-exceptions-base.raw > /tmp/tier-exceptions-base.txt
+          entries < /tmp/tier-exceptions-head.raw > /tmp/tier-exceptions-head.txt
+          LC_ALL=C comm -13 /tmp/tier-exceptions-base.txt /tmp/tier-exceptions-head.txt > /tmp/tier-exceptions-added.txt
+          if [ ! -s /tmp/tier-exceptions-added.txt ]; then
+            echo "$file adds no line."
+            exit 0
+          fi
+          echo "$file adds:"
+          cat /tmp/tier-exceptions-added.txt
+          if [ "$HAS_EXCEPTION_LABEL" = "true" ]; then
+            echo "The PR carries the layering-exception label; the additions are allowed."
+            exit 0
+          fi
+          echo "::error file=$file::$file adds a line. Fix the import, or add the layering-exception label to the pull request."
+          exit 1
+
   # athenaeum#2297 — prove the documented uv install path actually clears the
   # "pip silently resolves backwards on an old interpreter" trap that
   # README.md and docs/guides/install.md warn about, on exactly the
