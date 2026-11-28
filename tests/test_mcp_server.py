@@ -2665,6 +2665,19 @@ class TestToolAnnotations:
         assert "deletes the old source" not in lowered
         assert "source deletes" not in lowered
 
+    def test_enumerate_entities_description_states_past_valid_until_listed(
+        self, tmp_path: Path
+    ) -> None:
+        """issue athenaeum#3321: the PUBLISHED `enumerate_entities`
+        description says a page with a past `valid_until` is listed by
+        default (an ended relationship is still an entity), so a caller is
+        never left guessing why an ended client is or is not returned."""
+        tools = self._tools_by_name(self._server(tmp_path))
+        description = tools["enumerate_entities"].description
+        assert description is not None
+        assert "Pages with a past `valid_until` ARE listed" in description
+        assert "ended-relationship page is still" in description
+
 
 # ---------------------------------------------------------------------------
 # README <-> registered-tool parity (issue athenaeum#1380)

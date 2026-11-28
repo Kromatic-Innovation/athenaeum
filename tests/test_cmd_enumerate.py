@@ -325,3 +325,19 @@ class TestIncludeSplitFlag:
         parser = build_parser()
         args = parser.parse_args(["enumerate", "--type", "company"])
         assert args.include_split is False
+
+
+class TestHelpText:
+    def test_help_states_past_valid_until_pages_are_listed(self) -> None:
+        """issue athenaeum#3321: `athenaeum enumerate --help` says how a page
+        with a past `valid_until` is treated (listed: an ended relationship
+        is still an entity)."""
+        parser = build_parser()
+        sub = next(
+            a
+            for a in parser._actions
+            if isinstance(a, argparse._SubParsersAction)
+        )
+        help_text = " ".join(sub.choices["enumerate"].format_help().split())
+        assert "Pages with a past `valid_until` are listed" in help_text
+        assert "ended-relationship page" in help_text

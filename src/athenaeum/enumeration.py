@@ -35,6 +35,22 @@ this codebase already uses (Layer C in ``recall``, the CLI's ``cmd_recall``,
 ``entity_schema``'s field-key scan). It is bounded by the type-filtered
 candidate count, not a fresh unconditional corpus-wide scan.
 
+**Pages with a past ``valid_until`` are listed (issue athenaeum#3321).** The
+index applies ``recall``'s validity window (issue athenaeum#308) and leaves out
+a page whose ``valid_until`` has passed. On an entity page that date usually
+records when a relationship ended (a former client, a past employer), not
+when the entity stopped existing, and enumeration lists entities. So it
+also reads the files the index leaves out and adds the ones excluded ONLY
+for their ``valid_until``
+(:meth:`athenaeum.search.FTS5Backend.expired_candidates_by_type`). The extra
+reads are bounded by the number of unindexed files, which the index build
+re-reads on every run anyway. Deprecated, PII-flagged and
+embedding-excluded pages stay out, as before. A ``bucket: daily`` page keeps
+its existing behaviour: the index never drops it for its ``valid_until``
+(issue athenaeum#904), so it was already listed, and it leaves the listing when
+the decay sweep removes it from the live tree. A caller that wants only
+current relationships filters on a field, for example with a predicate.
+
 **Type values and field names (AC 3).** Permitted type values are derived
 from :func:`athenaeum.entity_schema.resolve_entity_classes` — the SAME
 resolver ``recall``'s dynamic tool-schema description and the ``entity_schema``
@@ -481,6 +497,24 @@ def enumerate_entities(
     backend = FTS5Backend()
     backend.build_index(wiki_root, cache_dir, extra_roots=extra_roots_list, config=config)
     candidate_filenames = backend.candidates_by_type(cache_dir, entity_type)
+    # Issue athenaeum#3321: an entity page does not expire from enumeration.
+    # The index drops a page whose ``valid_until`` is past (recall's
+    # athenaeum#308 validity window), but on a company or person page that
+    # date usually marks when a RELATIONSHIP ended, and an ended relationship
+    # is still a fact a listing must return. Those pages come from a
+    # second, read-only pass over just the files the index leaves out.
+    indexed_candidates = set(candidate_filenames)
+    candidate_filenames = candidate_filenames + [
+        name
+        for name in backend.expired_candidates_by_type(
+            wiki_root,
+            cache_dir,
+            entity_type,
+            extra_roots=extra_roots_list,
+            config=config,
+        )
+        if name not in indexed_candidates
+    ]
 
     scored: list[tuple[tuple[int, float, str], str, dict[str, Any]]] = []
     for filename in candidate_filenames:

@@ -5120,6 +5120,15 @@ def create_server(
         reproducible surface — see docs/design/recall-architecture.md's
         capability-parity table for the historical per-flag mapping.
 
+        Pages with a past `valid_until` ARE listed, by default and with no
+        flag. On an entity page that date usually records when a
+        relationship ended (a former client, a past employer), not when the
+        entity stopped existing, so an ended-relationship page is still
+        returned here even though `recall` leaves it out. To list only
+        current relationships, add a predicate on a field. Deprecated
+        pages, `pii: true` pages and pages excluded from the index are
+        never listed.
+
         Args:
             entity_type: The declared entity class to enumerate (a page's
                 `type:`). Required. An unrecognized value does not error —
