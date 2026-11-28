@@ -154,9 +154,7 @@ def record_deferred(cache_dir: Path, *, reason: str, backend: str) -> FullRebuil
     return marker
 
 
-def record_attempt_started(
-    cache_dir: Path, *, reason: str, backend: str
-) -> FullRebuildMarker:
+def record_attempt_started(cache_dir: Path, *, reason: str, backend: str) -> FullRebuildMarker:
     """Record that a full rebuild is starting.
 
     Creates the marker if none exists, so a rebuild the nightly run starts

@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -67,8 +66,7 @@ def _roll_vector_manifest_to_v3(cache: Path) -> None:
     from athenaeum.search import VectorBackend
 
     assert VectorBackend._METADATA_SCHEMA_VERSION == 4, (
-        "this test reproduces the v3 -> v4 roll; update the literal below if "
-        "the schema moves again"
+        "this test reproduces the v3 -> v4 roll; update the literal below if the schema moves again"
     )
     manifest = cache / "vector-manifest.json"
     payload = json.loads(manifest.read_text())
@@ -101,8 +99,9 @@ def _forbid_reindex(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("mock_anthropic")
 def test_v3_vector_index_session_end_skips_rebuild_and_leaves_marker(
-    tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("chromadb")
     root, cache = _built_store(tmp_path, "vector")
@@ -122,13 +121,12 @@ def test_v3_vector_index_session_end_skips_rebuild_and_leaves_marker(
     assert marker.backend == "vector"
     assert marker.deferrals == 1 and marker.attempts == 0
     # The old index is left in place for recall to keep serving from.
-    assert json.loads((cache / "vector-manifest.json").read_text())[
-        "metadata_schema_version"
-    ] == 3
+    assert json.loads((cache / "vector-manifest.json").read_text())["metadata_schema_version"] == 3
 
 
+@pytest.mark.usefixtures("mock_anthropic")
 def test_repeated_session_ends_only_count_deferrals(
-    tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The loop the issue reported: sequential closes each restarted the
     rebuild. Now each one only bumps the deferral count."""
@@ -147,8 +145,9 @@ def test_repeated_session_ends_only_count_deferrals(
     assert marker.attempts == 0 and marker.consecutive_failures == 0
 
 
+@pytest.mark.usefixtures("mock_anthropic")
 def test_compile_that_ran_also_defers_the_full_rebuild(
-    tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The compile-ran arm used to reindex unconditionally, which on a
     non-reusable index is the same full rebuild by another door."""
@@ -166,9 +165,8 @@ def test_compile_that_ran_also_defers_the_full_rebuild(
     assert index_rebuild_marker.read_marker(cache) is not None
 
 
-def test_first_build_still_happens_at_session_end(
-    tmp_path: Path, mock_anthropic: MagicMock
-) -> None:
+@pytest.mark.usefixtures("mock_anthropic")
+def test_first_build_still_happens_at_session_end(tmp_path: Path) -> None:
     """No index at all is a first build, not a rebuild: unchanged."""
     root = _seed_knowledge_root(tmp_path)
     _write_tier0_raw(root, "p-0001", "Alice Zhang", "20240410T120000Z", "aabbccdd")
@@ -181,7 +179,8 @@ def test_first_build_still_happens_at_session_end(
     assert index_rebuild_marker.read_marker(cache) is None
 
 
-def test_dry_run_records_nothing(tmp_path: Path, mock_anthropic: MagicMock) -> None:
+@pytest.mark.usefixtures("mock_anthropic")
+def test_dry_run_records_nothing(tmp_path: Path) -> None:
     from athenaeum.librarian import session_end
 
     root, cache = _built_store(tmp_path, "fts5")
@@ -205,8 +204,9 @@ def test_dry_run_records_nothing(tmp_path: Path, mock_anthropic: MagicMock) -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("mock_anthropic")
 def test_nightly_refresh_rebuilds_once_clears_marker_then_session_end_is_incremental(
-    tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import athenaeum.search as search
     from athenaeum._cli_shared import refresh_index_after_run
@@ -254,24 +254,24 @@ def test_nightly_refresh_rebuilds_once_clears_marker_then_session_end_is_increme
     assert index_rebuild_marker.read_marker(cache) is None
 
 
+@pytest.mark.usefixtures("mock_anthropic")
 def test_reindex_command_clears_the_marker(
-    tmp_path: Path, mock_anthropic: MagicMock, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root, cache = _built_store(tmp_path, "fts5")
     _roll_fts5_db_back(cache)
     assert _session_end(root, cache, "fts5").full_rebuild_deferred
 
-    rc = main(
-        ["reindex", "--path", str(root), "--cache-dir", str(cache), "--backend", "fts5"]
-    )
+    rc = main(["reindex", "--path", str(root), "--cache-dir", str(cache), "--backend", "fts5"])
 
     assert rc == 0
     assert index_rebuild_marker.read_marker(cache) is None
     assert _session_end(root, cache, "fts5").full_rebuild_deferred is None
 
 
+@pytest.mark.usefixtures("mock_anthropic")
 def test_reindex_as_of_snapshot_leaves_the_marker(
-    tmp_path: Path, mock_anthropic: MagicMock, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A historical as-of build is not the current index's rebuild."""
     root, cache = _built_store(tmp_path, "fts5")
@@ -280,8 +280,15 @@ def test_reindex_as_of_snapshot_leaves_the_marker(
 
     main(
         [
-            "reindex", "--path", str(root), "--cache-dir", str(cache),
-            "--backend", "fts5", "--as-of", "2024-01-01",
+            "reindex",
+            "--path",
+            str(root),
+            "--cache-dir",
+            str(cache),
+            "--backend",
+            "fts5",
+            "--as-of",
+            "2024-01-01",
         ]
     )
 
@@ -293,8 +300,9 @@ def test_reindex_as_of_snapshot_leaves_the_marker(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("mock_anthropic")
 def test_failing_rebuilds_are_counted_and_surface_in_doctor(
-    tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import athenaeum.search as search
     from athenaeum.librarian import reindex
@@ -353,9 +361,7 @@ def test_killed_attempt_is_counted_by_the_next_attempt(tmp_path: Path) -> None:
     assert marker.consecutive_failures == index_rebuild_marker.FAILURE_WARN_THRESHOLD
     assert marker.failing
     assert "never finished" in (marker.last_failure or "")
-    assert doctor.check_index_rebuild(cache).detail.startswith(
-        "full index rebuild has failed"
-    )
+    assert doctor.check_index_rebuild(cache).detail.startswith("full index rebuild has failed")
 
 
 def test_doctor_reports_no_pending_rebuild(tmp_path: Path) -> None:
@@ -364,8 +370,9 @@ def test_doctor_reports_no_pending_rebuild(tmp_path: Path) -> None:
     assert check.name == "index_rebuild"
 
 
+@pytest.mark.usefixtures("mock_anthropic")
 def test_nightly_rebuild_without_a_prior_session_end_is_still_tracked(
-    tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """If the nightly run meets the non-reusable index first, its attempt is
     recorded too, so its failures are not silent either."""
@@ -388,9 +395,8 @@ def test_nightly_rebuild_without_a_prior_session_end_is_still_tracked(
     assert marker.consecutive_failures == 1 and marker.deferrals == 0
 
 
-def test_incremental_reindex_of_a_healthy_index_records_nothing(
-    tmp_path: Path, mock_anthropic: MagicMock
-) -> None:
+@pytest.mark.usefixtures("mock_anthropic")
+def test_incremental_reindex_of_a_healthy_index_records_nothing(tmp_path: Path) -> None:
     from athenaeum.librarian import reindex
 
     root, cache = _built_store(tmp_path, "fts5")
