@@ -73,6 +73,10 @@ without notice. From the release after 0.27.2 on, changes to it get their own
 
 - `athenaeum ingest --raw PATH|GLOB ...` compiles only the named raw files on demand (athenaeum#3223). Paths and globs resolve against the raw root (a path outside it is refused with a non-zero exit), the flag can repeat, and every named file gets an outcome in the output (created, updated, retained with a reason, dropped, failed, deferred, held, `not-found` or `not-entity-intake`). Any other pending raw file is left untouched and unstamped, and the corpus-wide phases (wiki-dedupe, name-collision, qualified-name, the auto-memory block, page recompile and the other late phases) are skipped; the raw-screen hold, run preconditions, budget and spend-ceiling checks, run deadline and finalize still run, and batch mode is forced off. After a real write it refreshes the search index (`athenaeum recall` finds the page straight away), sharing one helper with `athenaeum run`. With `--dry-run` it runs the compile in no-write mode and reports the same outcomes (a file that needs an LLM tier reports `would-reach-tier2-3`) with nothing written to disk.
 
+### Changed
+
+- Docs: new [team deployment scenarios](docs/team-scenarios.md) page describing a small company on one served deployment and independent people sharing one project, so a design for access, identity or federation has a deployment to be checked against. The use cases (§3, with §3.2 rewritten so that policy precedence is the deployment's to configure, and new use cases for policy layering, cross-store contradictions and source marking) and the north star (new §2.13 on where access is enforced and how an unverified source is recorded, and three additions to §3) are amended to match (athenaeum#3276).
+
 ### Fixed
 
 - Docs: the CLI reference's `athenaeum retire-pages` entry, in the command index and its own section, now opens with "Deprecated alias of `athenaeum retire`, removed in the next release" and links to that command instead of repeating its full description; a backticked command name in command help now renders as a link to that command's section (athenaeum#3212).
