@@ -547,10 +547,18 @@ read now also asks the principal of the request, per vault.
   from the verified request (section 2.7) and is not a tool parameter.
 - **Where it runs.** At the places a vault's values are read for a caller: the
   excluded-field join of `recall`, the handle-shaped reverse lookup of
-  `recall`, the excluded read and vault-page read of `read_entity`, and the
-  routed-value pointers `read_entity` resolves in a page body.
+  `recall`, the excluded read and vault-page read of `read_entity`, the
+  routed-value pointers `read_entity` resolves in a page body, and the
+  vault-held value of a field-correction question that
+  `list_pending_decisions(include_sensitive=True)` resolves (athenaeum#3220).
+  For that tool the owner condition sits between the ceiling and the grant: a
+  restricted caller never receives the value and no grant is asked. A refused
+  vault shows the same redaction marker as a listing without
+  `include_sensitive`, and the item is still listed. The check is made only
+  for the items on the returned page.
 - **Audit.** The server's audit log gets one record per vault per sensitive
-  read: the principal's identity key, the vault and the outcome (`granted` or
+  read: the tool name (`recall`, `read_entity` or `list_pending_decisions`),
+  the principal's identity key, the vault and the outcome (`granted` or
   `denied`), written before the read proceeds. It carries no value and no field
   name. If the log cannot be written the call fails.
 - **Unchanged.** A local stdio server and the command line have no resource

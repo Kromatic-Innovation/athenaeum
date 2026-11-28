@@ -5771,6 +5771,17 @@ def create_server(
         ``include_sensitive=True`` an owner caller gets the value, read through
         the entity read; a restricted caller, or a server started with
         ``serve.sensitive_reads: off``, never does.
+
+        On a network server the read also needs a read grant on the vault, the
+        same per-vault check ``recall`` and ``read_entity`` apply, in the same
+        order: the ``serve.sensitive_reads`` ceiling first, then the owner
+        condition, then the grant (athenaeum#3220). A caller the check refuses
+        gets the same redaction marker as a call without
+        ``include_sensitive``; the item is still listed. Each vault asked about
+        is written to the sensitive-read audit log (principal, vault, granted
+        or denied; never a value) under the tool name
+        ``list_pending_decisions``. A stdio server has no such check, and the
+        flag alone decides.
         """
         from athenaeum.config import (
             load_config,
@@ -5785,6 +5796,18 @@ def create_server(
         max_item_context_tokens = resolve_decisions_max_item_context_tokens(config)
         if limit is None or limit <= 0:
             limit = resolve_decisions_page_limit(config)
+        # The ceiling first; then the owner condition; then, athenaeum#3220, the
+        # per-vault grant -- the same checks, in the same order, as `recall` and
+        # `read_entity`. Only a sensitive read an owner caller makes under an
+        # open ceiling is asked about vaults, so nothing else is audited.
+        sensitive = include_sensitive and not (
+            remote_policy is not None and not remote_policy.sensitive_reads
+        )
+        vault_gate = (
+            _new_vault_gate("list_pending_decisions")
+            if sensitive and caller_audience is None
+            else None
+        )
         return list_pending_decisions_page(
             wiki_root,
             max_sources_per_merge=max_sources_per_merge,
@@ -5792,8 +5815,8 @@ def create_server(
             caller_audience=caller_audience,
             offset=offset,
             limit=limit,
-            include_sensitive=include_sensitive
-            and not (remote_policy is not None and not remote_policy.sensitive_reads),
+            include_sensitive=sensitive,
+            vault_read_allowed=vault_gate,
         )
 
     @_register_tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)

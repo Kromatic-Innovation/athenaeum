@@ -197,8 +197,10 @@ from athenaeum.storage import (
     configured_routes,
     inside_git_repository,
     route_for,
+    surface_read_permitted,
     surface_root_for_class,
     target_root,
+    vault_for_path,
     vault_page_roots,
     vault_route_for_page_type,
 )
@@ -6541,12 +6543,20 @@ def entity_read_by_uid(
     uid: str,
     *,
     include_excluded: bool,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> EntityRead | None:
     """:func:`read_entity` for *uid* without the caller naming the surface class.
 
     Finds the page (wiki index, else a vault page), takes its ``type:``, maps it
     to its surface class and reads with *include_excluded*. ``None`` when the uid
     resolves to no page or the read fails.
+
+    *vault_read_allowed* is the per-vault read check of a served request
+    (athenaeum#3220, the same check ``read_entity`` applies): with
+    *include_excluded*, the vault the read would open is asked first -- the
+    page's own vault for a whole vault page, else the surface class's location
+    -- and a refusal returns ``None`` before anything is read from it.
+    ``None`` (a stdio server, the command line) leaves the flag alone to decide.
     """
     from athenaeum.entity_index_cache import entity_index_for_uid
 
@@ -6560,6 +6570,14 @@ def entity_read_by_uid(
             return None
         frontmatter, _ = parse_frontmatter(page_path.read_text(encoding="utf-8"))
         surface = surface_class_for_page_class(str(frontmatter.get("type") or "").strip(), config)
+        if include_excluded and vault_read_allowed is not None:
+            vault = vault_for_path(page_path, config, knowledge_root)
+            if vault is not None:
+                permitted = vault_read_allowed(vault)
+            else:
+                permitted = surface_read_permitted(vault_read_allowed, surface, config)
+            if not permitted:
+                return None
         return read_entity(
             knowledge_root,
             config,
