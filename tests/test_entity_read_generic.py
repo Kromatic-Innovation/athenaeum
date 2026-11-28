@@ -270,6 +270,76 @@ class TestFieldPolicy:
         assert resolve_excluded_fields("vendor", None, None) == ()
 
 
+class TestRoutesOnlyConfigReadsThroughMappedClass:
+    """athenaeum#3224: a routes-only config reads back under the mapped ``pii`` class.
+
+    The config declares ``pii: excluded`` plus a ``person`` field route to the
+    same location; a caller naming the ``pii`` surface class must still get the
+    routed fields.
+    """
+
+    def test_read_entities_returns_routed_contact_for_pii_class(self, tmp_path: Path) -> None:
+        knowledge = _person_corpus(tmp_path)
+
+        [(uid, read)] = list(
+            read_entities(
+                knowledge,
+                EXCLUDED_CONFIG,
+                ["alex"],
+                surface_class="pii",
+                include_excluded=True,
+            )
+        )
+
+        assert uid == "alex"
+        assert read is not None
+        assert read.contact["emails"] == ["alex@example.org"]
+        assert read.contact["phones"] == ["+15550000001"]
+
+    def test_redacted_read_reports_markers_for_pii_class(self, tmp_path: Path) -> None:
+        knowledge = _person_corpus(tmp_path)
+
+        [(_, read)] = list(
+            read_entities(knowledge, EXCLUDED_CONFIG, ["alex"], surface_class="pii")
+        )
+
+        assert read is not None
+        assert {m.field for m in read.redactions} == {"emails", "phones"}
+
+    def test_resolve_excluded_fields_for_mapped_class(self) -> None:
+        assert resolve_excluded_fields("pii", EXCLUDED_CONFIG, None) == (
+            "emails",
+            "phones",
+            "former_emails",
+            "alt_emails",
+        )
+
+    def test_route_for_pii_class_targets_the_excluded_location(self) -> None:
+        from athenaeum.storage import route_for
+
+        decision = route_for(None, "emails", config=EXCLUDED_CONFIG, surface_class="pii")
+
+        assert decision.targets == ("excluded",)
+        assert not route_for(None, "nickname", config=EXCLUDED_CONFIG, surface_class="pii").targets
+
+    def test_a_mapped_class_inherits_only_routes_to_its_own_location(self) -> None:
+        storage = {**TWO_SURFACE_CONFIG["storage"]}
+        storage["mapping"] = {"pii": "excluded", "other": "vendor-excluded"}
+        config = {"storage": storage}
+
+        assert resolve_excluded_fields("pii", config, None) == (
+            "emails",
+            "phones",
+            "former_emails",
+            "alt_emails",
+        )
+        assert resolve_excluded_fields("other", config, None) == (
+            "account_numbers",
+            "billing_contact",
+        )
+        assert resolve_excluded_fields("unmapped", config, None) == ()
+
+
 class TestReadEntitiesBatch:
     """``read_entities`` batch-read behaviour not already covered by the
     single-uid tests above.

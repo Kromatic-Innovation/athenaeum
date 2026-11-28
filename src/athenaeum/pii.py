@@ -5505,8 +5505,10 @@ def resolve_excluded_fields(
 
     Only declared fields (athenaeum#3170): the fields a ``storage.routes``
     rule names for the page type (folded into a per-class table, read through
-    :func:`athenaeum.storage.configured_excluded_fields`). A class with no
-    declaration has no data fields and yields ``()``.
+    :func:`athenaeum.storage.configured_excluded_fields`), or, for a class named
+    in ``storage.mapping``, the fields routed to the location it maps to
+    (athenaeum#3224). A class with no declaration has no data fields and yields
+    ``()``.
 
     There is no built-in list any more. Before athenaeum#3170 the ``pii`` class
     fell back to :data:`BUILTIN_CONTACT_FIELDS` and any other class to every
@@ -5518,10 +5520,15 @@ def resolve_excluded_fields(
     *record_meta* is accepted for the call shape and no longer consulted.
     """
     del record_meta
-    from athenaeum.storage import configured_excluded_fields
+    from athenaeum.storage import configured_excluded_fields, routed_fields_for_mapped_class
 
     configured = configured_excluded_fields(config).get(surface_class)
-    return tuple(configured) if configured is not None else ()
+    if configured is not None:
+        return tuple(configured)
+    # A class named in ``storage.mapping`` (``pii: excluded``) holds the fields
+    # the routes send to its location, though they are filed under a derived
+    # class (athenaeum#3224).
+    return routed_fields_for_mapped_class(surface_class, config)
 
 
 def _normalize_frontmatter_uid(raw: Any) -> str:

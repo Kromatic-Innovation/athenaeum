@@ -706,6 +706,30 @@ def configured_excluded_fields(config: dict[str, Any] | None) -> dict[str, tuple
     return dict(_route_tables(config)[1])
 
 
+def routed_fields_for_mapped_class(
+    surface_class: str, config: dict[str, Any] | None
+) -> tuple[str, ...]:
+    """Fields ``storage.routes`` sends to the location *surface_class* is mapped to.
+
+    A class named in ``storage.mapping`` (``pii: excluded``) is the location's
+    record collection; a ``storage.routes`` field rule to that same location
+    fills it. The rule's fields are held under a derived class
+    (:func:`configured_excluded_fields`), so a read naming the mapped class
+    (``read_entities(surface_class="pii")``) finds them here (athenaeum#3224).
+    Empty for a class that is not mapped, and for rules aimed at another
+    location. Rule order, each field once.
+    """
+    location = resolve_storage_mapping(config).get(surface_class)
+    if location is None:
+        return ()
+    mapping, fields, _ = _route_tables(config)
+    found: dict[str, None] = {}
+    for derived, names in fields.items():
+        if mapping.get(derived) == location:
+            found.update(dict.fromkeys(names))
+    return tuple(found)
+
+
 # ---------------------------------------------------------------------------
 # The removed keys: refuse, and print the routes that replace them (athenaeum#3173)
 # ---------------------------------------------------------------------------
