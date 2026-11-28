@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The ledger and the handoff note carry opaque references (an ordinal, never a digest of the value)."""
+"""The ledger and the handoff note carry opaque references, never a digest of the value."""
 
 from __future__ import annotations
 
