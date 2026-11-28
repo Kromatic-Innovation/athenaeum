@@ -9927,17 +9927,23 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         if not ctx.targeted:
             _run_pending_batch_collect_phase(ctx)
         ctx.raw_files = discover_raw_files(ctx.raw_root, ctx.config)
+        _discovered_raw = list(ctx.raw_files)
+        # Issue athenaeum#1143: a leased raw file is NOT claimable (see below).
+        _apply_pending_batch_leases(ctx)
         _targeted_named: list[RawFile] = []
         if ctx.targeted:
-            # Issue athenaeum#3223: narrow the intake to the named files BEFORE the
-            # lease / hold-out passes, so a named file those passes drop can be
-            # reported as ``held`` instead of vanishing. A named path discovery
-            # never yields (auto-memory, an extra intake root, a non-intake
-            # file) is reported ``not-entity-intake``.
+            # Issue athenaeum#3223: narrow the intake to the named files. The
+            # named set is taken from discovery BEFORE the lease / hold-out
+            # passes, so a named file those passes drop can be reported as
+            # ``held`` instead of vanishing. A named path discovery never yields
+            # (auto-memory, an extra intake root, a non-intake file) is
+            # reported ``not-entity-intake``.
+            _targeted_named, _ = _prioritize_caller_scoped_raw(
+                _discovered_raw, ctx.entity_changed_paths, targeted=True
+            )
             ctx.raw_files, _ = _prioritize_caller_scoped_raw(
                 ctx.raw_files, ctx.entity_changed_paths, targeted=True
             )
-            _targeted_named = list(ctx.raw_files)
             _discovered = {r.path.resolve() for r in _targeted_named}
             for _named in sorted(ctx.entity_changed_paths or ()):
                 if _named.resolve() in _discovered:
@@ -9953,7 +9959,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     ctx.note_outcome(_named, "not-found", None)
         # Issue athenaeum#1143: a raw file held by an in-flight batch's lease is
         # NOT claimable — re-claiming it would re-submit work already paid for.
-        _apply_pending_batch_leases(ctx)
+        # The lease filter is applied right after discovery, above.
         # Issue athenaeum#1322: a stuck (athenaeum#663) or in-backoff
         # (athenaeum#1185) file is skipped inside the per-file loop below --
         # i.e. AFTER it has already won a `max_files` slot. Hold those files
