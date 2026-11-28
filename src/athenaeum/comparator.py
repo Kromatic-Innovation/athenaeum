@@ -228,15 +228,14 @@ log = logging.getLogger(__name__)
 # same storage discipline as :data:`athenaeum.wiki_dedupe._WIKI_FALLBACK_WARNED`
 # (issue athenaeum#1032) -- but UNLIKE that one-shot-per-process flag, this pair is
 # explicitly reset by ``begin_content_relation_unavailable_tracking`` at the start
-# of each of the three peer comparison passes (QA review of athenaeum#1245's PR,
+# of each of the peer comparison passes (QA review of athenaeum#1245's PR,
 # finding 2), so each pass reports its OWN occurrence count even if more than one
-# runs in the same interpreter -- a genuine (if not yet reachable) risk once
-# ``comparator_instruments.run_sibling_widening`` gets a caller, or an orchestrator
-# ever batches these passes together. A per-call accumulator threaded through
+# runs in the same interpreter -- a genuine (if not yet reachable) risk if an
+# orchestrator ever batches these passes together. A per-call accumulator threaded through
 # ``content_relation`` / ``compare_pages`` / ``record_comparison`` was considered
 # and rejected: those are heavily-used, widely-tested public functions (dry-run
 # and ledgered call sites in ``wiki_dedupe``, ``recompare``, plus their own direct
-# test coverage), and all three real callers of this tracking run synchronously,
+# test coverage), and both real callers of this tracking run synchronously,
 # single-threaded, one at a time -- there is no concurrency hazard a reset-at-pass
 # -start can't already cover, so paying for a signature change across three public
 # functions bought nothing a reset doesn't already fix. Tests reset explicitly via
@@ -853,8 +852,7 @@ def content_relation(
         # separately", the way merge.py's C4 detector/resolver loop
         # pre-increments before it dispatches. No call site of this function
         # ever did that: not ``compare_pages``/``record_comparison``, not
-        # ``wiki_dedupe.propose_wiki_page_merges``, not
-        # ``comparator_instruments``. So every Gate-2 call landed its tokens
+        # ``wiki_dedupe.propose_wiki_page_merges``. So every Gate-2 call landed its tokens
         # and its cost into the run-level ``TokenUsage`` while leaving
         # ``api_calls`` -- the counter ``librarian.max_api_calls`` is
         # denominated in, and the one ``economics.calls`` reports -- exactly
@@ -918,9 +916,8 @@ def begin_content_relation_unavailable_tracking() -> None:
     summary of whatever was accumulated before the failure -- QA finding 1).
 
     Without this reset, the module-global count/latch is a single process-lifetime
-    one-shot: if a second peer pass (``wiki_dedupe.propose_wiki_page_merges``,
-    ``recompare``'s pass, ``comparator_instruments.run_sibling_widening``) ever ran
-    in the same interpreter after a first one already flushed, the second pass's
+    one-shot: if a second peer pass (``wiki_dedupe.propose_wiki_page_merges`` or
+    ``recompare``'s pass) ever ran in the same interpreter after a first one already flushed, the second pass's
     occurrences would silently accumulate into an already-``True`` latch and NEVER
     warn -- permanently swallowed, not merely delayed. Calling this first makes
     each pass self-contained: its own count, its own one-time warning, regardless

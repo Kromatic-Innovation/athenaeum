@@ -230,7 +230,6 @@ class TestPhase2StaysDark:
     DARK_MODULES = (
         "comparator",
         "verdict_effects",
-        "comparator_instruments",
         "supersession",
         "asserter_authority",
         "recompare",
@@ -331,7 +330,6 @@ class TestCoordinateAnswerLoopIsANarrowAuthorizedException:
     """
 
     _STILL_DARK = (
-        "comparator_instruments",
         "supersession",
         "asserter_authority",
         "recompare",
