@@ -1166,9 +1166,10 @@ class TestContentRelationUnavailableWarnsOnce:
     ) -> None:
         """QA review finding 2: the count/latch used to be a single
         process-lifetime one-shot -- a second peer pass
-        (`wiki_dedupe.propose_wiki_page_merges` / `recompare`) running in the same interpreter after a first one
-        already flushed would silently accumulate into an already-``True`` latch
-        and never warn, permanently swallowing its own occurrences.
+        (`wiki_dedupe.propose_wiki_page_merges` / `recompare`) running in the
+        same interpreter after a first one already flushed would silently
+        accumulate into an already-``True`` latch and never warn, permanently
+        swallowing its own occurrences.
         `begin_content_relation_unavailable_tracking` (called once by each pass
         before its loop) resets both the counter and the latch, so a second pass
         reports its OWN count rather than being swallowed by the first's."""

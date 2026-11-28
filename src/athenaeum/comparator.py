@@ -917,11 +917,11 @@ def begin_content_relation_unavailable_tracking() -> None:
 
     Without this reset, the module-global count/latch is a single process-lifetime
     one-shot: if a second peer pass (``wiki_dedupe.propose_wiki_page_merges`` or
-    ``recompare``'s pass) ever ran in the same interpreter after a first one already flushed, the second pass's
-    occurrences would silently accumulate into an already-``True`` latch and NEVER
-    warn -- permanently swallowed, not merely delayed. Calling this first makes
-    each pass self-contained: its own count, its own one-time warning, regardless
-    of what any earlier pass in this process already did."""
+    ``recompare``'s pass) ever ran in the same interpreter after a first one
+    already flushed, the second pass's occurrences would silently accumulate into
+    an already-``True`` latch and NEVER warn -- permanently swallowed, not merely
+    delayed. Calling this first makes each pass self-contained: its own count, its
+    own one-time warning, regardless of what any earlier pass in this process already did."""
     global _CONTENT_RELATION_UNAVAILABLE_COUNT, _CONTENT_RELATION_UNAVAILABLE_WARNED
     _CONTENT_RELATION_UNAVAILABLE_COUNT = 0
     _CONTENT_RELATION_UNAVAILABLE_WARNED = False
