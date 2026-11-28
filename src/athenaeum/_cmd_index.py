@@ -228,6 +228,27 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "(the SessionEnd use-case, issue athenaeum#350).",
     )
     ingest_parser.add_argument(
+        "--raw",
+        action="append",
+        nargs="+",
+        metavar="PATH|GLOB",
+        default=None,
+        help="Targeted compile (issue athenaeum#3223): compile ONLY these raw "
+        "files, given as paths or globs resolved against the raw root "
+        "(<knowledge-root>/raw); repeatable. A path outside the raw root is "
+        "refused with a non-zero exit. Any other pending raw file is left "
+        "untouched and unstamped, and the corpus-wide phases (wiki-dedupe, "
+        "name-collision, auto-memory, page recompile and the other late "
+        "phases) are skipped. Prints an outcome per named file (created, "
+        "updated, retained, dropped, failed, deferred, held, not-found, "
+        "not-entity-intake), then refreshes the search index so `recall` "
+        "finds the result. With --dry-run it runs the compile in no-write "
+        "mode (no wiki page, raw deletion, stamp or index write) and reports "
+        "the same outcomes; a file that needs an LLM tier reports "
+        "would-reach-tier2-3. Cannot be combined with --session, --full, "
+        "--incremental, --if-triggered or --evaluate-only.",
+    )
+    ingest_parser.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
@@ -682,8 +703,14 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     import json
     import logging
 
+    from athenaeum._cli_shared import refresh_index_after_run
     from athenaeum.config import load_config
-    from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, ingest, librarian_run_type
+    from athenaeum.librarian import (
+        DEFAULT_KNOWLEDGE_ROOT,
+        RawTargetError,
+        ingest,
+        librarian_run_type,
+    )
     from athenaeum.spend import RUN_TYPE_LIBRARIAN_TRIGGERED
 
     configure_logging(verbose=getattr(args, "verbose", False))
@@ -699,6 +726,27 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     # it returns here, before the --incremental/--full validation below, the
     # lock-acquire block, and any call to ingest(). See
     # :func:`_cmd_ingest_evaluate_only`.
+    raw_targets: list[str] | None = None
+    if getattr(args, "raw", None):
+        raw_targets = [t for group in args.raw for t in group]
+        conflicts = [
+            flag
+            for flag, given in (
+                ("--session", args.session is not None),
+                ("--full/--incremental", args.incremental is not None),
+                ("--if-triggered", getattr(args, "if_triggered", False)),
+                ("--evaluate-only", getattr(args, "evaluate_only", False)),
+            )
+            if given
+        ]
+        if conflicts:
+            print(
+                f"error: --raw cannot be combined with {', '.join(conflicts)} — "
+                "it compiles exactly the named files (issue athenaeum#3223).",
+                file=sys.stderr,
+            )
+            return 1
+
     if getattr(args, "evaluate_only", False):
         return _cmd_ingest_evaluate_only(args, knowledge_root, raw_root)
 
@@ -811,7 +859,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             # before this block acquires one).
             heartbeat=lock.heartbeat if lock is not None and not isinstance(lock, int) else None,
             run_type=run_type,
+            raw_targets=raw_targets,
         )
+        if raw_targets is not None and not args.dry_run:
+            # Issue athenaeum#3223: the same refresh `run` does, shared, so a page
+            # this run wrote is recallable without another command. Inside the
+            # lock, as `run` does it; a dry run writes no index.
+            refresh_index_after_run(knowledge_root, wiki_root, args.cache_dir)
+    except RawTargetError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
         print(
             json.dumps(
@@ -839,6 +896,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         if not args.dry_run and result.exit_code == 0:
             _record_ingest_trigger_completion(args.cache_dir)
     print(json.dumps(summary))
+    if result.file_outcomes is not None:
+        for row in result.file_outcomes:
+            detail = f"  ({row['reason']})" if row.get("reason") else ""
+            print(f"{row['outcome']:<20} {row['path']}{detail}", file=sys.stderr)
     return result.exit_code
 
 
