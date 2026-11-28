@@ -129,6 +129,7 @@ does not answer.
 - [Shape rules](design/shape-rules.md)
 - [Routing](design/routing.md)
 - [Conflict resolution](design/conflict-resolution.md)
+- [The access model](design/access.md) — principals, rights, proof levels and the two team topologies (largely planned).
 - [Writer identity](design/writer-identity.md) — where authority over a fact comes from, and the opt-in
   enforcement flag.
 - [Contradiction detection](design/contradiction-detection.md)
