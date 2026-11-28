@@ -3,7 +3,9 @@
 # Use cases — what "the right information" means concretely
 
 **Status:** PURPOSE DOCUMENT, companion to [`north-star.md`](north-star.md).
-Ratified by the operator on 2026-09-16. The north star is a quality bar; this
+Ratified by the operator on 2026-09-16, amended 2026-11-28 (§3 points at
+[`team-scenarios.md`](team-scenarios.md), §3.2 rewritten, §3.5 extended, new
+§3.6 to §3.8; athenaeum#3276). The north star is a quality bar; this
 page decomposes it into the questions a memory system is actually asked, so
 that each one can be represented by an eval and the bar becomes falsifiable.
 
@@ -119,7 +121,10 @@ directions.
 
 These describe an organisation, not a person. By operator ruling of
 2026-11-19, federation is being built: the design is fixed in four notes, and
-the work is tracked under epic athenaeum#2631.
+the work is tracked under epic athenaeum#2631. The deployments these use
+cases describe, a small company on one served deployment and independent
+people sharing one project, are written out in
+[`team-scenarios.md`](team-scenarios.md).
 
 - [Federation: store access](design/federation-store-access.md), who may
   read, propose, compile and answer.
@@ -145,10 +150,13 @@ the division page cites the team page, which cites the raw observation.
 ### 3.2 Push-down: a leadership decision propagates to team wikis
 
 A decision made at the top enters the one way in as a high-authority claim
-and becomes visible in every team wiki it applies to. A team cannot silently
-override it (source precedence, north star §2.6, conflicts module), but a
-team's contradicting observation surfaces in the decision queue of whoever
-owns the decision, not in the team's own queue.
+and becomes visible in every team wiki it applies to. Who has the final word
+on a subject, and whether a narrower policy overrides a broader one, are
+configured by the deployment, not built in: a team's own policy may
+legitimately override a company default, while a rule marked as a mandate may
+not be overridden. A team's observation that contradicts the decision
+surfaces in the decision queue of whoever owns the decision, not in the
+team's own queue, whenever the deployment's rules make it a contradiction.
 
 ### 3.3 Private to shared: a member's memory feeds a team wiki
 
@@ -175,6 +183,36 @@ neither.
 - **Audience scoping is per level, and fail-closed at each.** The current
   single-operator read filter is the degenerate one-level case of this.
 - **Identity is not a singleton.** Nothing new should assume one owner uid.
+  A source record names a person or automated writer, an assistant and a
+  store, and says whether each was verified. A person may have several
+  agents, each its own identity.
+
+### 3.6 Policy layering: a team follows the handbook unless its own policy says otherwise
+
+A company handbook sets a general rule and a team publishes a narrower one.
+Recall for a member of that team returns the team's policy, with the handbook
+rule visible as the general case. Scope (company, team, person) and strength
+(default or mandate) are the vocabulary; which scope wins, and which rules
+cannot be overridden at all, are the deployment's to define. A team policy
+that tries to override a mandate is a contradiction for the mandate's owners
+to resolve.
+
+### 3.7 A contradiction found across stores
+
+One store says an employee is American; a colleague's notes in another store
+say British. Whoever can read both stores sees one question, raised once,
+even though the two facts live in different stores. Finding it takes an
+identity with read access to both, in practice a company-level librarian, so
+what that identity may read decides which contradictions can ever be found.
+
+### 3.8 Source marking: who said it, through which assistant, and how sure we are
+
+Every raw intake item records who wrote it (a person or an automated
+writer), through which assistant, on which device, into which store, and
+whether each was verified or only declared. What a person stated, what an
+agent inferred on that person's behalf, and what someone else said stay
+distinguishable for ever. A declared source is recorded as declared, never
+upgraded.
 
 ## 4. What is not a use case
 
