@@ -155,6 +155,7 @@ from athenaeum.schemas import KNOWN_TYPES, validate_wiki_meta
 from athenaeum.storage import (
     PREVIOUS_READ_MAPPING,
     StorageConfigError,
+    UndeclaredVaultDataError,
     apply_to_targets,
     available_adapters,
     discard_rule_for_field_any_type,
@@ -1571,6 +1572,13 @@ class CorrectionRecordResult:
     #: The resolved entity's uid, set once the target resolved to a page
     #: (athenaeum#3180); empty before that.
     entity_uid: str = ""
+    #: The record's ordinal position in its batch: the opaque reference the
+    #: ledger and the handoff note use in place of ``correction_id``. ``None``
+    #: for a result built outside a batch pass.
+    ordinal: int | None = None
+    #: Where a value withheld by an allowlist rejection went: ``"vault"`` or
+    #: ``"nowhere"``; empty until :func:`store_withheld_corrections` ran.
+    withheld_stored: str = ""
 
 
 def process_correction_record(
@@ -2715,7 +2723,8 @@ def process_batch_file(
 
     record_lines = [ln for ln in lines[1:] if ln.strip()]
     results: list[CorrectionRecordResult] = []
-    for raw_line in record_lines:
+    for ordinal, raw_line in enumerate(record_lines):
+        n_before = len(results)
         try:
             raw_record = json.loads(raw_line)
         except (json.JSONDecodeError, ValueError):
@@ -2725,6 +2734,7 @@ def process_batch_file(
                     disposition="raised-tier",
                     reason="line is not valid JSON",
                     note=raw_line.strip()[:500],
+                    ordinal=ordinal,
                 )
             )
             continue
@@ -2735,6 +2745,7 @@ def process_batch_file(
                     disposition="raised-tier",
                     reason="line is not a JSON object",
                     note=raw_line.strip()[:500],
+                    ordinal=ordinal,
                 )
             )
             continue
@@ -2755,6 +2766,8 @@ def process_batch_file(
                 attribution_context=attribution_context if not dry_run else None,
             )
         )
+        for placed in results[n_before:]:
+            placed.ordinal = ordinal
 
     return BatchOutcome(
         path=path,
@@ -2930,16 +2943,49 @@ def run_trust_dryrun(
 
 #: Placeholder substituted for ``value`` in the handoff note when a record
 #: was raised for :data:`ALLOWLIST_REJECTION_REASON` (issue athenaeum#1419). The
-#: note must still say WHAT failed (target, field, op, reason, correction_id)
-#: so a human scanning `raw/` understands the shape of the failure — it must
-#: never again say what the value WAS, because that value is precisely what
-#: the allowlist exists to keep off the wiki. The full value is not lost: it
-#: is recorded, unredacted, in the audit ledger's
-#: ``redacted_correction_payloads`` (see :func:`build_ledger_record`), keyed
-#: by the SAME ``correction_id`` this placeholder tells the reader to look up.
-REDACTED_VALUE_PLACEHOLDER = (
-    "<redacted: not on the allowlist — see correction_id in the audit ledger>"
-)
+#: note must still say WHAT failed (reference, field, op, reason) so a human
+#: scanning `raw/` understands the shape of the failure — it must never again
+#: say what the value WAS, because that value is precisely what the allowlist
+#: exists to keep off the wiki. Nor does the audit ledger hold it: a withheld
+#: value goes to the deployment's vault, or nowhere when no vault is
+#: configured (:func:`store_withheld_corrections`).
+REDACTED_VALUE_PLACEHOLDER = "<redacted: not on the allowlist>"
+
+#: What the handoff note says of a withheld value, per where it went.
+WITHHELD_NOTE_VAULT = "value withheld; stored in the vault under reference {ref}"
+WITHHELD_NOTE_NOWHERE = "value withheld; not recorded: no vault is configured"
+TARGET_WITHHELD = "target withheld"
+
+
+def correction_ref(batch_id: str, ordinal: int | None) -> str:
+    """The reference ``<batch_id>#<ordinal>`` for one record of a batch.
+
+    The ledger and the handoff note name a record this way rather than by
+    ``correction_id``: that id is an unkeyed digest over the target, field and
+    value, so printing it in a tracked file would let anyone confirm a guessed
+    value of a withheld correction."""
+    known = ordinal is not None and ordinal >= 0
+    return f"{batch_id}#{ordinal if known else '?'}"
+
+
+def _handoff_target_desc(r: CorrectionRecordResult) -> str:
+    """The target as the git-tracked handoff note may show it.
+
+    An entity uid when the target resolved (or was given as a uid); a ``name``
+    target as given; anything else, in particular an email handle or any other
+    handle value, is withheld."""
+    if r.entity_uid:
+        return json.dumps({"uid": r.entity_uid})
+    target = r.target
+    if isinstance(target, dict) and target:
+        uid = target.get("uid")
+        if isinstance(uid, str) and uid.strip():
+            return json.dumps({"uid": uid.strip()})
+        if "handle" not in target and isinstance(target.get("name"), str):
+            return json.dumps(
+                {k: target[k] for k in ("type", "name") if k in target}, sort_keys=True
+            )
+    return TARGET_WITHHELD
 
 
 def write_correction_handoff(
@@ -2963,18 +3009,16 @@ def write_correction_handoff(
     be allowed to fail open):
 
     - **Redaction (AC1, AC2).** A record raised for
-      :data:`ALLOWLIST_REJECTION_REASON` has its ``value`` replaced with
-      :data:`REDACTED_VALUE_PLACEHOLDER` in the note text. The allowlist
-      exists specifically to keep some attributes' values off the wiki
-      (`docs/design/field-corrections.md` §6.3); a note that quotes the
-      rejected value verbatim and then itself becomes raw intake defeats
+      :data:`ALLOWLIST_REJECTION_REASON` never has its ``value`` in the note.
+      The allowlist exists specifically to keep some attributes' values off
+      the wiki (`docs/design/field-corrections.md` §6.3); a note that quotes
+      the rejected value verbatim and then itself becomes raw intake defeats
       that guarantee through the escalation path instead of the front door.
-      The real value is never discarded — it is written, unredacted, to the
-      audit ledger (:func:`build_ledger_record`'s
-      ``redacted_correction_payloads``) keyed by ``correction_id``, and it
-      also survives in the original batch file's git history once the batch
-      is retired (:func:`retire_batch`'s two-commit, never-hard-deleted
-      pattern).
+      The audit ledger does not hold the value either: it goes to the vault
+      or nowhere (:func:`store_withheld_corrections`), and the note says
+      which, naming the record by ``<batch_id>#<ordinal>``. The target is
+      shown only as an entity uid or a ``name``; a handle (an email address,
+      say) is withheld.
     - **Compiled-exempt (AC1, AC3).** This file is marked compiled-exempt
       (:func:`athenaeum.compiled_exempt.mark_exempt`) the moment it is
       written, for every handoff note regardless of reason. A handoff note
@@ -2987,9 +3031,9 @@ def write_correction_handoff(
       redaction alone would still add one non-PII bullet per rejected batch,
       forever.
 
-    Idempotency (keyed on batch_id + sorted correction_id set) is the
-    CALLER's responsibility via the audit ledger (§5.3) — this function
-    always writes; callers check the ledger before calling it.
+    Idempotency (keyed on batch_id + the record ordinals) is the CALLER's
+    responsibility via the audit ledger (§5.3) — this function always
+    writes; callers check the ledger before calling it.
     """
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     uuid8 = uuid.uuid4().hex[:8]
@@ -3005,14 +3049,18 @@ def write_correction_handoff(
     ]
     field_sources: dict[str, Any] = {}
     for r in raised:
-        target_desc = json.dumps(r.target, sort_keys=True) if r.target else "?"
-        rendered_value = (
-            REDACTED_VALUE_PLACEHOLDER
-            if r.reason == ALLOWLIST_REJECTION_REASON
-            else repr(r.value)
-        )
+        target_desc = _handoff_target_desc(r)
+        ref = correction_ref(outcome.batch_id, r.ordinal)
+        if r.reason == ALLOWLIST_REJECTION_REASON:
+            rendered_value = (
+                WITHHELD_NOTE_VAULT.format(ref=ref)
+                if r.withheld_stored == WITHHELD_VAULT
+                else WITHHELD_NOTE_NOWHERE
+            )
+        else:
+            rendered_value = repr(r.value)
         claim = (
-            f"- correction_id={r.correction_id!r} target={target_desc} "
+            f"- ref={ref} target={target_desc} "
             f"field={r.field!r} op={r.op!r} value={rendered_value} — "
             f"reason: {r.reason}"
         )
@@ -3063,33 +3111,35 @@ def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:
     Records ``records_total`` and asserts (raises ``AssertionError`` —
     caller's job to fail the run loudly, per §5.3: "failing loudly on a
     mismatch") that the dispositions counted actually sum to it. Also
-    records per-record ids for everything that was NOT ``applied``/``noop``.
+    records per-record references for everything that was NOT
+    ``applied``/``noop``.
+
+    A record is referred to by its ordinal in the batch, never by
+    ``correction_id`` (see :func:`correction_ref`). The line never carries a
+    rejected value.
     """
     counts: dict[str, int] = {}
-    non_trivial_ids: list[str] = []
-    raised_tier_ids: list[str] = []
-    redacted_payloads: list[dict[str, Any]] = []
-    for r in outcome.results:
+    non_trivial_refs: list[int] = []
+    raised_tier_refs: list[int] = []
+    withheld: list[dict[str, Any]] = []
+    for position, r in enumerate(outcome.results):
         counts[r.disposition] = counts.get(r.disposition, 0) + 1
+        ref = r.ordinal if r.ordinal is not None else position
         if r.disposition not in ("applied", "noop", "discarded"):
-            non_trivial_ids.append(r.correction_id)
+            non_trivial_refs.append(ref)
         if r.disposition == "raised-tier":
-            raised_tier_ids.append(r.correction_id)
+            raised_tier_refs.append(ref)
             if r.reason == ALLOWLIST_REJECTION_REASON:
-                # Issue athenaeum#1419 (AC2): the ONE durable, unredacted home for
-                # a value the handoff note (write_correction_handoff) had to
-                # redact — this JSONL ledger is never discovered as wiki
-                # intake, so recording the real value here does not
-                # reopen the leak. Keyed on correction_id, the SAME id the
-                # redacted note points a human at.
-                redacted_payloads.append(
+                # The value is NOT recorded here: only that one was
+                # withheld, and whether a vault holds it.
+                withheld.append(
                     {
-                        "correction_id": r.correction_id,
-                        "target": r.target,
-                        "field": r.field,
-                        "op": r.op,
-                        "value": r.value,
-                        "reason": r.reason,
+                        "ref": ref,
+                        "stored": (
+                            WITHHELD_VAULT
+                            if r.withheld_stored == WITHHELD_VAULT
+                            else WITHHELD_NOWHERE
+                        ),
                     }
                 )
     total_counted = sum(counts.values())
@@ -3107,44 +3157,201 @@ def build_ledger_record(outcome: BatchOutcome) -> dict[str, Any]:
         "recorded_at": datetime.now().isoformat(timespec="seconds"),
         "records_total": outcome.records_total,
         "dispositions": counts,
-        "non_trivial_correction_ids": non_trivial_ids,
-        # §8.1 idempotency key: which raised-tier ids from THIS pass got (or
-        # will get, once the caller writes it) a handoff file. A later pass
-        # over the same batch_id (carried over for an unrelated reason, e.g.
-        # the §10.2 escalation cap) scans prior lines for this batch_id and
-        # skips re-emitting a handoff for ids already listed here.
-        "raised_tier_correction_ids": raised_tier_ids,
-        # Issue athenaeum#1419 (AC2): unredacted payloads for every raised-tier
-        # record whose value the handoff note redacted this pass. Empty list
-        # (not omitted) when nothing was redacted, so a reader can rely on
-        # the key's presence.
-        "redacted_correction_payloads": redacted_payloads,
+        "non_trivial_refs": non_trivial_refs,
+        # §8.1 idempotency key: which raised-tier records (by ordinal in the
+        # batch) from THIS pass got (or will get, once the caller writes it)
+        # a handoff file. A later pass over the same batch_id (carried over
+        # for an unrelated reason, e.g. the §10.2 escalation cap) scans prior
+        # lines for this batch_id and skips re-emitting a handoff for
+        # ordinals already listed here.
+        "raised_tier_refs": raised_tier_refs,
+        # One ``{ref, stored}`` per raised-tier record whose value the
+        # handoff note withheld; ``stored`` is ``vault`` or ``nowhere``.
+        # Never a value. Empty list (not omitted) when none, so a reader can
+        # rely on the key's presence.
+        "withheld": withheld,
     }
 
 
-def append_corrections_ledger(wiki_root: Path, outcome: BatchOutcome) -> None:
+#: Section of the target entity's vault record that holds a withheld correction
+#: value, keyed by ``correction_id``.
+WITHHELD_CORRECTIONS_SECTION = "withheld_corrections"
+
+WITHHELD_VAULT = "vault"
+WITHHELD_NOWHERE = "nowhere"
+
+
+def _withheld_target_uid(
+    target: Any,
+    *,
+    index: EntityIndex,
+    registry_entities: dict[str, Any],
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+) -> str | None:
+    """The uid of the ONE existing entity *target* names, else ``None``. Read-only.
+
+    A ``uid`` target is handed to the placement helper as it is (it resolves a
+    vault-only page too); every other shape goes through :func:`resolve_target`.
+    """
+    if not isinstance(target, dict) or not target:
+        return None
+    uid = target.get("uid")
+    if uid is not None:
+        return uid.strip() if isinstance(uid, str) and uid.strip() else None
+    try:
+        path = resolve_target(
+            target,
+            index=index,
+            registry_entities=registry_entities,
+            knowledge_root=knowledge_root,
+            config=config,
+        )
+        if path is None:
+            return None
+        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    found = str(meta.get("uid") or "").strip()
+    return found or None
+
+
+def store_withheld_corrections(
+    outcome: BatchOutcome,
+    *,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    index: EntityIndex,
+    registry_entities: dict[str, Any],
+) -> dict[str, str]:
+    """Keep each value withheld by an allowlist rejection in a vault, or nowhere.
+
+    For every result raised for :data:`ALLOWLIST_REJECTION_REASON`, the home is
+    ``pii.record_placement(target, field=<field>, sensitive=True)``. On ``vault``
+    the value is written with ``pii.write_record_section`` to the section
+    ``withheld_corrections`` under ``correction_id``, with the field, op,
+    reason and batch reference. Any other placement (``nowhere``,
+    ``unplaceable``), or a refused write, stores nothing: there is no fallback.
+
+    The target is resolved read-only here because the allowlist check runs
+    before target resolution in :func:`process_correction_record`; the raised
+    disposition and reason are untouched. Never creates an entity or changes a
+    page; idempotent per ``correction_id``. Returns ``{correction_id: "vault" |
+    "nowhere"}``. No log line carries a value.
+    """
+    from athenaeum import pii
+
+    placed: dict[str, str] = {}
+    for r in outcome.results:
+        if r.disposition != "raised-tier" or r.reason != ALLOWLIST_REJECTION_REASON:
+            continue
+        if r.withheld_stored:
+            placed[r.correction_id] = r.withheld_stored
+            continue
+        uid = _withheld_target_uid(
+            r.target,
+            index=index,
+            registry_entities=registry_entities,
+            knowledge_root=knowledge_root,
+            config=config,
+        )
+        kind = WITHHELD_NOWHERE
+        if uid is not None and not r.entity_uid:
+            r.entity_uid = uid
+        if uid is not None:
+            try:
+                placement = pii.record_placement(
+                    knowledge_root, config, uid, field=r.field, sensitive=True
+                )
+            except UndeclaredVaultDataError:
+                # A sensitive read refuses while vault data is undeclared, so
+                # no declared home exists; store nowhere.
+                placement = pii.RecordPlacement("nowhere", (), "undeclared-vault-data")
+            if placement.kind == "vault" and placement.targets:
+                try:
+                    pii.write_record_section(
+                        knowledge_root,
+                        config,
+                        uid,
+                        WITHHELD_CORRECTIONS_SECTION,
+                        r.correction_id,
+                        {
+                            "field": r.field,
+                            "op": r.op,
+                            "value": r.value,
+                            "reason": r.reason,
+                            "batch_id": outcome.batch_id,
+                            "ref": correction_ref(outcome.batch_id, r.ordinal),
+                        },
+                        targets=placement.targets,
+                    )
+                    kind = WITHHELD_VAULT
+                except Exception as exc:  # noqa: BLE001 — a refused write stores nothing
+                    log.warning(
+                        "withheld correction not stored: correction_id=%s error=%s",
+                        r.correction_id,
+                        type(exc).__name__,
+                    )
+        r.withheld_stored = kind
+        placed[r.correction_id] = kind
+    return placed
+
+
+def append_corrections_ledger(
+    wiki_root: Path,
+    outcome: BatchOutcome,
+    *,
+    knowledge_root: Path | None = None,
+    config: dict[str, Any] | None = None,
+    index: EntityIndex | None = None,
+    registry_entities: dict[str, Any] | None = None,
+) -> None:
+    """Append the batch's ledger line, placing any withheld value first.
+
+    When the context arguments are omitted, nothing is stored anywhere and the
+    line records each withheld value as ``nowhere``."""
+    if knowledge_root is not None and index is not None and registry_entities is not None:
+        store_withheld_corrections(
+            outcome,
+            knowledge_root=knowledge_root,
+            config=config,
+            index=index,
+            registry_entities=registry_entities,
+        )
     record = build_ledger_record(outcome)
     path = default_corrections_ledger_path(wiki_root)
     _append_jsonl_line(path, json.dumps(record, sort_keys=True) + "\n")
 
 
-def previously_handed_off_correction_ids(wiki_root: Path, batch_id: str) -> set[str]:
-    """§8.1 idempotency: correction_ids from *batch_id* that already got a
-    handoff file written on an earlier pass, recovered from prior
+def previously_handed_off_refs(
+    wiki_root: Path,
+    batch_id: str,
+    results: Iterable[CorrectionRecordResult] = (),
+) -> set[int]:
+    """§8.1 idempotency: ordinals from *batch_id* that already got a handoff
+    file written on an earlier pass, recovered from prior
     ``_corrections_applied.jsonl`` lines for this batch (their
-    ``raised_tier_correction_ids``).
+    ``raised_tier_refs``).
+
+    A line written by an earlier version lists ``raised_tier_correction_ids``
+    instead. Those ids are mapped to ordinals in memory from *results* (the
+    batch file's records as processed this pass); nothing is written back.
 
     A batch can be carried over (§5.4) for a reason unrelated to its
     raised-tier records — e.g. the §10.2 escalation rate cap holding an
     ``escalated`` record open — in which case the SAME raised-tier records
     are recomputed on the next pass. Without this check the caller would
-    call :func:`write_correction_handoff` again for ids it already handed
+    call :func:`write_correction_handoff` again for records it already handed
     off, writing a duplicate `.md` file every carried-over run.
     """
     path = default_corrections_ledger_path(wiki_root)
-    ids: set[str] = set()
+    refs: set[int] = set()
     if not path.exists():
-        return ids
+        return refs
+    by_id: dict[str, list[int]] = {}
+    for r in results:
+        if r.ordinal is not None:
+            by_id.setdefault(r.correction_id, []).append(r.ordinal)
     try:
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -3155,11 +3362,16 @@ def previously_handed_off_correction_ids(wiki_root: Path, batch_id: str) -> set[
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("batch_id") == batch_id:
-                    ids.update(rec.get("raised_tier_correction_ids") or [])
+                if not isinstance(rec, dict) or rec.get("batch_id") != batch_id:
+                    continue
+                refs.update(
+                    n for n in (rec.get("raised_tier_refs") or []) if isinstance(n, int)
+                )
+                for old_id in rec.get("raised_tier_correction_ids") or []:
+                    refs.update(by_id.get(old_id, ()))
     except OSError:
-        return ids
-    return ids
+        return refs
+    return refs
 
 
 # ---------------------------------------------------------------------------
@@ -3236,6 +3448,7 @@ def _park_new_results(
             "schema_version": envelope.get("schema_version"),
             "submitter": outcome.submitter,
             "batch_id": outcome.batch_id,
+            "ordinal": r.ordinal,
             "source_dir": outcome.source,
             "first_seen": today.isoformat(),
             "attempts": 0,
@@ -3372,6 +3585,12 @@ def retry_parked_corrections(
             dry_run_pages=dry_run_pages,
             attribution_context=attribution_context,
         )
+        # The parked row keeps the record's ORIGINAL ordinal in its batch, so
+        # the ledger line and the note refer to it as the batch pass did. A row
+        # parked before the ordinal was stored gets -1, which never collides
+        # with a real ordinal (so it can never suppress a handoff).
+        row_ordinal = row.get("ordinal")
+        result.ordinal = row_ordinal if isinstance(row_ordinal, int) else -1
 
         if result.disposition == "parked":
             first_seen = str(row.get("first_seen") or today.isoformat())
@@ -3387,9 +3606,9 @@ def retry_parked_corrections(
                 # athenaeum#1988 bot finding (Sentry, PR#1989): the handed-off
                 # record's disposition must flip to "raised-tier" BEFORE it
                 # reaches the ledger -- `build_ledger_record` only adds a
-                # correction_id to `raised_tier_correction_ids` when
+                # ordinal to `raised_tier_refs` when
                 # `r.disposition == "raised-tier"`, and
-                # `previously_handed_off_correction_ids` keys its §8.1
+                # `previously_handed_off_refs` keys its §8.1
                 # idempotency check on exactly that list. Leaving the
                 # disposition as "parked" here made this expiry handoff
                 # invisible to that dedup, so a crash between this handoff
@@ -3399,6 +3618,13 @@ def retry_parked_corrections(
                 # same correction on the next run.
                 result.disposition = "raised-tier"
                 outcome = _row_outcome(row, envelope, result)
+                store_withheld_corrections(
+                    outcome,
+                    knowledge_root=knowledge_root,
+                    config=config,
+                    index=index,
+                    registry_entities=registry_entities,
+                )
                 write_correction_handoff(
                     outcome, [result], raw_root=raw_root, knowledge_root=knowledge_root
                 )
@@ -3423,6 +3649,13 @@ def retry_parked_corrections(
 
         outcome = _row_outcome(row, envelope, result)
         if result.disposition == "raised-tier":
+            store_withheld_corrections(
+                outcome,
+                knowledge_root=knowledge_root,
+                config=config,
+                index=index,
+                registry_entities=registry_entities,
+            )
             write_correction_handoff(
                 outcome, [result], raw_root=raw_root, knowledge_root=knowledge_root
             )
@@ -4183,16 +4416,32 @@ def run_correction_phase(
             # handed-off in a prior pass over this same batch_id (a batch
             # carried over for an unrelated reason -- e.g. the escalation
             # cap above -- must not re-emit a duplicate handoff file).
-            already_handed_off = previously_handed_off_correction_ids(
-                wiki_root, outcome.batch_id
+            already_handed_off = previously_handed_off_refs(
+                wiki_root, outcome.batch_id, outcome.results
             )
-            new_raised = [r for r in raised if r.correction_id not in already_handed_off]
+            new_raised = [r for r in raised if r.ordinal not in already_handed_off]
             if new_raised:
+                # Place the withheld values BEFORE the note is written, so the
+                # note can say whether a vault holds each one.
+                store_withheld_corrections(
+                    outcome,
+                    knowledge_root=knowledge_root,
+                    config=config,
+                    index=index,
+                    registry_entities=registry_entities,
+                )
                 write_correction_handoff(
                     outcome, new_raised, raw_root=raw_root, knowledge_root=knowledge_root
                 )
 
-        append_corrections_ledger(wiki_root, outcome)
+        append_corrections_ledger(
+            wiki_root,
+            outcome,
+            knowledge_root=knowledge_root,
+            config=config,
+            index=index,
+            registry_entities=registry_entities,
+        )
 
         if outcome.all_terminal(escalations_recorded=escalations_recorded):
             retire_batch(knowledge_root, path)

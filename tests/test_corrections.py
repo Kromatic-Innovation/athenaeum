@@ -28,7 +28,7 @@ from athenaeum.corrections import (
     load_parked_corrections,
     load_registry,
     parse_batch_envelope,
-    previously_handed_off_correction_ids,
+    previously_handed_off_refs,
     process_batch_file,
     process_correction_record,
     resolve_target,
@@ -3240,8 +3240,8 @@ class TestParkedEmailNoMatchCorrections:
         """Regression for a Sentry finding on PR#1989 (athenaeum#1988): the
         expiry-handoff branch of `retry_parked_corrections` wrote the
         handoff/ledger with `result.disposition` still `"parked"`, so
-        `build_ledger_record` never added the id to
-        `raised_tier_correction_ids` and `previously_handed_off_correction_ids`
+        `build_ledger_record` never added the record to
+        `raised_tier_refs` and `previously_handed_off_refs`
         -- which §8.1's own idempotency check keys on -- could never see
         this handoff as already having happened. Pins both the ledger shape
         AND the observable "run the phase twice, still exactly one handoff"
@@ -3292,10 +3292,12 @@ class TestParkedEmailNoMatchCorrections:
         assert len(list(raw.glob("*.md"))) == 1
 
         # The bug's exact signature: the handoff must be recorded under
-        # `raised_tier_correction_ids`, which is what the §8.1 idempotency
+        # `raised_tier_refs`, which is what the §8.1 idempotency
         # check reads -- not silently dropped because the ledger line still
         # said "parked".
-        assert correction_id in previously_handed_off_correction_ids(wiki, batch_id)
+        # The parked row keeps the record's original ordinal (0).
+        assert store[correction_id]["ordinal"] == 0
+        assert 0 in previously_handed_off_refs(wiki, batch_id)
 
         # Second phase run (the parked row is already gone, exactly as it
         # would be after a clean run) -- must not re-emit a handoff.

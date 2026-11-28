@@ -6276,6 +6276,10 @@ RECORD_SECTIONS_FIELD = "sections"
 #: value says what the section is for.
 RECORD_SECTIONS: dict[str, str] = {
     "test_section": "Entries used by the tests of the section writer.",
+    "withheld_corrections": (
+        "A correction value withheld from the ledger and the handoff note, "
+        "keyed by correction id."
+    ),
     "pending_corrections": (
         "A proposed value of a vault field, held while its correction question "
         "is open (athenaeum#3180)."

@@ -410,9 +410,14 @@ Used for within-batch dedupe, the audit ledger, and naming a record in an escala
 Not a global applied-once ledger — the delta gate already provides that.
 
 **5.3 Audit ledger.** Each batch appends one line to `wiki/_corrections_applied.jsonl`
-with counts by disposition plus per-record ids for everything that was not
-`applied`/`noop`. Same append-only-JSONL discipline as
-`provenance.MERGE_PROVENANCE_FILENAME`.
+with counts by disposition plus per-record references (the record's ordinal in the batch)
+for everything that was not `applied`/`noop`/`discarded` (`non_trivial_refs`), the raised
+ones (`raised_tier_refs`), and a `withheld` list holding `{ref, stored}` for each record
+rejected by the allowlist, where `stored` is `vault` or `nowhere` — never the value. Same
+append-only-JSONL discipline as `provenance.MERGE_PROVENANCE_FILENAME`. Lines written by
+earlier versions used `non_trivial_correction_ids`, `raised_tier_correction_ids` and
+`redacted_correction_payloads`; they are not rewritten, and the last may hold rejected
+values in plain text.
 
 The disposition vocabulary is closed — every record ends in exactly one:
 
@@ -796,20 +801,31 @@ Four properties this must have (the fourth added by athenaeum#1419; the note bel
 why the original three were not enough on their own):
 
 - **Idempotent.** The handoff file is written once per (batch, raised-record-set); a batch
-  re-examined on a later run must not re-emit it. Key it on `batch_id` plus the sorted
-  `correction_id` set, recorded in the audit ledger (§5.3).
+  re-examined on a later run must not re-emit it. Key it on `batch_id` plus the records'
+  ordinals in the batch (`raised_tier_refs`), recorded in the audit ledger (§5.3). A ledger
+  line written by an earlier version listed `correction_id`s instead
+  (`raised_tier_correction_ids`); those are still honoured, mapped to ordinals in memory.
 - **Provenance-preserving.** The handoff file carries the original `source` per claim in
   `field_sources`, not `script:correction-handoff`. The submitter's authority is the
   submitter's; the handoff is a transport step, not a new assertion.
 - **Value-redacting for an allowlist raise.** A record raised because its attribute is
-  not on the §6.3 allowlist has its `value` replaced with a fixed redaction placeholder in
-  the note text, never the value itself. The allowlist exists to keep some attributes'
-  values off the wiki entirely; a note that quotes the rejected value verbatim and then
-  itself becomes raw intake defeats that guarantee through the escalation path instead of
-  the front door — this is exactly the leak athenaeum#1419 describes. The value is not
-  discarded: it is written, unredacted, to the audit ledger (§5.3) keyed by
-  `correction_id`, and it also survives in the original batch file's git history once the
-  batch retires (§5.4's two-commit, never-hard-deleted pattern). Every OTHER raise reason
+  not on the §6.3 allowlist never has its `value` in the note text. The allowlist exists to
+  keep some attributes' values off the wiki entirely; a note that quotes the rejected value
+  verbatim and then itself becomes raw intake defeats that guarantee through the escalation
+  path instead of the front door — this is exactly the leak athenaeum#1419 describes. The
+  audit ledger (§5.3) does not hold the value either, since it is committed and synced with
+  the wiki. Where the value goes depends on the deployment: if the target entity resolves
+  and the deployment has a vault (an excluded storage location) configured for it, the
+  value is stored there, in the entity's vault record under the section
+  `withheld_corrections` keyed by `correction_id`, and the note says
+  `value withheld; stored in the vault under reference <batch_id>#<ordinal>`. Otherwise the
+  value is not recorded anywhere, and the note says `value withheld; not recorded: no vault
+  is configured`. (The value does survive in the original batch file's git history once the
+  batch retires — §5.4's two-commit, never-hard-deleted pattern — which is the submitter's
+  own file.) The record is named by that `<batch_id>#<ordinal>` reference, never by
+  `correction_id`: the id is an unkeyed digest over target, field and value, so printing it
+  would let anyone confirm a guessed value. The note also withholds the target unless it is
+  an entity uid or a `name`: a handle (an email address, say) is never printed. Every OTHER raise reason
   (malformed JSON, an unparseable source, an ambiguous target, and so on) still carries
   its value verbatim — those failures are not the allowlist's content policy being
   defeated, and showing the value helps a human fix the submission.
@@ -826,7 +842,7 @@ why the original three were not enough on their own):
   deleted, not compiled" idiom `docs/design/shape-rules.md` §5's `retain` disposition uses for a
   long-lived source document. Discovery never offers it to the reasoning tiers again; it
   still exists on disk (and in git) as a durable, human-readable trace of the batch, the
-  reason, and (redaction aside) the correction_id a human needs to look up the real value.
+  reason, and (redaction aside) the reference a human needs to look up a vaulted value.
 
 **On cost.** Bulk writers propose at thousands-per-pass scale, and in a large corpus a
 substantial share of proposed targets may not resolve — so fallthrough is a common path,
