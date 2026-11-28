@@ -110,6 +110,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -1263,6 +1264,7 @@ def list_pending_decisions(
     offset: int = 0,
     limit: int | None = None,
     include_sensitive: bool = False,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> list[dict]:
     """Unified list of pending questions + merges, oldest first.
 
@@ -1271,6 +1273,12 @@ def list_pending_decisions(
     caller, ``caller_audience is None``) the item shows the value, read through
     the entity read; for any other caller it shows a redaction marker naming the
     field.
+
+    Issue athenaeum#3220: *vault_read_allowed* is a served request's per-vault
+    read check (the one ``recall`` and ``read_entity`` apply). It is asked only
+    after *include_sensitive* and the owner condition pass, and a vault it
+    refuses shows the same redaction marker; the item is still listed. ``None``
+    (a stdio server, the command line) leaves the flag alone to decide.
 
     ``wiki_root`` is the directory holding ``_pending_questions.md`` and
     ``_pending_merges.md`` (i.e. ``<knowledge>/wiki``). Items are sorted by
@@ -1331,6 +1339,35 @@ def list_pending_decisions(
     page. For a bounded call that also reports a total count, next-offset,
     and the effective limit, see :func:`list_pending_decisions_page`.
     """
+    page = _list_pending_decisions_unresolved(
+        wiki_root,
+        with_proposal=with_proposal,
+        max_sources_per_merge=max_sources_per_merge,
+        max_item_context_tokens=max_item_context_tokens,
+        caller_audience=caller_audience,
+        offset=offset,
+        limit=limit,
+    )
+    _resolve_value_refs(
+        page,
+        wiki_root,
+        include_sensitive=include_sensitive and caller_audience is None,
+        vault_read_allowed=vault_read_allowed,
+    )
+    return page
+
+
+def _list_pending_decisions_unresolved(
+    wiki_root: Path,
+    *,
+    with_proposal: bool,
+    max_sources_per_merge: int,
+    max_item_context_tokens: int,
+    caller_audience: set[str] | None,
+    offset: int,
+    limit: int | None,
+) -> list[dict]:
+    """:func:`list_pending_decisions` before its field-correction references are resolved."""
     decisions = collect_unframed_decisions(
         wiki_root,
         with_proposal=with_proposal,
@@ -1370,11 +1407,7 @@ def list_pending_decisions(
         live_ids={d["id"] for d in decisions if isinstance(d.get("id"), str)},
     )
     decisions.sort(key=lambda d: d["created_at"] or "")
-    page = paginate(decisions, offset=offset, limit=limit)["items"]
-    _resolve_value_refs(
-        page, wiki_root, include_sensitive=include_sensitive and caller_audience is None
-    )
-    return page
+    return paginate(decisions, offset=offset, limit=limit)["items"]
 
 
 def _replace_in_strings(node: object, views: dict[str, str]) -> object:
@@ -1389,11 +1422,18 @@ def _replace_in_strings(node: object, views: dict[str, str]) -> object:
     return node
 
 
-def _resolve_value_refs(items: list[dict], wiki_root: Path, *, include_sensitive: bool) -> None:
+def _resolve_value_refs(
+    items: list[dict],
+    wiki_root: Path,
+    *,
+    include_sensitive: bool,
+    vault_read_allowed: Callable[[str], bool] | None = None,
+) -> None:
     """Replace a field-correction reference in each item, in place (athenaeum#3180).
 
     Done on the page being returned, after the store and the framing, so the
-    stored queue and presentations only ever hold the reference.
+    stored queue and presentations only ever hold the reference. The per-vault
+    check (athenaeum#3220) is therefore asked only about values on that page.
     """
     from athenaeum.config import load_config
     from athenaeum.corrections import description_value_views
@@ -1408,7 +1448,11 @@ def _resolve_value_refs(items: list[dict], wiki_root: Path, *, include_sensitive
         if config is None:
             config = load_config(knowledge_root)
         views = description_value_views(
-            description, knowledge_root, config, include_sensitive=include_sensitive
+            description,
+            knowledge_root,
+            config,
+            include_sensitive=include_sensitive,
+            vault_read_allowed=vault_read_allowed,
         )
         if views:
             replaced = _replace_in_strings(item, views)
@@ -1604,6 +1648,7 @@ def list_pending_decisions_page(
     offset: int = 0,
     limit: int | None = None,
     include_sensitive: bool = False,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> dict:
     """Bounded, self-describing page of :func:`list_pending_decisions`.
 
@@ -1630,16 +1675,29 @@ def list_pending_decisions_page(
     against the corpus that motivated this issue); the failure this issue
     fixes is in SERIALIZING an unbounded list over the MCP stdio transport,
     which is exactly what this envelope bounds.
+
+    Field-correction references (athenaeum#3180) are resolved on the returned
+    page only, after the slice, so a vault value is read -- and the per-vault
+    check of athenaeum#3220 asked and audited -- only for an item the caller
+    actually receives.
     """
-    all_decisions = list_pending_decisions(
+    all_decisions = _list_pending_decisions_unresolved(
         wiki_root,
         with_proposal=with_proposal,
         max_sources_per_merge=max_sources_per_merge,
         max_item_context_tokens=max_item_context_tokens,
         caller_audience=caller_audience,
-        include_sensitive=include_sensitive,
+        offset=0,
+        limit=None,
     )
-    return paginate(all_decisions, offset=offset, limit=limit)
+    envelope = paginate(all_decisions, offset=offset, limit=limit)
+    _resolve_value_refs(
+        envelope["items"],
+        wiki_root,
+        include_sensitive=include_sensitive and caller_audience is None,
+        vault_read_allowed=vault_read_allowed,
+    )
+    return envelope
 
 
 def age_days(created_at: str, *, today: date | None = None) -> int | None:

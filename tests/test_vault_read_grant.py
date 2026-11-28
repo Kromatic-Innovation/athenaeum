@@ -91,7 +91,11 @@ def _fresh_rights() -> None:
 
 @pytest.fixture
 def knowledge(tmp_path: Path) -> Path:
-    root = tmp_path / "knowledge"
+    return seed_two_vaults(tmp_path / "knowledge")
+
+
+def seed_two_vaults(root: Path) -> Path:
+    """A person page on ``vault_a`` (Alice reads) and a vendor page on ``vault_b`` (Bob reads)."""
     wiki = root / "wiki"
     wiki.mkdir(parents=True)
     (root / "raw").mkdir()

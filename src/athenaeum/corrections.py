@@ -3766,15 +3766,26 @@ def pending_vault_targets(
 
 
 def _pending_entries(
-    knowledge_root: Path, config: dict[str, Any] | None, uid: str
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    uid: str,
+    *,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> dict[str, Any] | None:
     """The ``pending_corrections`` entries of *uid*'s vault record, read through the entity read.
 
-    ``None`` when the entity cannot be read.
+    ``None`` when the entity cannot be read, or when *vault_read_allowed*
+    refuses the vault the read would open (athenaeum#3220).
     """
     from athenaeum import pii
 
-    read = pii.entity_read_by_uid(knowledge_root, config, uid, include_excluded=True)
+    read = pii.entity_read_by_uid(
+        knowledge_root,
+        config,
+        uid,
+        include_excluded=True,
+        vault_read_allowed=vault_read_allowed,
+    )
     if read is None:
         return None
     entries = read.sections.get(PENDING_CORRECTIONS_SECTION, {})
@@ -3848,19 +3859,28 @@ def store_pending_value(
 
 
 def resolve_pending_value(
-    parsed: EscalatedCorrection, knowledge_root: Path, config: dict[str, Any] | None
+    parsed: EscalatedCorrection,
+    knowledge_root: Path,
+    config: dict[str, Any] | None,
+    *,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> "EscalatedCorrection | str":
     """Fetch the value a reference block stands for, through the entity read.
 
     Returns the correction with its value filled in, or a reason (never a value)
     when the pending value cannot be read or is not the one this block names: the
     entry must exist on the block's own target and carry the block's field and op.
+
+    *vault_read_allowed* is a served request's per-vault read check
+    (athenaeum#3220); a refused vault reads as an unreadable target.
     """
     ref = parsed.value_ref
     if ref is None:
         return parsed
     uid = str(parsed.target.get("uid", "") or "").strip()
-    entries = _pending_entries(knowledge_root, config, uid)
+    entries = _pending_entries(
+        knowledge_root, config, uid, vault_read_allowed=vault_read_allowed
+    )
     if entries is None:
         return "pending value could not be read: target unreadable"
     entry = entries.get(ref)
@@ -3924,12 +3944,18 @@ def description_value_views(
     config: dict[str, Any] | None,
     *,
     include_sensitive: bool,
+    vault_read_allowed: Callable[[str], bool] | None = None,
 ) -> dict[str, str]:
     """``{reference: text}`` for each reference block in a description, as a listing shows it.
 
     With *include_sensitive* the text is the stored value in the form a block
     used to carry (``repr``); without it, or when the value cannot be read, a
     redaction marker naming the field. Empty for a description with no reference.
+
+    *vault_read_allowed* (athenaeum#3220) is a served request's per-vault read
+    check. When it refuses the vault the value is kept in, the text is the same
+    redaction marker a listing without *include_sensitive* shows. ``None`` (a
+    stdio server, the command line) leaves *include_sensitive* alone to decide.
     """
     if "vault:" not in description or _VALUE_REF_LINE_RE.search(description) is None:
         return {}
@@ -3940,7 +3966,9 @@ def description_value_views(
             field_name = line.strip().removeprefix("Field:").strip()
     shown = f"<redacted: {field_name or 'field'} value withheld>"
     if include_sensitive and not isinstance(parsed, str):
-        resolved = resolve_pending_value(parsed, knowledge_root, config)
+        resolved = resolve_pending_value(
+            parsed, knowledge_root, config, vault_read_allowed=vault_read_allowed
+        )
         if not isinstance(resolved, str):
             shown = repr(resolved.value)
     return {m.group(2): shown for m in _VALUE_REF_LINE_RE.finditer(description)}
