@@ -71,7 +71,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from athenaeum.authority import is_pointer_stub
-from athenaeum.config import RECALL_HYBRID_K_DEFAULT
+from athenaeum.config import RECALL_HYBRID_K_DEFAULT, resolve_index_globs
 from athenaeum.models import (
     AUDIENCE_PUBLIC_TOKEN,
     audience_index_string,
@@ -681,6 +681,98 @@ def _is_recall_inactive(meta: dict[str, Any] | None, as_of: date | None = None) 
     return valid_until_expired(meta, as_of)
 
 
+
+def _index_exclusion_reason(
+    meta: dict[str, Any] | None,
+    *,
+    as_of: date | None = None,
+    config: dict[str, Any] | None = None,
+) -> str | None:
+    """Why a page stays out of the search index, or ``None`` when it is indexed.
+
+    The single list of index-build exclusions :func:`_scan_indexed_records`
+    applies, as a reason rather than a bare boolean, so a reader can tell
+    a page dropped ONLY for an expired ``valid_until`` apart from one that is
+    deprecated, PII-flagged or embedding-excluded. Issue athenaeum#3321 needs
+    that split: ``recall`` keeps applying the athenaeum#308 validity window
+    (an expired page is not indexed), but entity enumeration lists an entity
+    page whatever its ``valid_until`` — see
+    :meth:`FTS5Backend.expired_candidates_by_type`.
+
+    Reasons, checked in this order:
+
+    * ``"deprecated"`` — the page declares itself deprecated (athenaeum#191).
+    * ``"pii"`` — a truthy ``pii:`` flag (athenaeum#427).
+    * ``"not-embedded"`` — the storage-adapter corpus policy routes the page's
+      class to an ``embedded: false`` surface (athenaeum#532), or the page
+      itself declares ``embedded: false`` (athenaeum#716). With
+      ``config is None`` only the page-level override applies.
+    * ``"expired"`` — :func:`_is_recall_inactive` for any reason other than
+      deprecation, which is the ``valid_until`` upper bound relative to
+      ``as_of`` (athenaeum#308; a ``bucket: daily`` page is never
+      ``"expired"`` here, athenaeum#904).
+
+    Every exclusion that is not about time wins over ``"expired"``, so a page
+    reported ``"expired"`` would be indexed if its ``valid_until`` were open.
+    """
+    if not meta:
+        return None
+    if parse_deprecated(meta):
+        return "deprecated"
+    if is_pii_flagged(meta):
+        return "pii"
+    if config is not None:
+        page_type = str(meta.get("type") or "")
+        if not page_is_embedded(meta, page_type, config):
+            return "not-embedded"
+    elif page_embedding_disabled(meta):
+        return "not-embedded"
+    if _is_recall_inactive(meta, as_of):
+        return "expired"
+    return None
+
+
+def _wiki_page_kept(
+    rel: str, include: list[str] | None, exclude: list[str] | None
+) -> bool:
+    """Whether a wiki-surface key is a page the index scan considers at all.
+
+    Flat ``.md`` only, no underscore-prefixed or skip-listed names, then the
+    include/exclude globs. Shared by :func:`_scan_indexed_records` and
+    :meth:`FTS5Backend.expired_candidates_by_type` so both see the same
+    file set.
+    """
+    if "/" in rel or not rel.endswith(".md") or rel.startswith("_"):
+        return False
+    if rel in _INTAKE_SKIP_NAMES:
+        return False
+    return _passes_globs(rel, include, exclude)
+
+
+def _extra_page_kept(
+    rel: str,
+    root_name: str,
+    is_intake: bool,
+    include: list[str] | None,
+    exclude: list[str] | None,
+) -> bool:
+    """Whether an extra-root key is a page the index scan considers at all.
+
+    Recursive ``.md`` only, no skip-listed names. A ``_``-prefixed directory
+    of a page store (``_store/``) is operational, never a page: the same
+    segment rule the wiki scan applies. A raw-intake root keeps its own
+    layout (auto-memory's ``_unscoped/`` holds real notes), so it is exempt.
+    Globs match ``<root_name>/<rel>``.
+    """
+    if not rel.endswith(".md"):
+        return False
+    if Path(rel).name in _INTAKE_SKIP_NAMES:
+        return False
+    if not is_intake and underscore_segment_excluded(Path(rel).parent.parts):
+        return False
+    return _passes_globs(f"{root_name}/{rel}", include, exclude)
+
+
 def _scan_surface(
     store: FilesystemStore,
     surface: str,
@@ -840,51 +932,18 @@ def _scan_indexed_records(
         content_hash = hashlib.sha256(data).hexdigest()
         text = data.decode("utf-8", errors="replace")
         meta, _ = parse_frontmatter(text)
-        # Issue athenaeum#191: inactive members never enter the index or the manifest.
-        # Issue athenaeum#308: an as-of build additionally drops pages outside their
-        # validity window relative to ``as_of`` (default today). Issue athenaeum#904:
-        # ``_is_recall_inactive`` (not ``is_inactive_memory``) so an expired
-        # ``bucket: daily`` page stays indexed for currency ranking instead
-        # of being hard-dropped — see that function's docstring.
-        if _is_recall_inactive(meta, as_of):
-            return None
-        # Issue athenaeum#427: a ``pii: true``-flagged page never enters the index or
-        # the manifest (belt-and-suspenders — see the docstring above).
-        if is_pii_flagged(meta):
-            return None
-        # Issue athenaeum#532 (H4): honor the storage-adapter corpus policy at index
-        # build. A page whose entity class routes to a surface with
-        # ``embedded: false`` never enters the FTS5 / vector store — the
-        # ``embedded`` capability the storage contract promises, enforced the
-        # same way athenaeum#427 excludes PII and ``wiki_dedupe`` drops
-        # non-``merge_eligible`` classes. NO-OP by default: with no ``storage:``
-        # config every class maps to the all-true wiki surface, so
-        # ``is_embedded`` is ``True`` for every page and nothing is dropped.
-        # ``config is None`` (callers that don't thread config, e.g. shell-hook
-        # convenience builds) also short-circuits the CLASS-level check to
-        # today's behavior.
-        if config is not None:
-            page_type = str(meta.get("type") or "")
-            if not page_is_embedded(meta, page_type, config):
-                return None
-        elif page_embedding_disabled(meta):
-            # Issue athenaeum#716: the PAGE-level ``embedded: false`` override (a
-            # wiki-dedup fold tombstone, or athenaeum#718's cold-tier demotion) is
-            # honored even when no ``storage:`` config was threaded at all —
-            # unlike the class-level policy above, it needs no config to
-            # resolve, so a shell-hook convenience build still drops a page
-            # that has declared itself excluded from every index.
+        # Every reason a page stays out of the index and the manifest lives in
+        # ONE helper, so enumeration (issue athenaeum#3321) can tell which pages
+        # were dropped only for their ``valid_until`` — see
+        # :func:`_index_exclusion_reason`.
+        if _index_exclusion_reason(meta, as_of=as_of, config=config) is not None:
             return None
         vu = validity_bound_str(meta, "valid_until")
         return indexed_name, _local_path_for(key), content_hash, text, meta, (meta_obj.version, vu)
 
     # -- wiki: flat surface, .md only, no underscore/skip-listed names ------
     def _wiki_keep(rel: str) -> bool:
-        if "/" in rel or not rel.endswith(".md") or rel.startswith("_"):
-            return False
-        if rel in _INTAKE_SKIP_NAMES:
-            return False
-        return _passes_globs(rel, include, exclude)
+        return _wiki_page_kept(rel, include, exclude)
 
     wiki_prior_versions = {
         name: rec[0] for name, rec in prior_map.items() if "/" not in name
@@ -915,17 +974,7 @@ def _scan_indexed_records(
         def _extra_keep(
             rel: str, _root_name: str = root_name, _is_intake: bool = is_intake
         ) -> bool:
-            if not rel.endswith(".md"):
-                return False
-            if Path(rel).name in _INTAKE_SKIP_NAMES:
-                return False
-            # A ``_``-prefixed directory of a page store (``_store/``) is
-            # operational, never a page: the same segment rule the wiki scan
-            # applies. A raw-intake root keeps its own layout (auto-memory's
-            # ``_unscoped/`` holds real notes), so it is exempt.
-            if not _is_intake and underscore_segment_excluded(Path(rel).parent.parts):
-                return False
-            return _passes_globs(f"{_root_name}/{rel}", include, exclude)
+            return _extra_page_kept(rel, _root_name, _is_intake, include, exclude)
 
         surface_prior_versions = {
             name[len(name_prefix) :]: rec[0]
@@ -1886,6 +1935,118 @@ class FTS5Backend:
         finally:
             conn.close()
         return [str(r[0]) for r in rows]
+
+    def expired_candidates_by_type(
+        self,
+        wiki_root: Path,
+        cache_dir: Path,
+        entity_type: str,
+        *,
+        extra_roots: Iterable[IndexedRoot] | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Entity pages of *entity_type* the index leaves out for their ``valid_until``.
+
+        Issue athenaeum#3321. ``recall`` applies the athenaeum#308 validity
+        window at index build: a page whose ``valid_until`` is in the past
+        never enters the ``wiki`` table. On an entity page (a company, a
+        person) that date usually records when a RELATIONSHIP ended, not
+        when the entity stopped existing, so enumeration lists such a page
+        anyway. :meth:`candidates_by_type` cannot return it, because it
+        reads that table, and this method supplies the rest.
+
+        Only files the index does not hold are read, through the same
+        file-set rules the index scan applies (:func:`_wiki_page_kept`,
+        :func:`_extra_page_kept`, the raw-intake relevance gate). A file is
+        returned when :func:`_index_exclusion_reason` gives ``"expired"``,
+        or ``None`` (a page the index should hold but does not yet: the
+        incremental build's stat fast-path can drop a ``bucket: daily`` page
+        whose ``valid_until`` just passed until the next full rebuild).
+        Deprecated, PII-flagged and embedding-excluded pages stay out, the
+        same as from the index. Type matching uses
+        :func:`~athenaeum.models.resolve_page_type`, the value the index's
+        ``type`` column stores. Names come back in the index's own format,
+        sorted, so the caller resolves them exactly as it resolves
+        :meth:`candidates_by_type`'s.
+
+        A missing or unreadable DB returns ``[]``, matching
+        :meth:`candidates_by_type`: with no index there is no way to tell
+        which files it leaves out.
+        """
+        db_path = cache_dir / _DB_NAME
+        if not db_path.is_file():
+            return []
+        try:
+            conn = sqlite3.connect(str(db_path))
+        except sqlite3.Error:
+            return []
+        try:
+            indexed = {str(r[0]) for r in conn.execute("SELECT filename FROM wiki")}
+        except sqlite3.Error:
+            return []
+        finally:
+            conn.close()
+
+        roots: dict[str, Path] = {"wiki": wiki_root}
+        extra_surfaces: list[tuple[str, str, bool]] = []
+        for i, item in enumerate(extra_roots or ()):
+            spec = as_indexed_surface(item)
+            if not spec.root.is_dir():
+                continue
+            surface = f"extra{i}"
+            roots[surface] = spec.root
+            extra_surfaces.append(
+                (surface, spec.prefix, bool(getattr(spec, "intake", False)))
+            )
+        store = open_store(None, wiki_root, extra_roots=roots)
+        # The operator's corpus scoping (athenaeum#348) applies here even
+        # though enumeration's own build passes no globs: a page scoped out
+        # of the index must never be listed through this side door.
+        include, exclude = resolve_index_globs(config)
+
+        def _listable(data: bytes) -> tuple[str, bool]:
+            """``(text, listable)`` for one unindexed file's bytes."""
+            text = data.decode("utf-8", errors="replace")
+            meta, _ = parse_frontmatter(text)
+            if not meta or resolve_page_type(meta) != entity_type:
+                return text, False
+            reason = _index_exclusion_reason(meta, config=config)
+            return text, reason in (None, "expired")
+
+        found: list[str] = []
+        _wiki_current, wiki_contents = _scan_surface(
+            store,
+            "wiki",
+            keep=lambda rel: rel not in indexed and _wiki_page_kept(rel, include, exclude),
+        )
+        for key, data in wiki_contents.items():
+            if _listable(data)[1]:
+                found.append(key.key)
+
+        relevance_policy = (
+            _load_intake_relevance_policy(wiki_root)
+            if any(is_intake for _s, _n, is_intake in extra_surfaces)
+            else None
+        )
+        for surface, root_name, is_intake in extra_surfaces:
+
+            def _keep(rel: str, _root: str = root_name, _intake: bool = is_intake) -> bool:
+                return f"{_root}/{rel}" not in indexed and _extra_page_kept(
+                    rel, _root, _intake, include, exclude
+                )
+
+            _current, contents = _scan_surface(store, surface, keep=_keep)
+            for key, data in contents.items():
+                text, listable = _listable(data)
+                if not listable:
+                    continue
+                if is_intake and relevance_policy is not None:
+                    from athenaeum.relevance_policy import gate_raw_content
+
+                    if gate_raw_content(relevance_policy, text).drops:
+                        continue
+                found.append(f"{root_name}/{key.key}")
+        return sorted(found)
 
 
 # ---------------------------------------------------------------------------

@@ -70,6 +70,14 @@ def add_enumerate_subparser(subparsers: argparse._SubParsersAction) -> None:
         "predicates — no query text (issue athenaeum#965). The generalized "
         "form of the former `athenaeum people` (removed, athenaeum#1079) — "
         "see docs/design/recall-architecture.md's capability-parity table.",
+        description="Enumerate every entity of a declared type matching field "
+        "predicates, with no query text. Pages with a past `valid_until` are "
+        "listed: on an entity page that date usually records when a "
+        "relationship ended (a former client, a past employer), so an "
+        "ended-relationship page is still an entity and appears in the "
+        "default output, unlike in `recall`. To list only current "
+        "relationships, filter on a field with --where. Deprecated pages, "
+        "`pii: true` pages and pages excluded from the index stay out.",
     )
     parser.add_argument(
         "--type",

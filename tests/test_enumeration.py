@@ -575,3 +575,322 @@ class TestSplitChildrenHiddenByDefault:
         uids = {h["uid"] for h in result.hits}
         assert "company-acme-split" in uids
         assert len(uids) == 5
+
+
+class TestPastValidUntilIsListed:
+    """Issue athenaeum#3321 (operator ruling: option 1). An entity page does
+    not expire from enumeration: a page whose ``valid_until`` is past is
+    listed by default, because on a company or person page that date usually
+    records when a relationship ended. ``recall``'s validity window
+    (athenaeum#308) is unchanged: the index still leaves the page out, and
+    enumeration reads it from disk instead. A ``bucket: daily`` page keeps
+    its existing behaviour (listed; the decay sweep, not enumeration,
+    removes it). Deprecated / ``pii: true`` / ``embedded: false`` pages stay
+    out."""
+
+    @pytest.fixture
+    def ended_wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "_schema").mkdir()
+        (wiki / "_schema" / "types.md").write_text(
+            "| Type |\n|---|\n| company |\n| person |\n"
+        )
+        _write_page(
+            wiki,
+            "current-client.md",
+            uid="company-current",
+            page_type="company",
+            name="Current Client Co",
+            extra_lines=["former_client: true"],
+        )
+        _write_page(
+            wiki,
+            "ended-client.md",
+            uid="company-ended",
+            page_type="company",
+            name="Ended Client Co",
+            extra_lines=["former_client: true", "valid_until: '2018-12-31'"],
+        )
+        _write_page(
+            wiki,
+            "ended-other.md",
+            uid="company-ended-other",
+            page_type="company",
+            name="Ended Other Co",
+            extra_lines=["valid_until: '2014-06-30'"],
+        )
+        _write_page(
+            wiki,
+            "future-bound.md",
+            uid="company-future",
+            page_type="company",
+            name="Future Bound Co",
+            extra_lines=["valid_until: '2999-01-01'"],
+        )
+        _write_page(
+            wiki,
+            "ended-deprecated.md",
+            uid="company-deprecated",
+            page_type="company",
+            name="Deprecated Co",
+            extra_lines=["valid_until: '2018-12-31'", "deprecated: true"],
+        )
+        _write_page(
+            wiki,
+            "ended-pii.md",
+            uid="company-pii",
+            page_type="company",
+            name="Pii Co",
+            extra_lines=["valid_until: '2018-12-31'", "pii: true"],
+        )
+        _write_page(
+            wiki,
+            "ended-not-embedded.md",
+            uid="company-not-embedded",
+            page_type="company",
+            name="Not Embedded Co",
+            extra_lines=["valid_until: '2018-12-31'", "embedded: false"],
+        )
+        _write_page(
+            wiki,
+            "ended-person.md",
+            uid="person-ended",
+            page_type="person",
+            name="Ended Person",
+            extra_lines=["valid_until: '2018-12-31'"],
+        )
+        _write_page(
+            wiki,
+            "daily-status.md",
+            uid="company-daily",
+            page_type="company",
+            name="Daily Status Co",
+            extra_lines=["bucket: daily", "valid_until: '2018-12-31'"],
+        )
+        return wiki
+
+    def _uids(self, wiki: Path, tmp_path: Path, **kwargs: object) -> set[str]:
+        result = enumerate_entities(
+            wiki, _cache(tmp_path), entity_type="company", limit=0, **kwargs
+        )
+        return {h["uid"] for h in result.hits}
+
+    def test_past_valid_until_company_listed_by_default(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        assert self._uids(ended_wiki, tmp_path) == {
+            "company-current",
+            "company-ended",
+            "company-ended-other",
+            "company-future",
+            "company-daily",
+        }
+
+    def test_field_predicate_reaches_ended_relationship(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        # The issue's own failing query: `--where former_client:eq:true`.
+        uids = self._uids(
+            ended_wiki,
+            tmp_path,
+            predicates=[FieldPredicate(("former_client",), "eq", "true")],
+        )
+        assert uids == {"company-current", "company-ended"}
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("uid", "company-ended"), ("name", "Ended Client Co")],
+    )
+    def test_exact_lookup_of_ended_page_hits(
+        self, ended_wiki: Path, tmp_path: Path, field: str, value: str
+    ) -> None:
+        uids = self._uids(
+            ended_wiki, tmp_path, predicates=[FieldPredicate((field,), "eq", value)]
+        )
+        assert uids == {"company-ended"}
+
+    def test_ended_page_carries_requested_fields(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        result = enumerate_entities(
+            ended_wiki,
+            _cache(tmp_path),
+            entity_type="company",
+            limit=0,
+            fields=["valid_until", "former_client"],
+            predicates=[FieldPredicate(("uid",), "eq", "company-ended")],
+        )
+        assert result.hits == (
+            {
+                "uid": "company-ended",
+                "type": "company",
+                "name": "Ended Client Co",
+                "valid_until": "2018-12-31",
+                "former_client": True,
+            },
+        )
+
+    def test_recall_index_still_leaves_ended_page_out(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        # athenaeum#308's recall window is unchanged: the page is listed by
+        # the side pass, not because the index started holding it.
+        cache = _cache(tmp_path)
+        enumerate_entities(ended_wiki, cache, entity_type="company", limit=0)
+        indexed = set(FTS5Backend().candidates_by_type(cache, "company"))
+        assert "ended-client.md" not in indexed
+        assert "ended-other.md" not in indexed
+        assert "current-client.md" in indexed
+
+    def test_daily_bucket_page_behaviour_unchanged(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        # athenaeum#904: an expired `bucket: daily` page was already indexed
+        # (recall deprioritizes it rather than dropping it), so it was
+        # already listed. It still comes from the index, not the side pass.
+        cache = _cache(tmp_path)
+        uids = self._uids(ended_wiki, tmp_path)
+        assert "company-daily" in uids
+        backend = FTS5Backend()
+        assert "daily-status.md" in backend.candidates_by_type(cache, "company")
+        assert "daily-status.md" not in backend.expired_candidates_by_type(
+            ended_wiki, cache, "company"
+        )
+
+    def test_daily_page_missing_from_index_is_still_listed(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        # The incremental build's stat fast-path can drop a daily page whose
+        # `valid_until` just passed until the next full rebuild. Simulate that
+        # lag by deleting its row: the side pass still lists it.
+        import sqlite3
+
+        from athenaeum.search import _DB_NAME
+
+        cache = _cache(tmp_path)
+        backend = FTS5Backend()
+        backend.build_index(ended_wiki, cache)
+        conn = sqlite3.connect(str(cache / _DB_NAME))
+        conn.execute("DELETE FROM wiki WHERE filename = ?", ("daily-status.md",))
+        conn.commit()
+        conn.close()
+        assert "daily-status.md" in backend.expired_candidates_by_type(
+            ended_wiki, cache, "company"
+        )
+
+    def test_deprecated_pii_and_not_embedded_stay_out(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        uids = self._uids(ended_wiki, tmp_path)
+        assert not uids & {
+            "company-deprecated",
+            "company-pii",
+            "company-not-embedded",
+        }
+
+    def test_other_type_not_leaked(self, ended_wiki: Path, tmp_path: Path) -> None:
+        result = enumerate_entities(
+            ended_wiki, _cache(tmp_path), entity_type="person", limit=0
+        )
+        assert {h["uid"] for h in result.hits} == {"person-ended"}
+
+    def test_audience_scoping_applies_to_ended_page(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        _write_page(
+            ended_wiki,
+            "ended-restricted.md",
+            uid="company-restricted",
+            page_type="company",
+            name="Restricted Co",
+            extra_lines=["valid_until: '2018-12-31'", "audience: [finance]"],
+        )
+        owner = self._uids(ended_wiki, tmp_path)
+        assert "company-restricted" in owner
+        restricted = self._uids(ended_wiki, tmp_path, caller_audience={"public"})
+        assert "company-restricted" not in restricted
+
+    def test_ended_split_child_hidden_by_default(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        _write_page(
+            ended_wiki,
+            "ended-split.md",
+            uid="company-ended-split",
+            page_type="company",
+            name="Ended Split",
+            extra_lines=[
+                "valid_until: '2018-12-31'",
+                "related:",
+                "  - uid: company-ended",
+                "    role: split-from",
+            ],
+        )
+        assert "company-ended-split" not in self._uids(ended_wiki, tmp_path)
+        assert "company-ended-split" in self._uids(
+            ended_wiki, tmp_path, include_split=True
+        )
+
+    def test_ended_page_in_extra_root_listed(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        extra = tmp_path / "intake"
+        extra.mkdir()
+        _write_page(
+            extra,
+            "ended-extra.md",
+            uid="company-ended-extra",
+            page_type="company",
+            name="Ended Extra Co",
+            extra_lines=["valid_until: '2018-12-31'"],
+        )
+        assert "company-ended-extra" in self._uids(
+            ended_wiki, tmp_path, extra_roots=[extra]
+        )
+
+    def test_index_globs_scope_the_side_pass(
+        self, ended_wiki: Path, tmp_path: Path
+    ) -> None:
+        # A page the operator scoped out of the index (athenaeum#348) is not
+        # listed through the side pass.
+        cache = _cache(tmp_path)
+        backend = FTS5Backend()
+        config = {"recall": {"exclude_globs": ["ended-other.md"]}}
+        backend.build_index(ended_wiki, cache)
+        found = backend.expired_candidates_by_type(
+            ended_wiki, cache, "company", config=config
+        )
+        assert "ended-other.md" not in found
+        assert "ended-client.md" in found
+
+    def test_missing_index_returns_nothing(self, ended_wiki: Path, tmp_path: Path) -> None:
+        assert (
+            FTS5Backend().expired_candidates_by_type(
+                ended_wiki, _cache(tmp_path), "company"
+            )
+            == []
+        )
+
+
+class TestIndexExclusionReason:
+    """Issue athenaeum#3321: the index-build exclusion chain as one reason."""
+
+    @pytest.mark.parametrize(
+        ("meta", "reason"),
+        [
+            ({}, None),
+            ({"type": "company"}, None),
+            ({"valid_until": "2999-01-01"}, None),
+            ({"valid_until": "2018-12-31"}, "expired"),
+            ({"valid_until": "2018-12-31", "bucket": "daily"}, None),
+            ({"deprecated": True}, "deprecated"),
+            ({"deprecated": True, "valid_until": "2018-12-31"}, "deprecated"),
+            ({"pii": True, "valid_until": "2018-12-31"}, "pii"),
+            ({"embedded": False, "valid_until": "2018-12-31"}, "not-embedded"),
+        ],
+    )
+    def test_reason(self, meta: dict[str, object], reason: str | None) -> None:
+        from athenaeum.search import _index_exclusion_reason
+
+        assert _index_exclusion_reason(meta) == reason
