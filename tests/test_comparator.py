@@ -1166,10 +1166,10 @@ class TestContentRelationUnavailableWarnsOnce:
     ) -> None:
         """QA review finding 2: the count/latch used to be a single
         process-lifetime one-shot -- a second peer pass
-        (`wiki_dedupe.propose_wiki_page_merges` / `recompare` / `comparator_instruments.
-        run_sibling_widening`) running in the same interpreter after a first one
-        already flushed would silently accumulate into an already-``True`` latch
-        and never warn, permanently swallowing its own occurrences.
+        (`wiki_dedupe.propose_wiki_page_merges` / `recompare`) running in the
+        same interpreter after a first one already flushed would silently
+        accumulate into an already-``True`` latch and never warn, permanently
+        swallowing its own occurrences.
         `begin_content_relation_unavailable_tracking` (called once by each pass
         before its loop) resets both the counter and the latch, so a second pass
         reports its OWN count rather than being swallowed by the first's."""
@@ -1209,9 +1209,8 @@ class TestContentRelationUnavailableWarnsOnce:
         WARNING for whatever it accumulated before the failure, not silently
         discard the count along with the exception. Synthesizes the failure with
         a raising stand-in loop body rather than waiting for a real error path --
-        this is exactly the shape `wiki_dedupe.propose_wiki_page_merges`,
-        `recompare`, and `comparator_instruments.run_sibling_widening` now all
-        guard with `try/finally`."""
+        this is exactly the shape `wiki_dedupe.propose_wiki_page_merges` and
+        `recompare` both guard with `try/finally`."""
         import logging
 
         monkeypatch.setattr(comparator_mod, "_CONTENT_RELATION_UNAVAILABLE_COUNT", 0)

@@ -276,7 +276,6 @@ MODULE_LAYER: dict[str, int] = {
     "bounce_join": 4,
     "cluster_comparator": 4,
     "comparator": 4,
-    "comparator_instruments": 4,
     "coordinate_coverage": 4,
     "decay_sweep": 4,
     "page_decompose": 4,
