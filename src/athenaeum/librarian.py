@@ -9750,7 +9750,11 @@ def _note_processed_outcome(ctx: RunContext, raw: RawFile, result: Any) -> None:
     created = [str(getattr(e, "filename", e)) for e in getattr(result, "created", [])]
     updated = [str(u) for u in getattr(result, "updated", [])]
     skipped = list(getattr(result, "skipped", []))
-    if not ctx.dry_run and getattr(result, "retain_raw", False):
+    # Order matters (Seer review on PR athenaeum#3311): a file a Tier 0/1 path
+    # already decided -- retained, created, updated, or handled with no page
+    # change -- reports that decision in a dry run too. Only a file none of
+    # those paths claimed is one that would go on to Tier 2/3.
+    if getattr(result, "retain_raw", False):
         reason = (
             "never-ingest"
             if getattr(result, "retain_raw_by_design", False)
@@ -9761,10 +9765,10 @@ def _note_processed_outcome(ctx: RunContext, raw: RawFile, result: Any) -> None:
         ctx.note_outcome(raw, "created", ", ".join(created))
     elif updated:
         ctx.note_outcome(raw, "updated", ", ".join(updated))
-    elif ctx.dry_run:
-        ctx.note_outcome(raw, "would-reach-tier2-3", "dry run stops before Tier 2/3")
     elif getattr(result, "handled_no_op", False):
         ctx.note_outcome(raw, "consumed", "handled with no page change")
+    elif ctx.dry_run:
+        ctx.note_outcome(raw, "would-reach-tier2-3", "dry run stops before Tier 2/3")
     else:
         ctx.note_outcome(raw, "dropped", skipped[-1] if skipped else None)
 
@@ -13819,8 +13823,15 @@ def resolve_raw_targets(
             literal.append(part)
         base = Path(*literal) if literal else Path()
         anchored = base if base.is_absolute() else root / base
+        # An absolute path may reach the raw root through a symlink, so an
+        # absolute base is compared by its real path (Seer review on PR
+        # athenaeum#3311); a relative one is lexically normalised first, so a
+        # ``..`` that climbs out is refused even when it would land back inside.
+        checked = (
+            anchored.resolve() if base.is_absolute() else Path(os.path.normpath(anchored))
+        )
         try:
-            Path(os.path.normpath(anchored)).relative_to(root)
+            checked.relative_to(root)
         except ValueError:
             raise RawTargetError(
                 f"--raw target {target!r} is outside the raw root ({root}); only "
@@ -13829,8 +13840,16 @@ def resolve_raw_targets(
         pattern = target if Path(target).is_absolute() else os.path.join(
             glob_mod.escape(str(root)), target
         )
+        # A file whose literal name holds a glob character (``notes[1].md``)
+        # names itself; it is not a pattern (Seer review on PR athenaeum#3311).
+        literal_hit = Path(target) if Path(target).is_absolute() else root / target
+        hits = (
+            [str(literal_hit)]
+            if literal_hit.is_file()
+            else sorted(glob_mod.glob(pattern, recursive=True))
+        )
         matched: list[Path] = []
-        for hit in sorted(glob_mod.glob(pattern, recursive=True)):
+        for hit in hits:
             real = Path(hit).resolve()
             try:
                 real.relative_to(root)

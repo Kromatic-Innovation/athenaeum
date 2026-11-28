@@ -254,6 +254,27 @@ class TestPathResolution:
         with pytest.raises(RawTargetError):
             resolve_raw_targets(root / "raw", ["sessions/link.md"])
 
+    def test_literal_filename_with_glob_characters_names_itself(self, tmp_path: Path) -> None:
+        # Seer review on PR athenaeum#3311: `[1]` is a glob class, not part of the name.
+        root = _seed(tmp_path)
+        odd = root / "raw" / "sessions" / "notes[1].md"
+        odd.write_text("x")
+        files, unmatched = resolve_raw_targets(root / "raw", ["sessions/notes[1].md"])
+        assert files == [odd.resolve()]
+        assert unmatched == []
+
+    def test_absolute_path_through_a_symlink_to_the_root_is_accepted(self, tmp_path: Path) -> None:
+        # Seer review on PR athenaeum#3311: the real path decides, not the spelling.
+        root = _seed(tmp_path)
+        a = _tier0(root, "p-0001", "Alice Zhang", "20240410T120000Z")
+        alias = tmp_path / "alias"
+        alias.symlink_to(root)
+        files, unmatched = resolve_raw_targets(
+            root / "raw", [str(alias / "raw" / "sessions" / a.name)]
+        )
+        assert files == [a.resolve()]
+        assert unmatched == []
+
     def test_relative_paths_and_globs_resolve_against_the_raw_root(self, tmp_path: Path) -> None:
         root = _seed(tmp_path)
         a = _tier0(root, "p-0001", "Alice Zhang", "20240410T120000Z")
@@ -460,6 +481,29 @@ class TestDryRun:
         }
         assert _tree_digest(root, cache) == before  # no page, deletion, stamp, index
         _fake_llm.messages.create.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("flags", "expected"),
+        [
+            ({"handled_no_op": True}, "consumed"),
+            ({"retain_raw": True, "retain_raw_by_design": True}, "retained"),
+            ({}, "would-reach-tier2-3"),
+        ],
+    )
+    def test_dry_run_reports_a_tier0_decision_before_would_reach_tier2_3(
+        self, flags: dict[str, bool], expected: str
+    ) -> None:
+        # Seer review on PR athenaeum#3311: a Tier 0/1 no-op or retain is not a
+        # file that would go on to Tier 2/3, in a dry run as in a real one.
+        seen: list[str] = []
+        ctx = SimpleNamespace(
+            dry_run=True, note_outcome=lambda _raw, outcome, _reason=None: seen.append(outcome)
+        )
+        result = SimpleNamespace(
+            created=[], updated=[], skipped=[], **{"handled_no_op": False, **flags}
+        )
+        lib._note_processed_outcome(ctx, SimpleNamespace(ref="s/x.md"), result)  # type: ignore[arg-type]
+        assert seen == [expected]
 
     def test_dry_run_cli_reports_and_does_not_refresh_the_index(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
