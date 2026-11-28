@@ -14641,14 +14641,15 @@ def reindex(
     # ``athenaeum doctor``) instead of silently restarting every night.
     with full_rebuild_tracking(
         resolved_cache, config=config, backend=backend, incremental=incremental
-    ):
+    ) as force_full:
+        build_incremental = incremental and not force_full
         if backend_name == "vector":
             try:
                 pages = build_vector_index(
                     wiki_root,
                     resolved_cache,
                     extra_roots=extra_roots,
-                    incremental=incremental,
+                    incremental=build_incremental,
                     include_globs=include_globs,
                     exclude_globs=exclude_globs,
                     embedding_model=resolve_embedding_model(config),
@@ -14679,7 +14680,7 @@ def reindex(
                     wiki_root,
                     resolved_cache,
                     extra_roots=extra_roots,
-                    incremental=incremental,
+                    incremental=build_incremental,
                     include_globs=include_globs,
                     exclude_globs=exclude_globs,
                     full_rehash_max_age_days=full_rehash_max_age_days,
@@ -14690,7 +14691,7 @@ def reindex(
                 wiki_root,
                 resolved_cache,
                 extra_roots=extra_roots,
-                incremental=incremental,
+                incremental=build_incremental,
                 include_globs=include_globs,
                 exclude_globs=exclude_globs,
                 full_rehash_max_age_days=full_rehash_max_age_days,
@@ -14706,7 +14707,7 @@ def reindex(
         from athenaeum import off_corpus
 
         off_corpus.build_off_corpus_index(
-            config, knowledge_root, resolved_cache, incremental=incremental
+            config, knowledge_root, resolved_cache, incremental=build_incremental
         )
 
     return backend_name, pages
@@ -14719,7 +14720,7 @@ def full_rebuild_tracking(
     config: dict[str, object],
     backend: str | None,
     incremental: bool,
-) -> Iterator[None]:
+) -> Iterator[bool]:
     """Track a build that may be the full rebuild a session end deferred.
 
     Issue athenaeum#3320. Wraps every build that runs with no session-end
@@ -14732,16 +14733,20 @@ def full_rebuild_tracking(
     because a completed build always leaves a reusable index. An attempt that
     is killed outright records nothing here; the next attempt counts it.
 
+    Yields ``force_full``: True when an earlier attempt never finished, in
+    which case the caller must build with ``incremental=False`` (see
+    :func:`_start_tracked_full_rebuild`).
+
     Marker I/O never raises out of this manager: the marker is advisory, and
     must neither block a rebuild nor mask the build's own error.
     """
     from athenaeum import index_rebuild_marker
 
-    tracked = _start_tracked_full_rebuild(
+    tracked, force_full = _start_tracked_full_rebuild(
         resolved_cache, config=config, backend=backend, incremental=incremental
     )
     try:
-        yield
+        yield force_full
     except Exception as exc:
         if tracked:
             try:
@@ -14764,13 +14769,20 @@ def _start_tracked_full_rebuild(
     config: dict[str, object],
     backend: str | None,
     incremental: bool,
-) -> bool:
+) -> tuple[bool, bool]:
     """Record a full-rebuild attempt in the marker, if this build is one.
 
     A build is tracked when a marker already says a full rebuild is owed, or
     when an incremental build is about to discover the index is not reusable
-    and rebuild it from scratch anyway. Returns whether it was tracked. Never
-    raises: the marker is advisory and must not stop a rebuild.
+    and rebuild it from scratch anyway. Returns ``(tracked, force_full)``.
+    Never raises: the marker is advisory and must not stop a rebuild.
+
+    ``force_full`` is True when an earlier attempt never finished. A killed
+    rebuild can leave a partial index under a manifest that still reads as
+    reusable: the vector build recreates its collection dir before it
+    re-embeds, and writes the manifest last. An incremental diff against that
+    manifest finds nothing to do and would leave the index partial, so the
+    build must run full.
     """
     from athenaeum import index_rebuild_marker
 
@@ -14782,7 +14794,12 @@ def _start_tracked_full_rebuild(
             else None
         )
         if existing is None and found is None:
-            return False
+            return False, False
+        force_full = (
+            incremental
+            and existing is not None
+            and existing.attempt_started_at is not None
+        )
         backend_name, reason = found if found is not None else ("", "")
         if not reason and not incremental:
             reason = "full reindex requested"
@@ -14791,13 +14808,14 @@ def _start_tracked_full_rebuild(
         )
     except Exception:  # tracking must never block the rebuild
         log.warning("reindex: could not record the full-rebuild attempt", exc_info=True)
-        return False
+        return False, False
     log.info(
-        "reindex: running the full rebuild (%s); attempt %d",
+        "reindex: running the full rebuild (%s); attempt %d%s",
         marker.reason,
         marker.attempts,
+        " (forced full: the previous attempt did not finish)" if force_full else "",
     )
-    return True
+    return True, force_full
 
 
 def _index_reuse_state(
@@ -15432,6 +15450,16 @@ def _defer_full_rebuild_if_required(
     )
     if stored is None:
         return None
+    if blocker is None:
+        # A marker whose last attempt never finished: the rebuild was killed
+        # part-way, and the manifest it left can read as reusable over a
+        # partial index. It is still owed, so keep deferring it.
+        pending = index_rebuild_marker.read_marker(resolved_cache)
+        if pending is not None and pending.attempt_started_at is not None:
+            blocker = (
+                "an earlier full rebuild did not finish "
+                f"(started {pending.attempt_started_at}); the index may be incomplete"
+            )
     if blocker is None:
         try:
             if index_rebuild_marker.clear(resolved_cache):

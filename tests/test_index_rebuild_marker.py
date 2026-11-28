@@ -440,3 +440,57 @@ def test_daily_operation_guide_says_where_full_rebuilds_happen() -> None:
     assert "the nightly `athenaeum run`" in guide
     assert "`athenaeum reindex`" in guide
     assert "index_rebuild" in guide
+
+
+@pytest.mark.usefixtures("mock_anthropic")
+def test_killed_rebuild_that_left_a_reusable_looking_index_is_rebuilt_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rebuild killed part-way can leave a partial index whose manifest
+    reads as reusable (the vector build recreates its collection dir first
+    and writes the manifest last). Session end must not take that as done,
+    and the next owner build must run full, not an empty incremental diff."""
+    import athenaeum.search as search
+    from athenaeum.librarian import reindex
+
+    root, cache = _built_store(tmp_path, "fts5")
+    _roll_fts5_db_back(cache)
+    assert _session_end(root, cache, "fts5").full_rebuild_deferred
+
+    def _killed(*_a: object, **_k: object) -> int:
+        raise KeyboardInterrupt  # a BaseException, like the kill: no outcome recorded
+
+    monkeypatch.setattr(search, "build_fts5_index", _killed)
+    with pytest.raises(KeyboardInterrupt):
+        reindex(knowledge_root=root, cache_dir=cache, backend="fts5")
+    monkeypatch.undo()
+    marker = index_rebuild_marker.read_marker(cache)
+    assert marker is not None and marker.attempt_started_at is not None
+
+    # The killed attempt happened to leave a DB stamped with the current
+    # schema, so the blocker alone now reads "reusable".
+    conn = sqlite3.connect(str(cache / "wiki-index.db"))
+    try:
+        conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+    finally:
+        conn.close()
+
+    _forbid_reindex(monkeypatch)
+    result = _session_end(root, cache, "fts5")
+    assert result.reindexed is False
+    assert "did not finish" in (result.full_rebuild_deferred or "")
+    assert index_rebuild_marker.read_marker(cache) is not None
+    monkeypatch.undo()
+
+    builds: list[object] = []
+    real_build = search.build_fts5_index
+
+    def _recording(*args: object, **kwargs: object) -> int:
+        builds.append(kwargs.get("incremental"))
+        return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(search, "build_fts5_index", _recording)
+    reindex(knowledge_root=root, cache_dir=cache, backend="fts5")
+    assert builds == [False], "the build after a killed attempt must run full"
+    assert index_rebuild_marker.read_marker(cache) is None

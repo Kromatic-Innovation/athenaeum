@@ -615,13 +615,18 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     # unknown backend builds nothing, so neither is tracked.
     from athenaeum.librarian import full_rebuild_tracking
 
-    tracking: contextlib.AbstractContextManager[None] = (
+    tracking: contextlib.AbstractContextManager[bool | None] = (
         full_rebuild_tracking(cache_dir, config=cfg, backend=backend, incremental=incremental)
         if as_of is None and backend in ("vector", "fts5")
         else contextlib.nullcontext()
     )
     try:
-        with tracking:
+        with tracking as force_full:
+            if force_full:
+                # The previous tracked attempt never finished, so the index may
+                # be partial under a manifest that reads as reusable.
+                incremental = False
+                mode = "full"
             if backend == "vector":
                 try:
                     count = build_vector_index(
