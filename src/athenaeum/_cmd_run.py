@@ -15,7 +15,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _positive_int
+from athenaeum._cli_shared import (
+    _acquire_or_exit,
+    _add_lock_args,
+    _positive_int,
+    refresh_index_after_run,
+)
 from athenaeum.logconf import configure_logging
 
 
@@ -227,52 +232,6 @@ def _warn_removed_config_keys(knowledge_root: Path) -> None:
         print(f"WARNING: {format_removed_key_notice(key, reason)}", file=sys.stderr)
 
 
-def _refresh_index_after_run(
-    knowledge_root: Path, wiki_root: Path, cache_dir: Path | None
-) -> None:
-    """Bring the search index up to date with what ``run`` just changed.
-
-    Issue athenaeum#3090: ``run`` writes wiki pages and deletes compiled raw
-    notes, so without this a later ``recall`` sees the pre-run index (a ghost
-    hit for the deleted note, no compiled page) until a separate ``reindex`` or
-    ``session-end``. Uses the same incremental :func:`reindex` ``session-end``
-    uses, gated on the same cheap manifest diff so an unchanged corpus costs
-    no embedding work. A failure here is reported on stderr but never changes
-    the compile's exit code: the compile succeeded or failed on its own terms.
-    """
-    from athenaeum.config import load_config
-    from athenaeum.librarian import _reindex_would_change, reindex
-
-    try:
-        config = load_config(knowledge_root)
-        if not _reindex_would_change(
-            knowledge_root, wiki_root, cache_dir=cache_dir, config=config, backend=None
-        ):
-            return
-        reindex(
-            knowledge_root=knowledge_root,
-            wiki_root=wiki_root,
-            cache_dir=cache_dir,
-            config=config,
-            incremental=True,
-        )
-    # Deliberately broad (athenaeum#3124). The refresh reaches the config
-    # loader, the manifest diff, the embedding backend and its on-disk index,
-    # each of which can raise its own error types (a corrupt index file, a
-    # missing optional backend, a full disk). The index is a cache that the
-    # next ``run``, ``session-end`` or ``reindex`` rebuilds, while the compile
-    # it follows has already committed its pages. So no refresh failure may
-    # turn a finished compile into a failed ``run``: report it and keep the
-    # compile's exit code. ``BaseException`` (Ctrl-C, ``SystemExit``) is not
-    # caught.
-    except Exception as exc:  # noqa: BLE001 - never mask the compile's result
-        print(
-            f"WARNING: run finished but the search index refresh failed "
-            f"({type(exc).__name__}: {exc}); run `athenaeum reindex`.",
-            file=sys.stderr,
-        )
-
-
 def cmd_run(args: argparse.Namespace) -> int:
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, run
 
@@ -393,7 +352,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             # librarian.verdict_ledger_enabled is on.
             lock=lock,
         )
-        _refresh_index_after_run(knowledge_root, wiki_root, cache_dir)
+        refresh_index_after_run(knowledge_root, wiki_root, cache_dir)
         return rc
     finally:
         lock.release()
