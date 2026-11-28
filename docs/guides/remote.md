@@ -569,7 +569,10 @@ embedding-model change; the default incremental hash-diff is what a schedule wan
 
 `session-end` is the one to schedule frequently. It is change-gated — an incremental
 ingest, then a reindex only when the compile ran or the index is actually stale — so a
-tick with nothing new costs no model calls and no index work. It is what closes the
+tick with nothing new costs no model calls and no index work. It never runs a full
+rebuild: when an upgrade or a model change makes the whole index unusable, it records
+that and leaves the rebuild to `run` or `reindex` (see
+[Where full index rebuilds happen](daily-operation.md#where-full-index-rebuilds-happen-and-why-session-end-never-runs-one)). It is what closes the
 write-then-recall gap for a remote caller, and running it every few minutes is
 cheaper than running `reindex --full` once.
 

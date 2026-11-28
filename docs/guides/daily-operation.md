@@ -65,6 +65,48 @@ the nightly librarian. The hook that fires this at session end lives in
 your Claude Code workspace config, not in this repo — this repo ships the
 command it calls. See [Passive recall via hooks](sidecar.md).
 
+### Where full index rebuilds happen, and why session end never runs one
+
+Most index work is incremental: only the pages that changed are re-embedded.
+Some changes make the whole existing index unusable instead, and the next
+build has to re-embed every page from scratch:
+
+- an upgrade that changes the index format (its schema version);
+- a change to `embedding_model`;
+- an index file deleted while its manifest survived.
+
+On a large wiki that full rebuild takes many minutes, which is longer than
+a SessionEnd hook is allowed to run. If session end tried it, the hook's
+time limit would kill it every time, and the next session close would
+start it again from nothing. So `session-end` never runs a full rebuild.
+When it finds the index needs one, it:
+
+1. writes a marker, `full-rebuild-required.json`, in the cache directory
+   (`~/.cache/athenaeum/` by default);
+2. skips the reindex. `recall` keeps answering from the existing index
+   until the rebuild is done;
+3. exits quickly, and its JSON summary carries a `full_rebuild_required`
+   entry naming the reason.
+
+The full rebuild runs where there is no session time limit:
+
+- **the nightly `athenaeum run`**, which refreshes the index after it
+  compiles; or
+- **`athenaeum reindex`** (add `--full` to force it), run by hand.
+
+Either one records each attempt in the marker and deletes the marker when
+the rebuild completes. After that, session ends go back to incremental
+work. One full rebuild per change, not one per session close.
+
+`athenaeum doctor` reports a pending rebuild under `index_rebuild`. If the
+rebuild fails three times in a row (it raised an error, or it was killed
+before it finished), the warning says so, so a rebuild that can never
+finish does not go unnoticed.
+
+Two cases still build at session end. A first build, when there is no
+index yet, builds there as before. `athenaeum session-end --full` is an
+explicit request for a full rebuild and is honoured.
+
 ## I want to find claims restated across different wiki entities
 
 Read-only. Scans the wiki, embeds each claim, and prints a YAML report

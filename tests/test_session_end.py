@@ -114,6 +114,23 @@ def _write_tier0_raw(
     return path
 
 
+def _assert_deferred_then_rebuilt(
+    result: object, root: Path, cache: Path, backend: str
+) -> None:
+    """athenaeum#3320: a session end that found a full rebuild owed skipped it
+    and left the marker; ``reindex`` (the rebuild's owner) then runs it and
+    clears the marker."""
+    from athenaeum import index_rebuild_marker
+    from athenaeum.librarian import reindex
+
+    assert result.reindexed is False  # type: ignore[attr-defined]
+    assert result.full_rebuild_deferred  # type: ignore[attr-defined]
+    marker = index_rebuild_marker.read_marker(cache)
+    assert marker is not None and marker.deferrals == 1
+    reindex(knowledge_root=root, wiki_root=root / "wiki", cache_dir=cache, backend=backend)
+    assert index_rebuild_marker.read_marker(cache) is None
+
+
 @pytest.fixture
 def mock_anthropic(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Patch anthropic.Anthropic + a fake key so run()'s startup gate passes.
@@ -806,10 +823,12 @@ class TestReindexGateOnStaleness:
     # A manifest hash-diff is a strict SUBSET of what ``build_index`` treats as
     # invalidating. Each test below breaks the index in a way the corpus scan
     # cannot see — the manifest still matches the wiki byte for byte — and
-    # asserts the next idle tick rebuilds anyway. Each then asserts a THIRD
-    # tick is idle again: a blocker that never clears would be an infinite
-    # rebuild loop, which is the athenaeum#1458 failure in the opposite
-    # direction.
+    # asserts the next idle tick notices anyway. Since athenaeum#3320 the
+    # tick does not run the full rebuild itself: it leaves the marker, and the
+    # rebuild's owner (``reindex``) runs it and clears the marker. Each then
+    # asserts a THIRD tick is idle again: a blocker that never clears would be
+    # an infinite rebuild loop, which is the athenaeum#1458 failure in the
+    # opposite direction.
 
     def test_deleted_index_under_an_intact_manifest_is_rebuilt(
         self, tmp_path: Path, mock_anthropic: MagicMock
@@ -849,7 +868,9 @@ class TestReindexGateOnStaleness:
             backend="fts5",
         )
         assert second.ingest.noop is True  # nothing new to compile...
-        assert second.reindexed is True  # ...but the index was gone.
+        # ...and the index was gone. athenaeum#3320: session end notices, but
+        # leaves the full rebuild to its owner instead of running it.
+        _assert_deferred_then_rebuilt(second, root, cache, "fts5")
         assert db.is_file()
 
         third = session_end(
@@ -904,7 +925,7 @@ class TestReindexGateOnStaleness:
             backend="keyword",
         )
         assert second.ingest.noop is True
-        assert second.reindexed is True
+        _assert_deferred_then_rebuilt(second, root, cache, "keyword")
         assert db.is_file()
 
         third = session_end(
@@ -957,7 +978,7 @@ class TestReindexGateOnStaleness:
             backend="vector",
         )
         assert second.ingest.noop is True
-        assert second.reindexed is True
+        _assert_deferred_then_rebuilt(second, root, cache, "vector")
         assert vector_dir.is_dir()
 
         third = session_end(
@@ -1011,7 +1032,8 @@ class TestReindexGateOnStaleness:
             backend="vector",
         )
         assert second.ingest.noop is True
-        assert second.reindexed is True
+        assert json.loads(manifest.read_text())["embedding_model"] == "superseded-model-v0"
+        _assert_deferred_then_rebuilt(second, root, cache, "vector")
         # The rebuild re-embedded under the configured model and re-stamped it.
         assert json.loads(manifest.read_text())["embedding_model"] == real_model
 
@@ -1065,7 +1087,8 @@ class TestReindexGateOnStaleness:
             backend="vector",
         )
         assert second.ingest.noop is True
-        assert second.reindexed is True
+        assert json.loads(manifest.read_text())["metadata_schema_version"] == 1
+        _assert_deferred_then_rebuilt(second, root, cache, "vector")
         assert (
             json.loads(manifest.read_text())["metadata_schema_version"]
             == VectorBackend._METADATA_SCHEMA_VERSION

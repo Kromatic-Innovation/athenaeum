@@ -927,6 +927,53 @@ def check_search_index(
     )
 
 
+def check_index_rebuild(cache_dir: Path) -> CheckResult:
+    """Whether a full index rebuild is owed, and whether it keeps failing
+    (issue athenaeum#3320).
+
+    A session end never runs a full rebuild: it records
+    :mod:`athenaeum.index_rebuild_marker` and leaves the rebuild to the
+    nightly ``athenaeum run`` or ``athenaeum reindex``. This check reads that
+    marker. A pending rebuild is a warning, since recall is still serving the
+    old index. Once :data:`~athenaeum.index_rebuild_marker.FAILURE_WARN_THRESHOLD`
+    attempts in a row have failed (raised, or were killed before finishing),
+    the warning says so, so a rebuild that can never finish is not silent.
+    Read-only.
+    """
+    from athenaeum import index_rebuild_marker
+
+    marker = index_rebuild_marker.read_marker(cache_dir)
+    if marker is None:
+        return CheckResult(
+            name="index_rebuild", status="ok", detail="no full index rebuild pending"
+        )
+    fix = (
+        "run `athenaeum reindex --full --path <knowledge-root>` outside a "
+        "session (it has no session-end deadline), or let the nightly "
+        "`athenaeum run` rebuild it"
+    )
+    if marker.failing:
+        return CheckResult(
+            name="index_rebuild",
+            status="warn",
+            detail=(
+                f"full index rebuild has failed {marker.consecutive_failures} "
+                f"times in a row: {index_rebuild_marker.describe(marker)}"
+            ),
+            fix=(
+                fix
+                + "; check that it can finish (time limit, memory, disk) "
+                "before it is retried again"
+            ),
+        )
+    return CheckResult(
+        name="index_rebuild",
+        status="warn",
+        detail=index_rebuild_marker.describe(marker),
+        fix=fix,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Check 7: last compile time -- informational only (never fails: a fresh
 # install that has never run `athenaeum run` yet is not a broken install).
@@ -1374,6 +1421,7 @@ def run_checks(
         check_hooks_present(resolved_claude_dir),
         check_key_mode(config, resolved_cache_dir),
         check_search_index(resolved_cache_dir, config),
+        check_index_rebuild(resolved_cache_dir),
         check_last_compile(resolved_cache_dir),
         check_schedule_state(home=home),
         check_page_relations(knowledge_root / "wiki"),
