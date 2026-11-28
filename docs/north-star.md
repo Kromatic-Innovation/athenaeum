@@ -9,7 +9,8 @@ resolution rule, §2.7's extension to schema, and the new §2.12) and again on
 2026-11-20 (§3's raw-intake rule restated as shipped behaviour and three
 method rejections moved to a design note, §2.1 and §2.12 corrected to shipped
 behaviour, and §2.12 amended for the 2026-11-19 federation ruling, with
-athenaeum#2809). Other
+athenaeum#2809), and again on 2026-11-28 (the new §2.13 and three additions
+to §3, for team deployments, athenaeum#3276). Other
 documents implement pieces of it and
 reference this page rather than restating it. When a design dispute has no
 obvious winner, this page is the tie-breaker.
@@ -246,6 +247,24 @@ ordinary follow-up commit. This is a change of timing only. The value is
 still checked, and a value a writer files for the first time is still checked
 before it is absorbed.
 
+### 2.13 Access is enforced where the data is held, and decided in one place
+
+A rights file inside a copy of the data is not access control: whoever holds
+the copy can read and edit all of it. Access to a store is enforced by the
+place that holds or serves it (a server that checks every read and write, or
+the permissions of the repository, bucket or folder the store lives in), and
+who may read, write and approve what is decided in one place, not scattered
+across files. An installation can check what arrives from a place it does not
+control; it cannot stop a peer who has write access to that place. The
+deployments this serves are written out in
+[`docs/team-scenarios.md`](team-scenarios.md).
+
+The same holds for who said a thing. A source record carries whether its
+person, assistant and store were verified or only declared. A
+declared-but-unverified source is recorded as such and never upgraded to
+verified, and what a person stated, what an agent inferred on their behalf,
+and what someone else said stay distinguishable.
+
 ## 3. What we deliberately do not do
 
 Durable rejections of the vision — each was considered and declined for a
@@ -270,6 +289,12 @@ short-term memory store.
   source is too expensive, the answer is a cheaper tier for it — rules, a
   courtesy request to the producer, or both — never a locked door. Exclusion
   is reserved for content that is not memory at all (§2.3).
+- **Per-page permissions.** Stores and routed locations are the unit of
+  access (§2.13).
+- **Describing a rights file in a shared folder as access control.** Access
+  is whatever the place that holds the data enforces (§2.13).
+- **Asking the person saving a note to pick its store.** The librarian files
+  it, among the stores its writer may write to (§2.12).
 
 What the engine does with raw intake: it is recallable. Recall searches the
 raw intake folders (`recall.extra_intake_roots`, three by default), labels

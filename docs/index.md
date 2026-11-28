@@ -21,6 +21,9 @@ Everything in `docs/` is reachable from this page.
 - [**Use cases**](use-cases.md) — the north star decomposed into the questions memory is
   asked, current and aspirational, and the kill criterion: beat the host agent's native
   memory or be shelved.
+- [**Team scenarios**](team-scenarios.md) — the two multi-person deployments the
+  organisation use cases describe: a small company on one served deployment, and
+  independent people sharing one project.
 
 ## Guides
 
