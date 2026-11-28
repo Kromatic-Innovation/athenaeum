@@ -69,6 +69,14 @@ inventing an attribute name**, because a near-synonym of an already-armed attrib
 - A handoff file under `raw/` for each record it refuses, so the refusal is durable and
   triageable rather than lost.
 
+A value rejected because its field is not on the allowlist is written to neither the ledger
+line nor the handoff file. If the deployment has a vault configured for the target entity,
+the value is stored there under the reference `<batch_id>#<ordinal>`, and the handoff file
+says so; otherwise it is not recorded anywhere, and the handoff file says that. The
+handoff file shows the target only as an entity uid or a name, never an address-like handle.
+Ledger lines written by earlier versions are not rewritten: check the
+`redacted_correction_payloads` key of `_corrections_applied.jsonl` for values.
+
 ### An escalated correction to a vault field
 
 When a correction is escalated to the decision queue and its field is kept in a vault,

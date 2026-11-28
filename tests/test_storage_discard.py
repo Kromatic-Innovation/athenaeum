@@ -381,8 +381,8 @@ def test_discarded_correction_never_escalates_and_leaves_no_trace(
     assert escalated == []
     ledger = (root / "wiki" / "_corrections_applied.jsonl").read_text(encoding="utf-8")
     assert json.loads(ledger)["dispositions"] == {"discarded": 1}
-    assert json.loads(ledger)["non_trivial_correction_ids"] == []
-    assert json.loads(ledger)["redacted_correction_payloads"] == []
+    assert json.loads(ledger)["non_trivial_refs"] == []
+    assert json.loads(ledger)["withheld"] == []
     # The id the record would have had, computed from its value, is nowhere.
     from athenaeum.corrections import compute_correction_id
 

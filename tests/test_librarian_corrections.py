@@ -973,7 +973,7 @@ class TestHandoffIdempotency:
         escalated record that hits the §10.2 rate cap is NOT retired after
         the first pass (`escalations_recorded=False`), so the SAME
         raised-tier record is recomputed on every subsequent pass. Without
-        the `previously_handed_off_correction_ids` guard,
+        the `previously_handed_off_refs` guard,
         `write_correction_handoff` is called again each pass, writing a
         duplicate `.md` handoff file for a record already handed over --
         exactly the non-idempotency AC5 forbids ("idempotent on (batch_id,
@@ -1182,7 +1182,7 @@ class TestAllowlistRejectionRedaction:
         handoff_text = handoff_files[0].read_text()
         assert "emails" in handoff_text
         assert "attribute not on the allowlist" in handoff_text
-        assert "correction_id=" in handoff_text
+        assert "ref=" in handoff_text
         # AC1 (note-level): the note itself never quotes the rejected value.
         assert address not in handoff_text
 
@@ -1209,18 +1209,15 @@ class TestAllowlistRejectionRedaction:
             text = page.read_text()
             assert address not in text, f"leaked address found in {page}"
 
-        # AC2: the value is not destroyed -- it is recoverable, unredacted,
-        # from the audit ledger, keyed by the SAME correction_id the
-        # (redacted) note points a human at.
+        # The ledger holds neither the value nor any id derived from it.
+        # With no vault configured, the line records only that a value was
+        # withheld and stored nowhere.
         ledger_path = wiki / "_corrections_applied.jsonl"
         assert ledger_path.exists()
-        ledger_records = [json.loads(line) for line in ledger_path.read_text().splitlines()]
-        redacted_payloads = [
-            payload
-            for record in ledger_records
-            for payload in record.get("redacted_correction_payloads", [])
-        ]
-        assert any(p["value"] == address and p["field"] == "emails" for p in redacted_payloads), (
-            "the rejected address must remain recoverable, unredacted, in the "
-            "audit ledger (AC2)"
-        )
+        ledger_text = ledger_path.read_text()
+        assert address not in ledger_text
+        assert "redacted_correction_payloads" not in ledger_text
+        ledger_records = [json.loads(line) for line in ledger_text.splitlines()]
+        withheld = [w for record in ledger_records for w in record.get("withheld", [])]
+        assert withheld == [{"ref": 0, "stored": "nowhere"}]
+        assert "value withheld; not recorded: no vault is configured" in handoff_text

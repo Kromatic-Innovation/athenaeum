@@ -74,7 +74,7 @@ the page — resolving its id against the NEW snapshot would read as
 the page at all, :func:`apply_batch` (and :func:`dry_run_report`) check
 :func:`previously_applied` against ``wiki/_note_corrections_applied.jsonl``
 for this exact ``batch_id`` — the SAME shape
-:func:`athenaeum.corrections.previously_handed_off_correction_ids` already
+:func:`athenaeum.corrections.previously_handed_off_refs` already
 uses for its own idempotency check. A hit makes the WHOLE batch a no-op:
 every record reports disposition ``noop``, nothing is read from or written
 to any page, and no second ledger line is appended.
@@ -529,7 +529,7 @@ def previously_applied(wiki_root: Path, batch_id: str) -> bool:
     """True when *batch_id* already has a ledger line (issue athenaeum#1976
     idempotency — see the module docstring).
 
-    Mirrors :func:`athenaeum.corrections.previously_handed_off_correction_ids`:
+    Mirrors :func:`athenaeum.corrections.previously_handed_off_refs`:
     a missing ledger or an unreadable/malformed line is tolerated as "not
     yet applied" rather than raised, so a corrupted trailing ledger line
     (the one torn-write case :func:`athenaeum.store.append_line_durable`'s
