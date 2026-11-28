@@ -9,6 +9,14 @@ written to those rulings. It was reconciled with the other three federation
 notes by athenaeum#2806 (§15). No question in this note is open. The build
 slices are in §12.
 
+> **Superseded in part by [the access model](access.md) (athenaeum#3283, access epic
+> athenaeum#3282), which is planned and not yet built.** That note replaces this
+> one's authority model: the four rights become nine, a store's rights no longer
+> come from a declaration inside the store (a pusher can rewrite it), principals
+> gain proof levels and agents, and approval becomes an act accepted only on
+> local channels. Statements below marked "Superseded by docs/design/access.md"
+> describe the shipped or designed behaviour of this note, kept for history.
+
 This note decides who may read a store, who may propose to it, who compiles it,
 who answers its decisions, and how one librarian reviews another store on a
 schedule. It does **not** decide:
@@ -207,6 +215,8 @@ change.
 
 ## 5. How a store declares its rights
 
+> Superseded by docs/design/access.md: the declaration in `_store/access.yaml` is no longer authority on a receiving install. Roles become grants in the deployment's own `access:` policy, read from the configuration and never from inside a store, so a pusher cannot grant themselves rights. See [the access model](access.md) sections 4 and 9.
+
 The declaration is one file in the pages repository, `_store/access.yaml`. The
 `_` prefix follows the convention the index scan already skips for the wiki
 (`src/athenaeum/search.py:_wiki_relpath_excluded`); slice S1 pins the same skip
@@ -320,6 +330,8 @@ reported.
 
 ## 6. Naming principals and groups
 
+> Superseded by docs/design/access.md: groups come from a configured directory (static, OIDC claims, Entra, LDAP or SCIM) with a staleness bound, not from lists repeated in each store, and installations gain their own key as the device element. See [the access model](access.md) section 1.
+
 athenaeum does not become an identity store. It keeps no credentials,
 authenticates nobody and has no user lifecycle. athenaeum#710 set that rule and
 it stands.
@@ -381,6 +393,8 @@ when the store is fetched), and authorising a pair operation at the common
 ancestor of two scopes (merges never cross a store, so no pair spans two).
 
 ## 7. The compile role and the decision queue
+
+> Superseded by docs/design/access.md: answering a decision queue is the `approve` act, accepted only through a local channel (the CLI, a local stdio call, a hand edit of a queue file, or scheduled ingestion of one) and never over HTTP. The four rights here (`read`, `propose`, `compile`, `answer`) are replaced by nine, five of them acts. See [the access model](access.md) sections 3 and 8.
 
 The 2026-11-14 ruling lets each store choose who runs its librarian: a cloud
 librarian, named members, or every member. With rights there is no mode key.
@@ -885,6 +899,8 @@ as a hold, and a failure opens a decision or a correction in the store's queue
 | 9. Small mismatches | The access model does not require git; multi-writer sync does. | §11 |
 
 ## 16. One predicate for "does this principal hold this right here" (athenaeum#3167)
+
+> Superseded by docs/design/access.md (planned): `access.can` becomes a shim over `access.decide`, which evaluates grants for agents, conditions and acts and answers `not-permitted` for an unknown and a denied resource alike. This section describes the shipped predicate.
 
 `athenaeum.access.can(principal, location, right, *, config, knowledge_root)`
 answers that question for any identity key, not only the owner's. It reads the

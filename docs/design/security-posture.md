@@ -4,6 +4,17 @@ Last reviewed: 2026-05-12. Next scheduled review: **2026-08-06**.
 
 This document records the threat model and dependency-upgrade policy for `athenaeum`. Patterned after the Kromatic games-and-tools workspace posture (origin: `plinkromatic/docs/design/security-posture.md`), adapted for this repo's published-library shape.
 
+> **Superseded in part by [the access model](access.md) (athenaeum#3283, access epic athenaeum#3282).**
+> That note is the one description of how a person, an agent or an automated
+> writer is authorised to read, write or decide. It is mostly *planned*; until
+> each child lands, the text below still describes what runs today. It replaces
+> or demotes these claims: the process-wide `caller_audience` pin and "a
+> single-owner filter, not a multi-user ACL" (section 2.1); the owner-only
+> tool checks and the remote profile as the way to keep acts off HTTP
+> (section 2.1); the `principal(context)` identity provider protocol and its
+> hard-coded startup choice (section 2.7); and the vault read gate as a
+> separate decider (section 2.8). Content below is kept, not deleted.
+
 ## 1. Shape of this repo (the load-bearing fact)
 
 Athenaeum is an **open-source Python library** (Apache 2.0) published to PyPI. It is not a deployed service.
@@ -52,6 +63,8 @@ The threat model is "**library consumer drift**" — a dep that ships a subtle b
 | Intake-side secret/PII screening (athenaeum#320) | **Shipped** | `remember()`'s write path calls `athenaeum.screening.screen_intake` (`src/athenaeum/mcp_server.py:553`, screener defined at `src/athenaeum/screening.py:212`) to classify sensitive content and resolve the read-time `access:` label BEFORE the single append-only write. Opt-in via a `screening` config resolved by `athenaeum.config.resolve_screening`; `None` (default) preserves prior unscreened behavior. |
 
 ### 2.1 MCP tool audience scoping (athenaeum#312 → athenaeum#538)
+
+> **Superseded by [docs/design/access.md](access.md) (planned):** the per-process `caller_audience` pin, the owner-only write row, the remote-profile row and the closing statement that this is "a single-owner filter, **not** a multi-user ACL system" are replaced by one decider with per-principal grants. Acts (`resolve_question`, `resolve_merge`, `review_audit_item`, `set_capture_rule`) are accepted only through a local channel and never served over HTTP, and the tool listing is derived from grants. Until those children merge, this section is accurate for the shipped code.
 
 > Scope note: this section decides *who* may read what **across the 15 MCP
 > tools**. It does not, and is not meant to, establish that the MCP surface is
@@ -487,6 +500,8 @@ What this means for a store cloned from someone else:
 
 ### 2.7 Identity providers (athenaeum#3171)
 
+> **Superseded by [docs/design/access.md](access.md) (planned):** providers become plug-ins selected by `access.identity.provider`, return an identity key together with an identity proof level, and the `local` provider returns the installation identity when one exists. The startup rule below (a network server uses `oidc`, anything else `local`) and the "no group claim" and "group membership from a directory out of scope" statements are replaced by the configured provider and directory. This section describes shipped behaviour today.
+
 An access check needs the caller as a principal: an identity key, the tuple
 `models.asserter_identity_key` derives from an `asserter` block, which is what
 `access.can` takes. An `IdentityProvider` turns the context of a request into
@@ -526,6 +541,8 @@ parameter, so a caller cannot choose who it is. The created server exposes
 protocols and group membership from a directory are out of scope.
 
 ### 2.8 A read grant on the vault for a sensitive read (athenaeum#3176)
+
+> **Demoted by [docs/design/access.md](access.md) (planned):** the vault read gate becomes one grant evaluated by the single decider, and the `serve.sensitive_reads` ceiling and the built-in contact-details read policy are replaced by an explicit `contact_details:` choice in the policy. The behaviour below is what ships today.
 
 The process ceiling (`serve.sensitive_reads`) is all-or-nothing: a served
 process returns sensitive values to every allowlisted caller or to none. On a
