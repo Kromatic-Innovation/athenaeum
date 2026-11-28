@@ -6797,8 +6797,9 @@ class RunContext:
             # `starved_sources` is exported immediately above.
             self.out_run_stats["stalled_sources"] = list(self.stalled_sources)
             # Issue athenaeum#3223: the per-file fate of each file a targeted run
-            # was asked to compile (empty on every other run).
-            self.out_run_stats["file_outcomes"] = [dict(o) for o in self.file_outcomes]
+            # was asked to compile (absent on every other run, so their stats keep their shape).
+            if self.targeted:
+                self.out_run_stats["file_outcomes"] = [dict(o) for o in self.file_outcomes]
 
     def emit_run_summary(self) -> None:
         if self.summary_emitted:
@@ -7932,7 +7933,6 @@ def _arm_run_deadline(ctx: RunContext) -> None:
         ctx.out_run_stats.setdefault("beyond_window", 0)
         ctx.out_run_stats.setdefault("deferred_refs", [])
         ctx.out_run_stats.setdefault("failed_files", [])
-        ctx.out_run_stats.setdefault("file_outcomes", [])
 
 
 def _run_shape_rule_phase(ctx: RunContext) -> None:

@@ -615,7 +615,7 @@ class TestPhaseGating:
         )
         assert rc == 0
         assert calls == ["_run_wiki_dedup_phase", "_run_page_recompile_phase"]
-        assert stats["file_outcomes"] == []  # nothing recorded off a targeted run
+        assert "file_outcomes" not in stats  # a nightly run keeps its stats shape
 
 
 # ---------------------------------------------------------------------------
