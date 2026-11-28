@@ -183,6 +183,7 @@ def test_healthy_install_exits_zero_and_reports_every_check(
         "hooks",
         "key_mode",
         "search_index",
+        "index_rebuild",
         "last_compile",
         "schedule",
         "page_relations",

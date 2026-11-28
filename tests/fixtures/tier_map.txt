@@ -168,6 +168,7 @@ frontmatter_edit 0 foundation
 hook_status 5 recall
 identity_provider 3 access
 identity_resolution 5 recall
+index_rebuild_marker 2 policy
 inference_blocks 4 records
 ingestion_gate 4 records
 init 6 routines

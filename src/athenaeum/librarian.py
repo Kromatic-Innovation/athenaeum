@@ -77,6 +77,7 @@ baseline at ``[]``. Do not reintroduce a cycle.
 
 from __future__ import annotations
 
+import contextlib
 import glob as glob_mod
 import hashlib
 import json
@@ -88,7 +89,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -14634,74 +14635,290 @@ def reindex(
         knowledge_root, config
     )
 
-    if backend_name == "vector":
-        try:
-            pages = build_vector_index(
-                wiki_root,
-                resolved_cache,
-                extra_roots=extra_roots,
-                incremental=incremental,
-                include_globs=include_globs,
-                exclude_globs=exclude_globs,
-                embedding_model=resolve_embedding_model(config),
-                full_rehash_max_age_days=full_rehash_max_age_days,
-                config=config,
-            )
-        except ImportError as exc:
-            # Issue athenaeum#2592: the shipped `athenaeum.yaml` comment
-            # promises "a default install without [chromadb] degrades to
-            # fts5 at query time with one logged warning, no traceback"
-            # (config.py's `_DEFAULTS["search_backend"]` docstring, same
-            # promise restated in the generated yaml's `search_backend`
-            # comment block). `VectorBackend.query` already honors that at
-            # QUERY time (search.py) -- this is the SAME promise applied to
-            # the BUILD side, so `session_end` (the only caller of this
-            # function) succeeds on a chromadb-less install instead of
-            # raising, and actually produces the fts5 index the query-time
-            # fallback needs to find something to answer from.
-            log.warning(
-                'search_backend="vector" is configured but chromadb is not '
-                "installed (%s); falling back to the fts5 backend for this "
-                "reindex -- install the vector extra (pip install "
-                "athenaeum[vector]) for semantic search.",
-                exc,
-            )
-            backend_name = "fts5"
+    # Issue athenaeum#3320: this function owns the full rebuild that
+    # ``session_end`` refuses to run under its deadline. Track the attempt in
+    # the marker so a killed or failing rebuild is counted (and surfaced by
+    # ``athenaeum doctor``) instead of silently restarting every night.
+    with full_rebuild_tracking(
+        resolved_cache, config=config, backend=backend, incremental=incremental
+    ) as force_full:
+        build_incremental = incremental and not force_full
+        if backend_name == "vector":
+            try:
+                pages = build_vector_index(
+                    wiki_root,
+                    resolved_cache,
+                    extra_roots=extra_roots,
+                    incremental=build_incremental,
+                    include_globs=include_globs,
+                    exclude_globs=exclude_globs,
+                    embedding_model=resolve_embedding_model(config),
+                    full_rehash_max_age_days=full_rehash_max_age_days,
+                    config=config,
+                )
+            except ImportError as exc:
+                # Issue athenaeum#2592: the shipped `athenaeum.yaml` comment
+                # promises "a default install without [chromadb] degrades to
+                # fts5 at query time with one logged warning, no traceback"
+                # (config.py's `_DEFAULTS["search_backend"]` docstring, same
+                # promise restated in the generated yaml's `search_backend`
+                # comment block). `VectorBackend.query` already honors that at
+                # QUERY time (search.py) -- this is the SAME promise applied to
+                # the BUILD side, so `session_end` (the only caller of this
+                # function) succeeds on a chromadb-less install instead of
+                # raising, and actually produces the fts5 index the query-time
+                # fallback needs to find something to answer from.
+                log.warning(
+                    'search_backend="vector" is configured but chromadb is not '
+                    "installed (%s); falling back to the fts5 backend for this "
+                    "reindex -- install the vector extra (pip install "
+                    "athenaeum[vector]) for semantic search.",
+                    exc,
+                )
+                backend_name = "fts5"
+                pages = build_fts5_index(
+                    wiki_root,
+                    resolved_cache,
+                    extra_roots=extra_roots,
+                    incremental=build_incremental,
+                    include_globs=include_globs,
+                    exclude_globs=exclude_globs,
+                    full_rehash_max_age_days=full_rehash_max_age_days,
+                    config=config,
+                )
+        else:
             pages = build_fts5_index(
                 wiki_root,
                 resolved_cache,
                 extra_roots=extra_roots,
-                incremental=incremental,
+                incremental=build_incremental,
                 include_globs=include_globs,
                 exclude_globs=exclude_globs,
                 full_rehash_max_age_days=full_rehash_max_age_days,
                 config=config,
             )
-    else:
-        pages = build_fts5_index(
-            wiki_root,
-            resolved_cache,
-            extra_roots=extra_roots,
-            incremental=incremental,
-            include_globs=include_globs,
-            exclude_globs=exclude_globs,
-            full_rehash_max_age_days=full_rehash_max_age_days,
-            config=config,
+
+        # Issue athenaeum#984 (AC1 Wiring): keep the off-corpus index shard current on
+        # the SAME cadence as the main corpus index, so a caller never has to
+        # remember a second reindex step. A strict no-op when off_corpus.enabled
+        # is unset (the default) — this is the "nightly librarian run
+        # behaviourally unchanged at defaults" guarantee the Wiring AC requires;
+        # see athenaeum.off_corpus.build_off_corpus_index's docstring.
+        from athenaeum import off_corpus
+
+        off_corpus.build_off_corpus_index(
+            config, knowledge_root, resolved_cache, incremental=build_incremental
         )
 
-    # Issue athenaeum#984 (AC1 Wiring): keep the off-corpus index shard current on
-    # the SAME cadence as the main corpus index, so a caller never has to
-    # remember a second reindex step. A strict no-op when off_corpus.enabled
-    # is unset (the default) — this is the "nightly librarian run
-    # behaviourally unchanged at defaults" guarantee the Wiring AC requires;
-    # see athenaeum.off_corpus.build_off_corpus_index's docstring.
-    from athenaeum import off_corpus
+    return backend_name, pages
 
-    off_corpus.build_off_corpus_index(
-        config, knowledge_root, resolved_cache, incremental=incremental
+
+@contextlib.contextmanager
+def full_rebuild_tracking(
+    resolved_cache: Path,
+    *,
+    config: dict[str, object],
+    backend: str | None,
+    incremental: bool,
+) -> Iterator[bool]:
+    """Track a build that may be the full rebuild a session end deferred.
+
+    Issue athenaeum#3320. Wraps every build that runs with no session-end
+    deadline: :func:`reindex` (the nightly ``athenaeum run`` path) and the
+    ``athenaeum reindex`` command. On entry, if the build is a full rebuild
+    of an existing index (a marker is pending, or the index turns out not to
+    be reusable), the attempt is recorded in
+    :mod:`athenaeum.index_rebuild_marker`. If the body raises, the failure is
+    recorded and the error re-raised. If it completes, the marker is cleared,
+    because a completed build always leaves a reusable index. An attempt that
+    is killed outright records nothing here; the next attempt counts it.
+
+    Yields ``force_full``: True when an earlier attempt never finished, in
+    which case the caller must build with ``incremental=False`` (see
+    :func:`_start_tracked_full_rebuild`).
+
+    Marker I/O never raises out of this manager: the marker is advisory, and
+    must neither block a rebuild nor mask the build's own error.
+    """
+    from athenaeum import index_rebuild_marker
+
+    tracked, force_full = _start_tracked_full_rebuild(
+        resolved_cache, config=config, backend=backend, incremental=incremental
+    )
+    try:
+        yield force_full
+    except Exception as exc:
+        if tracked:
+            try:
+                index_rebuild_marker.record_attempt_failed(
+                    resolved_cache, f"{type(exc).__name__}: {exc}"
+                )
+            except Exception:  # never mask the build's own error
+                log.warning("reindex: could not record the failed attempt", exc_info=True)
+        raise
+    try:
+        if index_rebuild_marker.clear(resolved_cache):
+            log.info("reindex: full rebuild complete; cleared the rebuild-required marker")
+    except OSError:
+        log.warning("reindex: could not clear the rebuild-required marker", exc_info=True)
+
+
+def _start_tracked_full_rebuild(
+    resolved_cache: Path,
+    *,
+    config: dict[str, object],
+    backend: str | None,
+    incremental: bool,
+) -> tuple[bool, bool]:
+    """Record a full-rebuild attempt in the marker, if this build is one.
+
+    A build is tracked when a marker already says a full rebuild is owed, or
+    when an incremental build is about to discover the index is not reusable
+    and rebuild it from scratch anyway. Returns ``(tracked, force_full)``.
+    Never raises: the marker is advisory and must not stop a rebuild.
+
+    ``force_full`` is True when an earlier attempt never finished. A killed
+    rebuild can leave a partial index under a manifest that still reads as
+    reusable: the vector build recreates its collection dir before it
+    re-embeds, and writes the manifest last. An incremental diff against that
+    manifest finds nothing to do and would leave the index partial, so the
+    build must run full.
+    """
+    from athenaeum import index_rebuild_marker
+
+    try:
+        existing = index_rebuild_marker.read_marker(resolved_cache)
+        found = (
+            _full_rebuild_blocker(resolved_cache, config=config, backend=backend)
+            if incremental
+            else None
+        )
+        if existing is None and found is None:
+            return False, False
+        force_full = (
+            incremental
+            and existing is not None
+            and existing.attempt_started_at is not None
+        )
+        backend_name, reason = found if found is not None else ("", "")
+        if not reason and not incremental:
+            reason = "full reindex requested"
+        marker = index_rebuild_marker.record_attempt_started(
+            resolved_cache, reason=reason, backend=backend_name
+        )
+    except Exception:  # tracking must never block the rebuild
+        log.warning("reindex: could not record the full-rebuild attempt", exc_info=True)
+        return False, False
+    log.info(
+        "reindex: running the full rebuild (%s); attempt %d%s",
+        marker.reason,
+        marker.attempts,
+        " (forced full: the previous attempt did not finish)" if force_full else "",
+    )
+    return True, force_full
+
+
+def _index_reuse_state(
+    cache_dir: Path | None,
+    *,
+    config: dict[str, object],
+    backend: str | None,
+) -> tuple[Path, str, dict[str, Any] | None, str | None]:
+    """Resolve the index :func:`reindex` would build and whether it is reusable.
+
+    Returns ``(resolved_cache, backend_name, stored_manifest, blocker)``.
+    ``blocker`` is the backend's own ``incremental_reuse_blocker`` answer:
+    ``None`` when the on-disk index can be updated incrementally, otherwise
+    the reason the build will rebuild it from scratch. Cheap by contract: no
+    chromadb, no embedding model, one manifest read and a ``stat``.
+
+    Shared by :func:`_reindex_would_change` (the staleness preview),
+    :func:`session_end` (which refuses to run a full rebuild under its
+    deadline, issue athenaeum#3320) and :func:`reindex` (which tracks the
+    full rebuild it owns), so all three agree about what "not reusable" means.
+    """
+    import importlib.util
+
+    from athenaeum.config import resolve_embedding_model
+    from athenaeum.search import (
+        _FTS5_MANIFEST,
+        _VECTOR_MANIFEST,
+        _load_manifest,
+        get_backend,
     )
 
-    return backend_name, pages
+    resolved_cache = _resolve_cache_dir(cache_dir)
+    # Issue athenaeum#2458: one resolution rule, `resolve_search_backend`
+    # (yaml > shipped default) — the old inline `fts5` fallback fired for
+    # every library caller that hand-built a config dict.
+    backend_name = backend or resolve_search_backend(config)
+    # Issue athenaeum#2592: `reindex()` degrades a configured `vector`
+    # backend to `fts5` when chromadb is not installed (the same promise
+    # the generated `athenaeum.yaml`'s `search_backend` comment makes), and
+    # the manifest it writes afterward is the `fts5` one -- never the
+    # `vector` one, which never exists on that install. This preview MUST
+    # mirror that same fallback decision before picking which manifest to
+    # diff against, or it always diffs against a vector manifest that will
+    # never exist, always reports "changed", and `session_end` never takes
+    # the athenaeum#1456 idle fast path on a chromadb-free install: a
+    # silent, permanent "reindex on every tick" regression, not a crash,
+    # so no pre-existing test caught it (measured: three consecutive
+    # `session_end` calls against an unchanged corpus all redid the full
+    # reindex instead of short-circuiting).
+    #
+    # `importlib.util.find_spec` -- not `import chromadb` -- answers
+    # "would `VectorBackend._get_chromadb()` succeed" without this cheap
+    # preview paying the one cost its own docstring promises it never
+    # pays: it must not itself import chromadb or load an embedding model.
+    # `find_spec` only resolves the module's location; it does not execute
+    # chromadb's `__init__.py` (which is where the real cost -- and the
+    # real `ImportError` -- would come from).
+    if backend_name == "vector" and importlib.util.find_spec("chromadb") is None:
+        backend_name = "fts5"
+    manifest_name = _VECTOR_MANIFEST if backend_name == "vector" else _FTS5_MANIFEST
+    manifest_path = resolved_cache / manifest_name
+    stored = _load_manifest(manifest_path)
+    # MUST mirror what ``reindex`` -> ``build_*_index`` constructs, or the
+    # embedding-model blocker compares against the wrong model.
+    #
+    # Note the ``"fts5"`` literal in the else branch — NOT ``backend_name``.
+    # ``reindex`` is ``if backend_name == "vector": build_vector_index(...)
+    # else: build_fts5_index(...)``, so EVERY non-``vector`` name (including
+    # ``keyword``, and any typo) builds an FTS5 index. Asking
+    # ``get_backend(backend_name)`` here would hand back ``KeywordBackend``
+    # under ``search_backend: keyword``, whose blocker is unconditionally
+    # ``None`` because *it* persists nothing — true of that class, false of
+    # what ``reindex`` actually built. athenaeum#1459 would then survive
+    # verbatim under that config. This mirrors ``manifest_name`` above, which
+    # already resolves the same two-way split correctly.
+    backend_obj = (
+        get_backend("vector", embedding_model=resolve_embedding_model(config))
+        if backend_name == "vector"
+        else get_backend("fts5")
+    )
+    blocker = backend_obj.incremental_reuse_blocker(resolved_cache, stored)
+    return resolved_cache, backend_name, stored, blocker
+
+
+def _full_rebuild_blocker(
+    cache_dir: Path | None,
+    *,
+    config: dict[str, object],
+    backend: str | None,
+) -> tuple[str, str] | None:
+    """``(backend_name, reason)`` when an EXISTING index needs a full rebuild.
+
+    ``None`` when the index is reusable, and also when there is no index
+    manifest at all: a first build is not a rebuild of an index recall is
+    already serving from, and :func:`session_end` keeps building it
+    (issue athenaeum#3320 scopes the deferral to an index that exists).
+    """
+    _cache, backend_name, stored, blocker = _index_reuse_state(
+        cache_dir, config=config, backend=backend
+    )
+    if blocker is None or stored is None:
+        return None
+    return backend_name, blocker
 
 
 def _reindex_would_change(
@@ -14755,80 +14972,25 @@ def _reindex_would_change(
     written (``reindex`` writes ``fts5``'s instead), always reports a
     pending change, and the athenaeum#1456 idle fast path never fires.
     """
-    import importlib.util
-
     from athenaeum.config import (
-        resolve_embedding_model,
         resolve_index_globs,
         resolve_reindex_full_rehash_max_age_days,
     )
     from athenaeum.search import (
-        _FTS5_MANIFEST,
-        _VECTOR_MANIFEST,
         _compute_delta,
         _full_rehash_due,
-        _load_manifest,
         _manifest_hashes,
         _scan_indexed_records,
         _scan_prior,
-        get_backend,
     )
 
     if not wiki_root.is_dir():
         return None
-    resolved_cache = _resolve_cache_dir(cache_dir)
-    # Issue athenaeum#2458: one resolution rule, `resolve_search_backend`
-    # (yaml > shipped default) — the old inline `fts5` fallback fired for
-    # every library caller that hand-built a config dict.
-    backend_name = backend or resolve_search_backend(config)
-    # Issue athenaeum#2592: `reindex()` degrades a configured `vector`
-    # backend to `fts5` when chromadb is not installed (the same promise
-    # the generated `athenaeum.yaml`'s `search_backend` comment makes), and
-    # the manifest it writes afterward is the `fts5` one -- never the
-    # `vector` one, which never exists on that install. This preview MUST
-    # mirror that same fallback decision before picking which manifest to
-    # diff against, or it always diffs against a vector manifest that will
-    # never exist, always reports "changed", and `session_end` never takes
-    # the athenaeum#1456 idle fast path on a chromadb-free install: a
-    # silent, permanent "reindex on every tick" regression, not a crash,
-    # so no pre-existing test caught it (measured: three consecutive
-    # `session_end` calls against an unchanged corpus all redid the full
-    # reindex instead of short-circuiting).
-    #
-    # `importlib.util.find_spec` -- not `import chromadb` -- answers
-    # "would `VectorBackend._get_chromadb()` succeed" without this cheap
-    # preview paying the one cost its own docstring promises it never
-    # pays: it must not itself import chromadb or load an embedding model.
-    # `find_spec` only resolves the module's location; it does not execute
-    # chromadb's `__init__.py` (which is where the real cost -- and the
-    # real `ImportError` -- would come from).
-    if backend_name == "vector" and importlib.util.find_spec("chromadb") is None:
-        backend_name = "fts5"
-    manifest_name = _VECTOR_MANIFEST if backend_name == "vector" else _FTS5_MANIFEST
-    manifest_path = resolved_cache / manifest_name
+    resolved_cache, backend_name, stored, blocker = _index_reuse_state(
+        cache_dir, config=config, backend=backend
+    )
     extra_roots = resolve_indexed_surfaces(knowledge_root, config)
     include_globs, exclude_globs = resolve_index_globs(config)
-
-    stored = _load_manifest(manifest_path)
-    # MUST mirror what ``reindex`` -> ``build_*_index`` constructs, or the
-    # embedding-model blocker compares against the wrong model.
-    #
-    # Note the ``"fts5"`` literal in the else branch — NOT ``backend_name``.
-    # ``reindex`` is ``if backend_name == "vector": build_vector_index(...)
-    # else: build_fts5_index(...)``, so EVERY non-``vector`` name (including
-    # ``keyword``, and any typo) builds an FTS5 index. Asking
-    # ``get_backend(backend_name)`` here would hand back ``KeywordBackend``
-    # under ``search_backend: keyword``, whose blocker is unconditionally
-    # ``None`` because *it* persists nothing — true of that class, false of
-    # what ``reindex`` actually built. athenaeum#1459 would then survive
-    # verbatim under that config. This mirrors ``manifest_name`` above, which
-    # already resolves the same two-way split correctly.
-    backend_obj = (
-        get_backend("vector", embedding_model=resolve_embedding_model(config))
-        if backend_name == "vector"
-        else get_backend("fts5")
-    )
-    blocker = backend_obj.incremental_reuse_blocker(resolved_cache, stored)
     if blocker is not None and stored is not None:
         # The build will refuse to reuse this index (athenaeum#1459) and rebuild it
         # from scratch, so preview it the way the build will see it: with no
@@ -14949,6 +15111,10 @@ class SessionEndResult:
     # an otherwise-successful SessionEnd (same non-destructive discipline as
     # every other push_metrics call site in this function).
     liveness: object | None = None
+    # Issue athenaeum#3320: the reason the index needs a FULL rebuild, when
+    # this session end found one owed and skipped the reindex instead of
+    # running it under the session-end deadline. ``None`` otherwise.
+    full_rebuild_deferred: str | None = None
 
     @property
     def exit_code(self) -> int:
@@ -14974,6 +15140,12 @@ class SessionEndResult:
                 data["reindex_would_change_note"] = (
                     "not computed (no index manifest / wiki); " "chromadb not opened"
                 )
+        if self.full_rebuild_deferred is not None:
+            data["full_rebuild_required"] = {
+                "reason": self.full_rebuild_deferred,
+                "deferred": True,
+                "owner": "nightly `athenaeum run`, or `athenaeum reindex`",
+            }
         if self.session is not None:
             data["session"] = self.session
         if self.liveness is not None:
@@ -15015,12 +15187,17 @@ def session_end(
        athenaeum#3042); the failure's exit code is unchanged. A ``dry_run``
        never touches the index.
 
-    Note the precision: the staleness arm compares *manifest hashes*, which is
-    narrower than "the index is stale". It does NOT notice a deleted index file
-    whose manifest survived, a changed ``embedding_model``, or a rolled
-    metadata-schema version — all of which :func:`reindex` itself treats as
-    invalidating. Those remain under-reindex gaps (not regressions: before
-    athenaeum#1456 an idle tick reindexed *never*), tracked separately.
+    **Never a full rebuild** (issue athenaeum#3320). When the existing index
+    cannot be reused — a deleted index file whose manifest survived, a changed
+    ``embedding_model``, a rolled metadata-schema version — the reindex that
+    would follow re-embeds the whole corpus, which on a large wiki cannot
+    finish inside the SessionEnd deadline. So neither arm runs it: the
+    session end records the :mod:`athenaeum.index_rebuild_marker` marker,
+    skips the reindex, and reports ``full_rebuild_required`` in its summary.
+    The full rebuild belongs to :func:`reindex` run with no session deadline
+    (the nightly ``athenaeum run``, or ``athenaeum reindex``), which clears
+    the marker when it completes. A first build (no index manifest at all)
+    still happens here, and ``incremental=False`` still forces a full rebuild.
 
     The staleness arm exists because ingest and the index keep **separate**
     manifests. A raw file ingest has already recorded is ``new_or_changed: 0``
@@ -15085,6 +15262,25 @@ def session_end(
     compile_failed = ingest_result.exit_code != 0
     compile_ran = not ingest_result.noop and not compile_failed
     gate_open = not dry_run
+    # Issue athenaeum#3320: never run a FULL rebuild under the session-end
+    # deadline. When the existing index cannot be reused (a metadata-schema
+    # roll, an embedding-model swap, a missing index file), the rebuild that
+    # follows re-embeds the whole corpus, and on a large wiki that cannot
+    # finish before the SessionEnd wrapper kills it. Every later close then
+    # started it again from scratch. Instead: record the marker, skip the
+    # reindex (recall keeps serving from the index it has), and return. The
+    # nightly `athenaeum run` or an explicit `athenaeum reindex` owns the
+    # rebuild and clears the marker. Both compile arms are covered: a
+    # compile that ran would otherwise reindex unconditionally, straight
+    # into the same full rebuild. `incremental=False` is the operator's
+    # explicit full-rebuild escape hatch and is left alone.
+    full_rebuild_deferred: str | None = None
+    if gate_open and incremental:
+        full_rebuild_deferred = _defer_full_rebuild_if_required(
+            cache_dir, config=config, backend=backend
+        )
+        if full_rebuild_deferred is not None:
+            gate_open = False
     should_reindex = gate_open and compile_ran
     if gate_open and not compile_ran:
         reindex_would_change = _reindex_would_change(
@@ -15229,4 +15425,67 @@ def session_end(
         dry_run=dry_run,
         reindex_would_change=reindex_would_change,
         liveness=liveness,
+        full_rebuild_deferred=full_rebuild_deferred,
     )
+
+
+def _defer_full_rebuild_if_required(
+    cache_dir: Path | None,
+    *,
+    config: dict[str, object],
+    backend: str | None,
+) -> str | None:
+    """Record the rebuild marker and return the reason if one is required.
+
+    Returns ``None`` when the index can be updated incrementally (or there is
+    no index yet). In that case a marker left over from an earlier deferral
+    is stale, because something already rebuilt the index, so it is cleared.
+    Marker I/O failures are logged, never raised: the deferral itself (not
+    running the rebuild) is what keeps the session end fast.
+    """
+    from athenaeum import index_rebuild_marker
+
+    resolved_cache, backend_name, stored, blocker = _index_reuse_state(
+        cache_dir, config=config, backend=backend
+    )
+    if stored is None:
+        return None
+    if blocker is None:
+        # A marker whose last attempt never finished: the rebuild was killed
+        # part-way, and the manifest it left can read as reusable over a
+        # partial index. It is still owed, so keep deferring it.
+        pending = index_rebuild_marker.read_marker(resolved_cache)
+        if pending is not None and pending.attempt_started_at is not None:
+            blocker = (
+                "an earlier full rebuild did not finish "
+                f"(started {pending.attempt_started_at}); the index may be incomplete"
+            )
+    if blocker is None:
+        try:
+            if index_rebuild_marker.clear(resolved_cache):
+                log.info(
+                    "session-end: index at %s is reusable again; cleared the "
+                    "rebuild-required marker",
+                    resolved_cache,
+                )
+        except OSError:
+            log.warning("session-end: could not clear a stale rebuild marker", exc_info=True)
+        return None
+    summary = f"{blocker}"
+    try:
+        marker = index_rebuild_marker.record_deferred(
+            resolved_cache, reason=blocker, backend=backend_name
+        )
+        summary = index_rebuild_marker.describe(marker)
+    except OSError:
+        log.warning("session-end: could not record the rebuild marker", exc_info=True)
+    log.warning(
+        "session-end: index at %s is not reusable (%s); a full rebuild is "
+        "required and session end does not run one (issue athenaeum#3320). "
+        "Skipping the reindex: recall keeps using the existing index until "
+        "the nightly `athenaeum run` or `athenaeum reindex` rebuilds it. %s",
+        resolved_cache,
+        blocker,
+        summary,
+    )
+    return blocker

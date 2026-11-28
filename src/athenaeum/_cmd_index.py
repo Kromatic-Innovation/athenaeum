@@ -21,6 +21,7 @@ cost down.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -607,76 +608,96 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     lock = _acquire_or_exit(knowledge_root, args, cfg)
     if isinstance(lock, int):
         return lock
+    # Issue athenaeum#3320: this command is one of the two owners of the full
+    # rebuild a session end defers (the other is the nightly `run`), so it
+    # records the attempt and clears the marker when the build completes. An
+    # as-of build is a historical snapshot, not the current index, and an
+    # unknown backend builds nothing, so neither is tracked.
+    from athenaeum.librarian import full_rebuild_tracking
+
+    tracking: contextlib.AbstractContextManager[bool | None] = (
+        full_rebuild_tracking(cache_dir, config=cfg, backend=backend, incremental=incremental)
+        if as_of is None and backend in ("vector", "fts5")
+        else contextlib.nullcontext()
+    )
     try:
-        if backend == "vector":
-            try:
-                count = build_vector_index(
+        with tracking as force_full:
+            if force_full:
+                # The previous tracked attempt never finished, so the index may
+                # be partial under a manifest that reads as reusable.
+                incremental = False
+                mode = "full"
+            if backend == "vector":
+                try:
+                    count = build_vector_index(
+                        wiki_root,
+                        cache_dir,
+                        extra_roots=extra_roots,
+                        incremental=incremental,
+                        include_globs=include_globs,
+                        exclude_globs=exclude_globs,
+                        embedding_model=embedding_model,
+                        as_of=as_of,
+                        full_rehash_max_age_days=full_rehash_max_age_days,
+                        config=cfg,
+                    )
+                except ImportError as exc:
+                    # Issue athenaeum#2592: the shipped `athenaeum.yaml` comment
+                    # promises "a default install without [chromadb] degrades to
+                    # fts5 at query time with one logged warning, no traceback"
+                    # (config.py's `_DEFAULTS["search_backend"]` docstring, same
+                    # promise restated in the generated yaml's `search_backend`
+                    # comment block). `VectorBackend.query` already honors that
+                    # at QUERY time (search.py) -- `reindex` must honor it too,
+                    # or a fresh install that only ever gets as far as the README
+                    # quick start never builds any index at all for the
+                    # query-time fallback to read. Degrade to fts5 here, loud
+                    # (never silent) and successful, instead of erroring.
+                    print(
+                        f'[warn] search_backend="vector" is configured but '
+                        f"chromadb is not installed ({exc}); falling back to "
+                        "the fts5 backend for this reindex -- install the "
+                        "vector extra (pip install athenaeum[vector]) for "
+                        "semantic search.",
+                        file=sys.stderr,
+                    )
+                    backend = "fts5"
+                else:
+                    print(
+                        f"Vector index rebuilt{as_of_note} ({mode}): {count} pages "
+                        f"(wiki + {len(extra_roots)} extra root(s))"
+                    )
+                    _rebuild_off_corpus_index_if_live(
+                        cfg, knowledge_root, cache_dir, as_of, incremental
+                    )
+                    _reindex_summary(command, backend, mode, count, t0, 0)
+                    return 0
+
+            if backend == "fts5":
+                count = build_fts5_index(
                     wiki_root,
                     cache_dir,
                     extra_roots=extra_roots,
                     incremental=incremental,
                     include_globs=include_globs,
                     exclude_globs=exclude_globs,
-                    embedding_model=embedding_model,
                     as_of=as_of,
                     full_rehash_max_age_days=full_rehash_max_age_days,
                     config=cfg,
                 )
-            except ImportError as exc:
-                # Issue athenaeum#2592: the shipped `athenaeum.yaml` comment
-                # promises "a default install without [chromadb] degrades to
-                # fts5 at query time with one logged warning, no traceback"
-                # (config.py's `_DEFAULTS["search_backend"]` docstring, same
-                # promise restated in the generated yaml's `search_backend`
-                # comment block). `VectorBackend.query` already honors that
-                # at QUERY time (search.py) -- `reindex` must honor it too,
-                # or a fresh install that only ever gets as far as the README
-                # quick start never builds any index at all for the
-                # query-time fallback to read. Degrade to fts5 here, loud
-                # (never silent) and successful, instead of erroring.
-                print(
-                    f'[warn] search_backend="vector" is configured but '
-                    f"chromadb is not installed ({exc}); falling back to "
-                    "the fts5 backend for this reindex -- install the "
-                    "vector extra (pip install athenaeum[vector]) for "
-                    "semantic search.",
-                    file=sys.stderr,
-                )
-                backend = "fts5"
-            else:
-                print(
-                    f"Vector index rebuilt{as_of_note} ({mode}): {count} pages "
-                    f"(wiki + {len(extra_roots)} extra root(s))"
-                )
                 _rebuild_off_corpus_index_if_live(
                     cfg, knowledge_root, cache_dir, as_of, incremental
+                )
+                print(
+                    f"FTS5 index rebuilt{as_of_note} ({mode}): {count} pages "
+                    f"(wiki + {len(extra_roots)} extra root(s))"
                 )
                 _reindex_summary(command, backend, mode, count, t0, 0)
                 return 0
 
-        if backend == "fts5":
-            count = build_fts5_index(
-                wiki_root,
-                cache_dir,
-                extra_roots=extra_roots,
-                incremental=incremental,
-                include_globs=include_globs,
-                exclude_globs=exclude_globs,
-                as_of=as_of,
-                full_rehash_max_age_days=full_rehash_max_age_days,
-                config=cfg,
-            )
-            _rebuild_off_corpus_index_if_live(cfg, knowledge_root, cache_dir, as_of, incremental)
-            print(
-                f"FTS5 index rebuilt{as_of_note} ({mode}): {count} pages "
-                f"(wiki + {len(extra_roots)} extra root(s))"
-            )
-            _reindex_summary(command, backend, mode, count, t0, 0)
-            return 0
-
-        print(f"Unknown search backend: {backend}", file=sys.stderr)
-        _reindex_summary(command, backend, mode, 0, t0, 1)
-        return 1
+            print(f"Unknown search backend: {backend}", file=sys.stderr)
+            _reindex_summary(command, backend, mode, 0, t0, 1)
+            return 1
     finally:
         lock.release()
 
