@@ -111,6 +111,7 @@ claim_kind 6 routines
 claude_code_adapter 8 surfaces
 cli 8 surfaces
 cli_tool_bridge 3 provider
+clock 0 foundation
 cluster_comparator 6 routines
 clusters 4 records
 codex_adapter 8 surfaces

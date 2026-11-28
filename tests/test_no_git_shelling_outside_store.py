@@ -37,17 +37,20 @@ sites in this slice would be scope well beyond S3's own Plan and the
 "ADDITIVE and minimal" edit-scope this lane was briefed under — so this test
 enforces the part of AC6 that IS this slice's job (the snapshot primitive
 specifically does not get duplicated) as a hard, zero-tolerance assertion, and
-tracks the rest as an explicit, monotonically-shrinking baseline: a count
-going DOWN (a future slice migrates a module fully) is welcome and just needs
-the baseline edited down; a count going UP, or an unlisted module appearing,
-is the regression this guard exists to catch — a NEW git-shelling site landed
+tracks the rest as an explicit ceiling: a count going DOWN (a future slice
+migrates a module fully) needs no edit here (athenaeum#3231); a count going
+UP, or an unlisted module appearing, is the regression this guard exists to
+catch — a NEW git-shelling site landed
 outside ``FilesystemStore`` without going through it.
 """
 
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
+
+import pytest
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "athenaeum"
 
@@ -177,12 +180,8 @@ def test_git_snapshot_is_not_redefined_or_duplicated_outside_the_store() -> None
             )
 
 
-def test_git_argv_sites_outside_store_do_not_exceed_the_pinned_baseline() -> None:
-    """The remaining knowledge-store git-argv sites (everything except the
-    now-migrated snapshot primitive, checked separately above, and
-    athenaeum's-own-repo git usage, a different tree entirely) do not exceed
-    the pinned baseline. See the module docstring for what "baseline, not
-    zero" means here and why."""
+def _git_argv_counts() -> dict[str, int]:
+    """``{module_stem: count}`` of knowledge-store git-argv sites outside the store."""
     found: dict[str, int] = {}
     for path in sorted(SRC.glob("*.py")):
         module = path.stem
@@ -191,13 +190,69 @@ def test_git_argv_sites_outside_store_do_not_exceed_the_pinned_baseline() -> Non
         count = len(_git_argv_lines(path))
         if count:
             found[module] = count
+    return found
 
-    assert found == KNOWN_GIT_ARGV_MODULES, (
-        "knowledge-store git-argv call sites outside FilesystemStore "
-        f"changed.\nfound={found}\nbaseline={KNOWN_GIT_ARGV_MODULES}\n"
-        "A count going DOWN (a module fully migrated onto athenaeum.store) "
-        "is welcome — lower the baseline to match. A count going UP, or an "
-        "unlisted module appearing, is a regression: a NEW git-shelling "
-        "site landed outside athenaeum.store.FilesystemStore (design note "
-        "§4.4) without an accompanying store primitive to route it through."
+
+def _baseline_violations(found: dict[str, int], baseline: dict[str, int]) -> list[str]:
+    """What in ``found`` breaks the ceiling ``baseline``.
+
+    A module above its baseline count, or a module outside the baseline, is a
+    violation. A count below the baseline, or a baseline module with no site
+    left, is not: removing a git call needs no edit here (athenaeum#3231).
+    """
+    violations = []
+    for module, count in sorted(found.items()):
+        if module not in baseline:
+            violations.append(f"{module}: {count} git-argv site(s), not in the baseline")
+        elif count > baseline[module]:
+            violations.append(f"{module}: {count} git-argv site(s), baseline {baseline[module]}")
+    return violations
+
+
+def test_git_argv_sites_outside_store_do_not_exceed_the_pinned_baseline() -> None:
+    """The remaining knowledge-store git-argv sites (everything except the
+    now-migrated snapshot primitive, checked separately above, and
+    athenaeum's-own-repo git usage, a different tree entirely) do not exceed
+    the pinned baseline. See the module docstring for what "baseline, not
+    zero" means here and why."""
+    violations = _baseline_violations(_git_argv_counts(), KNOWN_GIT_ARGV_MODULES)
+    assert not violations, (
+        "knowledge-store git-argv call sites outside FilesystemStore grew:\n  "
+        + "\n  ".join(violations)
+        + "\nA NEW git-shelling site landed outside athenaeum.store.FilesystemStore "
+        "(design note §4.4) without an accompanying store primitive to route it "
+        "through. A count going DOWN needs no edit to KNOWN_GIT_ARGV_MODULES."
     )
+
+
+def test_a_baseline_module_with_fewer_sites_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A git call removed from a baseline module needs no baseline edit."""
+    real = _git_argv_lines
+
+    def fewer(path: Path) -> list[int]:
+        lines = real(path)
+        return lines[:-1] if path.stem == "init" else lines
+
+    monkeypatch.setattr(sys.modules[__name__], "_git_argv_lines", fewer)
+    found = _git_argv_counts()
+    assert found["init"] == KNOWN_GIT_ARGV_MODULES["init"] - 1
+    assert _baseline_violations(found, KNOWN_GIT_ARGV_MODULES) == []
+
+
+def test_a_new_module_with_a_git_literal_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A module outside the baseline that gains a git-argv literal fails."""
+    real = _git_argv_lines
+
+    def with_new_site(path: Path) -> list[int]:
+        return [1] if path.stem == "clock" else real(path)
+
+    monkeypatch.setattr(sys.modules[__name__], "_git_argv_lines", with_new_site)
+    assert _baseline_violations(_git_argv_counts(), KNOWN_GIT_ARGV_MODULES) == [
+        "clock: 1 git-argv site(s), not in the baseline"
+    ]
+
+
+def test_a_baseline_module_above_its_count_fails() -> None:
+    assert _baseline_violations({"rules": 2}, {"rules": 1}) == [
+        "rules: 2 git-argv site(s), baseline 1"
+    ]

@@ -160,6 +160,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.config import (
     resolve_page_recompile_merge_near_duplicates,
     resolve_page_recompile_min_parent_chars,
@@ -243,7 +244,6 @@ from athenaeum.storage import (
     resolve_locator_surfaces,
     vault_for_path,
 )
-from athenaeum.store import now_iso
 from athenaeum.store_links import admit_page_write
 
 log = logging.getLogger(__name__)

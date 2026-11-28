@@ -2158,7 +2158,7 @@ class TestSessionEndQuiesceGuard:
         import athenaeum._cmd_index as cmd_index
         import athenaeum.librarian as lib
         from athenaeum import quiesce
-        from athenaeum.store import now_iso
+        from athenaeum.clock import now_iso
 
         root = tmp_path / "kb"
         root.mkdir()

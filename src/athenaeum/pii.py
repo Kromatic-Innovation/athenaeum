@@ -183,6 +183,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.footnote_markers import parse_footnote_definitions
 from athenaeum.models import (
     FOLDED_INTO_FIELD,
@@ -204,7 +205,7 @@ from athenaeum.storage import (
     vault_page_roots,
     vault_route_for_page_type,
 )
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

@@ -40,8 +40,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from athenaeum.clock import now_iso
 from athenaeum.models import asserter_identity_key
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 from athenaeum.store_access import (
     Review,
     StoreDeclaration,

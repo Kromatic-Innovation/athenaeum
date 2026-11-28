@@ -64,7 +64,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.clock import now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

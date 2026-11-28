@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.store import now_iso
+from athenaeum.clock import now_iso
 
 log = logging.getLogger(__name__)
 

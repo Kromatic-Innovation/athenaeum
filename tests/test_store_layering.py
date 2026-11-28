@@ -35,7 +35,7 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src" / "athenaeum"
 
 # Modules athenaeum.store may import from, beyond the standard library.
-_ALLOWED_ATHENAEUM_IMPORTS = {"athenaeum.atomic_io", "athenaeum.models"}
+_ALLOWED_ATHENAEUM_IMPORTS = {"athenaeum.atomic_io", "athenaeum.clock", "athenaeum.models"}
 
 # Third-party packages that would drag heavy deps into the seam.
 _FORBIDDEN_THIRD_PARTY = {"pydantic", "anthropic", "chromadb", "fastmcp", "numpy"}

@@ -14,7 +14,6 @@
 [upward]
 asserter_authority -> config
 audit -> batch
-audit_log -> store
 clusters -> search
 config -> dimensions
 config -> screening
@@ -28,8 +27,6 @@ fingerprint -> search
 ingestion_gate -> push_metrics
 intake -> runlock
 intake -> storage
-live_session_guard -> store
-never_ingest -> store
 off_corpus -> search
 ordinary_night_table -> librarian
 person_hints -> identity_resolution
@@ -37,11 +34,8 @@ pii -> entity_index_cache
 pii -> storage
 pii -> store
 provenance -> store
-push_state -> store
-quiesce -> store
 raise_provenance -> storage
 receipt_sealers -> store
-recovery_yield -> store
 retire_pages -> librarian
 run_summary_log -> store
 schema_migrate -> storage
@@ -56,7 +50,6 @@ store_links -> store
 store_reviews -> store
 store_reviews -> store_rights
 structured_upsert -> storage
-stuck_ledger -> store
 transcript_receipts -> runlock
 transcript_receipts -> store
 uid_collision_lint -> storage
@@ -64,7 +57,6 @@ verdicts -> off_corpus
 verdicts -> runlock
 verdicts -> store
 wiki_write_guard -> store
-zero_yield -> store
 
 [seam-to-seam]
 storage -> store_rights

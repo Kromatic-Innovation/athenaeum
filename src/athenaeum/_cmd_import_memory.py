@@ -889,7 +889,7 @@ def run_import(
             )
             return EXIT_INCOMPLETE
 
-        from athenaeum.store import now_iso
+        from athenaeum.clock import now_iso
 
         # exit_code == 0 means the compile call succeeded overall — it does
         # NOT mean every staged file in this batch was actually compiled.

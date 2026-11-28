@@ -84,8 +84,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.config import resolve_cache_dir
-from athenaeum.store import now_iso
 
 #: Schema version stamped on the sample worksheet, the label file, and the
 #: score report written by this module. Independent of

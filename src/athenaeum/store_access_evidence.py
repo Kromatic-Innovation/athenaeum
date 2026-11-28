@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.config import resolve_cache_dir
-from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 

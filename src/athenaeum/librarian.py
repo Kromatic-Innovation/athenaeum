@@ -114,6 +114,7 @@ from athenaeum.bounce_contract import (
     check_tier0_bounce_verdict_conformance,
 )
 from athenaeum.bounce_join import WIKI_BOUNCED_FIELD
+from athenaeum.clock import now_iso
 from athenaeum.clusters import (
     EMBEDDER_CHROMADB_DEFAULT,
     EMBEDDER_FALLBACK_HASHING,
@@ -336,7 +337,7 @@ from athenaeum.storage import (
     target_root,
     vault_page_counts,
 )
-from athenaeum.store import FilesystemStore, now_iso  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
+from athenaeum.store import FilesystemStore  # noqa: F401 — FilesystemStore kept importable: existing tests patch librarian.FilesystemStore (athenaeum#2614)
 from athenaeum.store_access_evidence import record_fetch, record_push
 from athenaeum.store_links import admit_page_write
 from athenaeum.structured_upsert import (

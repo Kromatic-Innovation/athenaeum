@@ -554,7 +554,7 @@ class TestMixedV4V5Ledger:
     ) -> None:
         v4 = _v4_rows()
         # Fresh timestamps so --since keeps every row.
-        from athenaeum.store import now_iso
+        from athenaeum.clock import now_iso
 
         stamp = now_iso()
         for row in v4:

@@ -155,9 +155,9 @@ from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
 
+from athenaeum.clock import now_iso
 from athenaeum.models import _rates_for_model, model_has_price
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
-from athenaeum.store import now_iso
 from tests.evals.containment import ResultStore
 from tests.evals.north_star_cli import DEFAULT_PROBES
 from tests.evals.north_star_report import (

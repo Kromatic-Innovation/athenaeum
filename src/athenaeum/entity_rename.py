@@ -58,10 +58,11 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.entity_index_cache import locate_entity_page
 from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
 from athenaeum.storage import require_writable_paths
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

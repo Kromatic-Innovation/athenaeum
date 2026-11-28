@@ -112,6 +112,7 @@ from typing import Any, Collection
 import yaml
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.config import (
     resolve_cache_dir,
     resolve_retention_pack_overrides,
@@ -119,7 +120,7 @@ from athenaeum.config import (
 )
 from athenaeum.models import slugify
 from athenaeum.provenance import SourceRef, parse_source
-from athenaeum.store import append_line_durable, commit_paths, now_iso
+from athenaeum.store import append_line_durable, commit_paths
 
 log = logging.getLogger(__name__)
 

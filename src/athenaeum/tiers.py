@@ -8696,7 +8696,7 @@ def collapse_oversize_escalation_duplicates(pending_path: Path) -> int:
         return 0
 
     from athenaeum.answers import _parse_block, _render_archive_block, _split_blocks
-    from athenaeum.store import now_iso
+    from athenaeum.clock import now_iso
 
     text = pending_path.read_text(encoding="utf-8")
     raw_blocks = _split_blocks(text)

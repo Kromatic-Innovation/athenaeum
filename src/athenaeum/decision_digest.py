@@ -56,6 +56,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.config import (
     resolve_decisions_digest_batch_size,
     resolve_decisions_max_sources_per_merge,
@@ -74,7 +75,6 @@ from athenaeum.decision_framing import (
 )
 from athenaeum.decision_presentations import load_presentations, stored_presentation
 from athenaeum.decisions import age_days, collect_unframed_decisions
-from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 

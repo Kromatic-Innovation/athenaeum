@@ -86,13 +86,13 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import yaml
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.decision_framing import (
     SHORT_NAME_ESCALATED_CONFLICT_TYPE,
     shape_errors_only,
     validate_answer,
 )
 from athenaeum.models import parse_frontmatter, render_frontmatter
-from athenaeum.store import now_iso
 
 if TYPE_CHECKING:  # pragma: no cover - type-checking only, avoids a hard import
     from anthropic.types import MessageParam, TextBlockParam, ThinkingConfigParam
@@ -2414,6 +2414,7 @@ def _apply_dimension_proposal_answer(
     the operator's config and skips straight to the ledger write rather than
     re-appending a second, name-colliding copy.
     """
+    from athenaeum.clock import now_iso
     from athenaeum.config import write_dimensions_config
     from athenaeum.dimension_proposals import (
         APPROVE_KIND,
@@ -2424,7 +2425,8 @@ def _apply_dimension_proposal_answer(
         read_dimension_proposals_ledger,
     )
     from athenaeum.dimensions import DimensionRegistryError
-    from athenaeum.store import append_line_durable, now_iso
+    from athenaeum.store import append_line_durable
+
 
     def _refuse(error_code: str, message: str) -> DecisionAnswerOutcome:
         return DecisionAnswerOutcome(

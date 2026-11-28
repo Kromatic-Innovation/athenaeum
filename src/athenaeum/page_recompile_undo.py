@@ -167,6 +167,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.models import parse_frontmatter
 from athenaeum.page_recompile_apply import APPLY_KIND, _git_blob_id
 from athenaeum.page_recompile_plan import (
@@ -188,7 +189,6 @@ from athenaeum.page_relations import (
     remove_relation,
 )
 from athenaeum.storage import open_store, require_writable_paths
-from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 

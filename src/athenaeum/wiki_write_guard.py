@@ -63,9 +63,10 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.entity_schema import declared_entity_classes
 from athenaeum.schemas import KNOWN_TYPES
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

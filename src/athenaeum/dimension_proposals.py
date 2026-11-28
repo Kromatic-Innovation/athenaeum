@@ -81,10 +81,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from athenaeum.clock import now_iso
 from athenaeum.config import resolve_decisions_budget_items_per_day_max
 from athenaeum.dimensions import SCOPE, DimensionKind, NullMeans
 from athenaeum.signal_mining import MinedShape, ShapeKey
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

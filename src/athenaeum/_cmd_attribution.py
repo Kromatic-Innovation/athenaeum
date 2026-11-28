@@ -375,9 +375,9 @@ def _merge_proposer(wiki_root: Path, suspect_id: str, owner_name: str, target_na
 
 def _cmd_place(args: argparse.Namespace) -> int:
     from athenaeum import pii, pii_attribution
+    from athenaeum.clock import now_iso
     from athenaeum.models import EntityIndex
     from athenaeum.pii import ExcludedSurfaceUnavailable
-    from athenaeum.store import now_iso
 
     knowledge_root, config, contacts_root = _resolve_roots(args)
     wiki_root = knowledge_root / "wiki"

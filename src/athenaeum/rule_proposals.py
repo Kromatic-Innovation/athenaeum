@@ -113,6 +113,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.config import (
     resolve_model,
     resolve_rule_proposals_exemplar_count,
@@ -123,7 +124,7 @@ from athenaeum.models import TokenUsage, parse_frontmatter
 from athenaeum.prompt_safety import data_only_clause, fence_untrusted
 from athenaeum.provider import resolve_max_tokens, resolve_thinking, response_text
 from athenaeum.rules import ShapeRule, default_shape_rule_dispositions_path
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 from athenaeum.tiers import _record_usage
 
 log = logging.getLogger(__name__)

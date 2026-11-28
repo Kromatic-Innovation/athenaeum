@@ -47,7 +47,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.clock import now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

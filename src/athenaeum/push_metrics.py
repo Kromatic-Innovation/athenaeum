@@ -80,8 +80,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.config import resolve_cache_dir
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 from athenaeum.text_overlap import distinctive_ngram_overlap
 
 log = logging.getLogger(__name__)

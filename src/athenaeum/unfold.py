@@ -110,6 +110,7 @@ from typing import Any, TypedDict
 
 from athenaeum import provenance
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.config import resolve_cache_dir
 from athenaeum.models import (
     is_tombstone,
@@ -118,7 +119,6 @@ from athenaeum.models import (
     slugify,
     tombstone_target,
 )
-from athenaeum.store import now_iso
 from athenaeum.verdicts import content_hash_for_path
 
 #: Mirrors :mod:`athenaeum.pending_merges`'s private ``_WIKILINK_REWRITE_RE``

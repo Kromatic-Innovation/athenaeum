@@ -127,8 +127,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from athenaeum.clock import now_iso
 from athenaeum.config import resolve_cache_dir
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 if TYPE_CHECKING:  # avoid an import cycle at runtime (models imports nothing here)
     from athenaeum.models import TokenUsage

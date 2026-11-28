@@ -53,6 +53,9 @@ PINNED_IMPORTS: dict[str, frozenset[str]] = {
             "athenaeum",
             "athenaeum.atomic_io",
             "athenaeum.authority",
+            # athenaeum#3231: `now_iso`, moved out of `store`. Standard library
+            # only (`datetime`), so it drags in nothing itself.
+            "athenaeum.clock",
             "athenaeum.config",
             # Issue athenaeum#1730: `pii.EntityRead.to_dict` derives its
             # `footnotes` map from the page body. Pure `re` over text -- pulls
@@ -69,6 +72,9 @@ PINNED_IMPORTS: dict[str, frozenset[str]] = {
         {
             "athenaeum",
             "athenaeum.atomic_io",
+            # athenaeum#3231: `now_iso`, moved out of `store`. Standard library
+            # only (`datetime`), so it drags in nothing itself.
+            "athenaeum.clock",
             "athenaeum.config",
             "athenaeum.models",
             "athenaeum.push_metrics",

@@ -71,13 +71,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.pii import (
     find_inline_emails,
     find_inline_phones,
     is_service_address,
     mask_contact_address,
 )
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

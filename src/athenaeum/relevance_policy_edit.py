@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.relevance_policy import (
     POLICY_FILENAME,
     RelevancePolicy,
@@ -57,7 +58,7 @@ from athenaeum.relevance_policy import (
     parse_relevance_policy,
     policy_vocabulary,
 )
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 #: Schema version stamped on every audit / proposal record.
 LEDGER_VERSION = 1

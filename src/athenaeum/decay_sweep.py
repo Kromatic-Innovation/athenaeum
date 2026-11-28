@@ -88,13 +88,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from athenaeum.clock import now_iso
 from athenaeum.config import resolve_cache_dir
 from athenaeum.contact_record_fold import (
     REASON_PAGE_REMOVED,
     settle_removed_uid_records_after_removal,
 )
 from athenaeum.models import EntityIndex, parse_bucket, parse_frontmatter, valid_until_expired
-from athenaeum.store import append_line_durable, now_iso
+from athenaeum.store import append_line_durable
 
 log = logging.getLogger(__name__)
 

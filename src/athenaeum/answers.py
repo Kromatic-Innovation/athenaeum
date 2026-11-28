@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from athenaeum.provider import LLMBackend
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.clock import now_iso
 from athenaeum.fingerprint import (
     RESOLVED_BY_HUMAN_UNVERIFIED,
     _member_key_str,
@@ -89,7 +90,6 @@ from athenaeum.fingerprint import (
 )
 from athenaeum.pagination import paginate
 from athenaeum.sidecar_blocks import FENCE_CLOSE_RE, GENERIC_FENCE_OPEN_RE, split_blocks
-from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
 

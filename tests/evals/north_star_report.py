@@ -91,6 +91,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from athenaeum.clock import now_iso
 from athenaeum.footnote_markers import (
     INLINE_MARKER_RE,
     parse_footnote_definitions,
@@ -98,7 +99,6 @@ from athenaeum.footnote_markers import (
 from athenaeum.models import parse_bucket, parse_frontmatter, validity_bound_str
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
-from athenaeum.store import now_iso
 
 # ``DISTINCTIVE_NGRAM_SIZE`` is re-exported explicitly (``as`` itself): this
 # module published it before issue athenaeum#1585 moved the definition into
