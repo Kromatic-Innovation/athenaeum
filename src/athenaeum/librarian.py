@@ -77,6 +77,7 @@ baseline at ``[]``. Do not reintroduce a cycle.
 
 from __future__ import annotations
 
+import glob as glob_mod
 import hashlib
 import json
 import logging
@@ -87,6 +88,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -6072,6 +6074,16 @@ class RunContext:
     #: eligibility, which athenaeum#900 puts out of scope. ``None``/empty means
     #: "no caller scope" and discovery order is used unchanged.
     entity_changed_paths: set[Path] | None = None
+    #: Issue athenaeum#3223: a TARGETED run compiles exactly the raw files named
+    #: in ``entity_changed_paths`` and nothing else. The entity phase filters
+    #: the intake down to them (instead of only moving them to the front), and
+    #: every corpus-wide phase is skipped -- see ``run(targeted=...)``.
+    targeted: bool = False
+    #: Issue athenaeum#3223: one row per named raw file, ``{"ref", "outcome",
+    #: "reason"}``, filled where the entity loop decides each file's fate (and
+    #: where the window / hold-out drop a named file before the loop). Only
+    #: filled on a targeted run; exported to ``out_run_stats["file_outcomes"]``.
+    file_outcomes: list[dict[str, Any]] = field(default_factory=list)
     #: Issue athenaeum#712 — the caller's ALREADY-ACQUIRED
     #: :class:`athenaeum.runlock.RunLock`, when the caller holds one (the CLI
     #: `athenaeum run` path always does for a non-dry-run; a `--dry-run` call,
@@ -6668,6 +6680,28 @@ class RunContext:
 
         return _hook
 
+    def note_outcome(
+        self, target: "RawFile | Path", outcome: str, reason: str | None = None
+    ) -> None:
+        """Record one named file's fate (athenaeum#3223); a no-op off a targeted run.
+
+        ``path`` is POSIX and relative to the raw root, so the caller can match a
+        row to the file it named; ``ref`` is the librarian's own short reference
+        (``<source>/<name>``) for a discovered raw, and the path for any other.
+        """
+        if not self.targeted:
+            return
+        path = target.path if isinstance(target, RawFile) else target
+        rel = _raw_target_ref(self.raw_root, path)
+        self.file_outcomes.append(
+            {
+                "ref": target.ref if isinstance(target, RawFile) else rel,
+                "path": rel,
+                "outcome": outcome,
+                "reason": reason,
+            }
+        )
+
     def deadline_exceeded(self) -> bool:
         return self.run_deadline is not None and time.monotonic() >= self.run_deadline
 
@@ -6762,6 +6796,9 @@ class RunContext:
             # files this run -- the AC1 signal, mirroring how
             # `starved_sources` is exported immediately above.
             self.out_run_stats["stalled_sources"] = list(self.stalled_sources)
+            # Issue athenaeum#3223: the per-file fate of each file a targeted run
+            # was asked to compile (empty on every other run).
+            self.out_run_stats["file_outcomes"] = [dict(o) for o in self.file_outcomes]
 
     def emit_run_summary(self) -> None:
         if self.summary_emitted:
@@ -7895,6 +7932,7 @@ def _arm_run_deadline(ctx: RunContext) -> None:
         ctx.out_run_stats.setdefault("beyond_window", 0)
         ctx.out_run_stats.setdefault("deferred_refs", [])
         ctx.out_run_stats.setdefault("failed_files", [])
+        ctx.out_run_stats.setdefault("file_outcomes", [])
 
 
 def _run_shape_rule_phase(ctx: RunContext) -> None:
@@ -9620,7 +9658,7 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
 
 
 def _prioritize_caller_scoped_raw(
-    raw_files: list[RawFile], changed: set[Path] | None
+    raw_files: list[RawFile], changed: set[Path] | None, *, targeted: bool = False
 ) -> tuple[list[RawFile], int]:
     """Move the caller's own new files to the front of *raw_files* (athenaeum#900).
 
@@ -9638,11 +9676,15 @@ def _prioritize_caller_scoped_raw(
     Returns ``(ordered_files, n_caller_scoped)``. ``None``/empty *changed*
     returns the input list unchanged with a count of 0, so the nightly run
     (which passes no caller scope) behaves exactly as before.
+
+    Issue athenaeum#3223: with ``targeted=True`` this is a FILTER, not a
+    partition -- every file the caller did not name is dropped, and an empty
+    *changed* names nothing, so nothing is kept.
     """
-    if not changed:
+    if not changed and not targeted:
         return raw_files, 0
     resolved: set[Path] = set()
-    for p in changed:
+    for p in changed or ():
         try:
             resolved.add(p.resolve())
         except OSError:  # pragma: no cover - defensive (unresolvable path)
@@ -9655,10 +9697,76 @@ def _prioritize_caller_scoped_raw(
             return raw.path in resolved
 
     callers = [r for r in raw_files if _is_callers(r)]
+    if targeted:
+        return callers, len(callers)
     if not callers:
         return raw_files, 0
     backlog = [r for r in raw_files if not _is_callers(r)]
     return callers + backlog, len(callers)
+
+
+def _raw_target_ref(raw_root: Path, path: Path) -> str:
+    """The display ref for a named raw path: POSIX, relative to *raw_root* (athenaeum#3223)."""
+    try:
+        return path.resolve().relative_to(raw_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _report_held_targeted(ctx: RunContext, named: list[RawFile]) -> None:
+    """Report each named raw the lease / hold-out passes dropped as ``held`` (athenaeum#3223).
+
+    ``_hold_out_unworkable_raw`` (stuck, backoff, never-ingest) and
+    ``_apply_pending_batch_leases`` drop files from ``ctx.raw_files`` before the
+    window fills. A targeted run names its files, so each one dropped here is
+    reported with the reason instead of vanishing.
+    """
+    kept = {r.ref for r in ctx.raw_files}
+    stuck = {str(row.get("ref")) for row in ctx.stuck_files}
+    backoff = set(ctx.backoff_skipped_files)
+    never_ingest = {str(row.get("ref")) for row in ctx.never_ingest_held_out_files}
+    for raw in named:
+        if raw.ref in kept:
+            continue
+        if raw.ref in stuck:
+            reason = "stuck"
+        elif raw.ref in backoff:
+            reason = "backoff"
+        elif raw.ref in never_ingest:
+            reason = "never-ingest"
+        else:
+            reason = "batch-lease"
+        ctx.note_outcome(raw, "held", reason)
+
+
+def _note_processed_outcome(ctx: RunContext, raw: RawFile, result: Any) -> None:
+    """Record the fate of one named raw ``process_one`` returned normally for (athenaeum#3223).
+
+    Mirrors the entity loop's own decision (unlink, or keep on ``retain_raw``)
+    without changing it. In a dry run nothing is consumed: a file that produced
+    no Tier 0/1 result would go on to Tier 2/3, which ``process_one`` skips in a
+    dry run, so it reports ``would-reach-tier2-3``.
+    """
+    created = [str(getattr(e, "filename", e)) for e in getattr(result, "created", [])]
+    updated = [str(u) for u in getattr(result, "updated", [])]
+    skipped = list(getattr(result, "skipped", []))
+    if not ctx.dry_run and getattr(result, "retain_raw", False):
+        reason = (
+            "never-ingest"
+            if getattr(result, "retain_raw_by_design", False)
+            else "structured-upsert-refused"
+        )
+        ctx.note_outcome(raw, "retained", f"{reason}: {skipped[-1]}" if skipped else reason)
+    elif created:
+        ctx.note_outcome(raw, "created", ", ".join(created))
+    elif updated:
+        ctx.note_outcome(raw, "updated", ", ".join(updated))
+    elif ctx.dry_run:
+        ctx.note_outcome(raw, "would-reach-tier2-3", "dry run stops before Tier 2/3")
+    elif getattr(result, "handled_no_op", False):
+        ctx.note_outcome(raw, "consumed", "handled with no page change")
+    else:
+        ctx.note_outcome(raw, "dropped", skipped[-1] if skipped else None)
 
 
 def _resolve_schema_lists(wiki_root: Path) -> tuple[list[str], list[str], list[str]]:
@@ -9814,8 +9922,35 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # (so the ceiling check below is not blind to it), puts its creations
         # on disk (so this run's tier-1 pass can match them), and releases its
         # leases (so the claim below is computed against a current exclusion).
-        _run_pending_batch_collect_phase(ctx)
+        # Issue athenaeum#3223: a targeted run skips the collect -- it writes OTHER
+        # files' results, which the named files must not drag in.
+        if not ctx.targeted:
+            _run_pending_batch_collect_phase(ctx)
         ctx.raw_files = discover_raw_files(ctx.raw_root, ctx.config)
+        _targeted_named: list[RawFile] = []
+        if ctx.targeted:
+            # Issue athenaeum#3223: narrow the intake to the named files BEFORE the
+            # lease / hold-out passes, so a named file those passes drop can be
+            # reported as ``held`` instead of vanishing. A named path discovery
+            # never yields (auto-memory, an extra intake root, a non-intake
+            # file) is reported ``not-entity-intake``.
+            ctx.raw_files, _ = _prioritize_caller_scoped_raw(
+                ctx.raw_files, ctx.entity_changed_paths, targeted=True
+            )
+            _targeted_named = list(ctx.raw_files)
+            _discovered = {r.path.resolve() for r in _targeted_named}
+            for _named in sorted(ctx.entity_changed_paths or ()):
+                if _named.resolve() in _discovered:
+                    continue
+                if _named.is_file():
+                    ctx.note_outcome(
+                        _named,
+                        "not-entity-intake",
+                        "not entity raw intake (auto-memory or another intake "
+                        "root compiles per cluster, not per file)",
+                    )
+                else:
+                    ctx.note_outcome(_named, "not-found", None)
         # Issue athenaeum#1143: a raw file held by an in-flight batch's lease is
         # NOT claimable — re-claiming it would re-submit work already paid for.
         _apply_pending_batch_leases(ctx)
@@ -9829,6 +9964,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
         # held_stuck=N` rather than a bare, unexplained `considered=0`.
         total_intake = len(ctx.raw_files)
         n_stuck_held, n_backoff_held, n_never_ingest_held = _hold_out_unworkable_raw(ctx)
+        if ctx.targeted:
+            _report_held_targeted(ctx, _targeted_named)
         # Issue athenaeum#1295: bound here (empty), OUTSIDE the `if
         # ctx.raw_files` / `else` split below, so the stalled-sources
         # computation further down — which runs UNCONDITIONALLY alongside
@@ -9848,7 +9985,9 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             # clean auto-memory pass, but doing it here too preserves the
             # pre-athenaeum#461 "empty intake is a clean run" contract even if the
             # auto-memory block below is skipped for some reason.
-            if not ctx.dry_run:
+            # Issue athenaeum#3223: the deferred manifest and the lease sweep
+            # describe the WHOLE queue; a targeted run never touches them.
+            if not ctx.dry_run and not ctx.targeted:
                 _clear_stale_deferred_manifest(ctx.wiki_root)
                 _sweep_pending_batch_leases()
             log.info("No raw files to process. Nothing to do.")
@@ -9862,7 +10001,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             # behind a backlog larger than the window. Remaining budget still
             # fills from the backlog, in its existing order.
             ctx.raw_files, n_scoped = _prioritize_caller_scoped_raw(
-                ctx.raw_files, ctx.entity_changed_paths
+                ctx.raw_files, ctx.entity_changed_paths, targeted=ctx.targeted
             )
             if n_scoped:
                 log.info(
@@ -9876,6 +10015,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             # BEFORE the window is filled, so "had pending intake and got zero
             # slots" is answerable below against the full discovered set.
             pending_by_source = Counter(raw.source for raw in ctx.raw_files)
+            _pre_window = list(ctx.raw_files)
             if n_candidates > ctx.max_files:
                 log.info(
                     "Budget cap: processing %d of %d files this run",
@@ -9956,6 +10096,13 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
             # budget trip so the manifest reports the TRUE backlog, not just
             # the in-window remainder.
             ctx.beyond_window = n_candidates - len(ctx.raw_files)
+            if ctx.targeted:
+                # Issue athenaeum#3223: a named file the max_files window left out
+                # is deferred, never dropped silently.
+                _in_window = {r.ref for r in ctx.raw_files}
+                for _r in _pre_window:
+                    if _r.ref not in _in_window:
+                        ctx.note_outcome(_r, "deferred", "window")
             # Issue athenaeum#1291 AC3: a source that HAD pending intake and
             # got zero slots this run. Recorded per run (and carried into the
             # durable athenaeum#1102 ledger via the entity profile segment
@@ -10331,6 +10478,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     "error_detail": _stuck.get("last_error_detail"),
                                 }
                             )
+                            ctx.note_outcome(raw, "held", "stuck")
                             log.warning(
                                 "%s: skipping %s — failed %d consecutive run(s) on "
                                 "action %s (%s); stuck, needs a human (issue athenaeum#663)%s",
@@ -10369,6 +10517,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                         ):
                             ctx.backoff_skipped_files.append(raw.ref)
+                            ctx.note_outcome(raw, "held", "backoff")
                             log.info(
                                 "librarian-stuck-file-backoff: skipping %s this run — "
                                 "%d consecutive failure(s), still within its backoff "
@@ -10400,6 +10549,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     ).strftime("%Y-%m-%dT%H:%M:%SZ")
                                 ):
                                     ctx.backoff_skipped_files.append(raw.ref)
+                                    ctx.note_outcome(raw, "held", "quarantine-retry")
                                     log.info(
                                         "librarian-quarantine-retry: skipping %s "
                                         "until %s - attempt %d of %d tripped its "
@@ -10433,6 +10583,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             # deferred to the next run — record it so the
                             # manifest + summary surface it.
                             ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
+                            for _d in ctx.raw_files[i:]:
+                                ctx.note_outcome(_d, "deferred", "budget")
                             break
 
                         # Issue athenaeum#396: wall-clock deadline check at the
@@ -10454,6 +10606,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 len(ctx.raw_files) - i,
                             )
                             ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
+                            for _d in ctx.raw_files[i:]:
+                                ctx.note_outcome(_d, "deferred", "deadline")
                             ctx.deadline_tripped = True
                             break
 
@@ -10490,6 +10644,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 len(ctx.raw_files) - i,
                             )
                             ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
+                            for _d in ctx.raw_files[i:]:
+                                ctx.note_outcome(_d, "deferred", "entity-share")
                             ctx.entity_budget_tripped = True
                             break
 
@@ -10518,6 +10674,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                     _ceiling,
                                 )
                                 ctx.deferred_refs = [r.ref for r in ctx.raw_files[i:]]
+                                for _d in ctx.raw_files[i:]:
+                                    ctx.note_outcome(_d, "deferred", "spend-ceiling")
                                 # Issue athenaeum#1135: distinct from the generic
                                 # ``max_api_calls`` count-budget trip above --
                                 # see ``spend_ceiling_tripped``'s field
@@ -10580,6 +10738,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 exc,
                             )
                             entity_heartbeat.tick(raw.ref, error=1)
+                            ctx.note_outcome(raw, "failed", "bytes-over-bound")
                             if not ctx.dry_run:
                                 _handle_bound_violation(
                                     ctx,
@@ -10643,6 +10802,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 compiled=1 if _partial_made_change else 0,
                                 error=1,
                             )
+                            ctx.note_outcome(raw, "failed", f"{exc.bound}-over-bound")
                             if not ctx.dry_run:
                                 _handle_bound_violation(
                                     ctx,
@@ -10686,6 +10846,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                             entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
+                            ctx.note_outcome(
+                                raw,
+                                "failed",
+                                f"TransientAPIError:{type(exc.last_error).__name__}",
+                            )
                             # Issue athenaeum#1177: named for the all-calls-failed exit
                             # reason below, mirroring the WARNING line's own
                             # exception-type naming just above.
@@ -10740,6 +10905,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                             entity_heartbeat.tick(raw.ref, error=1)
                             ctx.failed_files.append(raw.ref)
+                            ctx.note_outcome(raw, "failed", type(exc).__name__)
                             # Issue athenaeum#1177: named for the all-calls-failed exit
                             # reason below, mirroring the WARNING line's own
                             # exception-type naming just above.
@@ -10845,6 +11011,8 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             compiled=1 if _entity_made_change else 0,
                             unchanged=0 if _entity_made_change else 1,
                         )
+                        if ctx.targeted:
+                            _note_processed_outcome(ctx, raw, result)
 
                         if not ctx.dry_run and getattr(result, "retain_raw", False):
                             # Issue athenaeum#2360: a refused structured-upsert
@@ -11105,14 +11273,23 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     else:
                         degraded_reason = "budget exhausted"
                         manifest_reason = "budget"
-                    manifest_path = _write_deferred_manifest(
-                        ctx.wiki_root,
-                        ctx.deferred_refs,
-                        api_calls=ctx.usage.api_calls,
-                        budget=ctx.max_api_calls,
-                        beyond_window=ctx.beyond_window,
-                        failed_refs=ctx.failed_files,
-                        reason=manifest_reason,
+                    # Issue athenaeum#3223: the deferred manifest records the WHOLE
+                    # queue's remainder for the next nightly run. A targeted run
+                    # sees only its named files, so writing it would overwrite
+                    # the real backlog record; its deferrals ride
+                    # ``file_outcomes`` instead.
+                    manifest_path = (
+                        None
+                        if ctx.targeted
+                        else _write_deferred_manifest(
+                            ctx.wiki_root,
+                            ctx.deferred_refs,
+                            api_calls=ctx.usage.api_calls,
+                            budget=ctx.max_api_calls,
+                            beyond_window=ctx.beyond_window,
+                            failed_refs=ctx.failed_files,
+                            reason=manifest_reason,
+                        )
                     )
                     log.warning(
                         "Done (DEGRADED — %s): %d created, %d updated, "
@@ -11127,7 +11304,7 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         manifest_path,
                     )
                 else:
-                    if not ctx.dry_run:
+                    if not ctx.dry_run and not ctx.targeted:
                         _clear_stale_deferred_manifest(ctx.wiki_root)
                         _sweep_pending_batch_leases()
                     log.info(
@@ -13054,6 +13231,7 @@ def run(
     allow_degraded: bool = False,
     run_type: str | None = None,
     staged_import: bool = False,
+    targeted: bool = False,
 ) -> int:
     """Run the librarian pipeline. Returns 0 on success, 1 on error,
     EXIT_GRACEFUL_PARTIAL (75) on its own internal deadline trip (issue
@@ -13193,6 +13371,24 @@ def run(
     only when ``librarian.verdict_ledger_enabled`` is also on. With either
     condition unmet the run touches nothing under ``wiki/_verdicts/`` — byte-
     identical to before athenaeum#712.
+
+    ``targeted`` (issue athenaeum#3223, the engine of ``athenaeum ingest
+    --raw``) compiles exactly the raw files named in ``entity_changed_paths``
+    and nothing else. The entity phase FILTERS the intake to those files
+    (``_prioritize_caller_scoped_raw`` stops being a stable partition), the
+    per-file path (``process_one`` and the unlink-or-``retain_raw`` decision)
+    is unchanged, and ``batch_mode`` is forced off so a named file is compiled
+    rather than leased. Skipped, because each reads or writes beyond the named
+    files: the intake audit and raw-retention audits, shape rules, field
+    corrections, store intake, name-collision, qualified-name and wiki-dedup,
+    the pending-batch collect and the deferred-manifest rewrite, the
+    auto-memory block (C2/C3/C4, retire, reresolve), and every late phase
+    (rule proposals, audit drain, page recompile, signal mining, tier
+    movement, auto-apply, attribution shadow). Kept: preconditions and config
+    resolution (budgets, spend ceiling), the git VCS I/O phase (which arms the
+    raw-screen phase and its hold), the run deadline, the entity phase's own
+    index rebuild and commit, and the finalize phase. Each named file's fate
+    lands in ``out_run_stats["file_outcomes"]``.
     """
     # Issue athenaeum#540 (M25): stamp a fresh per-run correlation id so every log line
     # this run emits carries the same id (via the logconf run-id filter) — even
@@ -13218,6 +13414,9 @@ def run(
     # inline comment. Every phase function mutates `ctx` in place; nothing is
     # snapshot-copied, so a later phase always observes an earlier phase's
     # mutations exactly as the original single-frame locals did.
+    if targeted:
+        # Issue athenaeum#3223: a leased (batch) file is not compiled this run.
+        batch_mode = False
     ctx = RunContext(
         raw_root=raw_root,
         wiki_root=wiki_root,
@@ -13249,6 +13448,7 @@ def run(
     # constructor arg) to keep the positional field order of this long
     # dataclass untouched.
     ctx.entity_changed_paths = entity_changed_paths
+    ctx.targeted = targeted
     # Issue athenaeum#1135: same "set after construction" rationale as
     # ``entity_changed_paths`` above.
     ctx.allow_degraded = allow_degraded
@@ -13336,7 +13536,8 @@ def run(
     # correction batch written into raw/<source>/, and that batch must be
     # visible to the correction phase's OWN fresh raw_root walk later in
     # THIS SAME RUN -- see `_run_shape_rule_phase`'s docstring.
-    _run_shape_rule_phase(ctx)
+    if not targeted:
+        _run_shape_rule_phase(ctx)
 
     # Phase: unrecognised-raw-intake audit (issue athenaeum#836) -- deterministic,
     # LLM-free, unbudgeted (see `_run_intake_audit_phase`'s docstring for
@@ -13345,7 +13546,8 @@ def run(
     # exclusion check, and before the correction/entity/auto-memory phases
     # since none of them can affect which raw files are UNRECOGNISED (they
     # only ever act on files those phases' OWN discovery already claims).
-    _run_intake_audit_phase(ctx)
+    if not targeted:
+        _run_intake_audit_phase(ctx)
 
     # Phase: configurable raw-intake size ceilings, per-file and per-source
     # aggregate (issue athenaeum#1269) -- deterministic, LLM-free, unbudgeted,
@@ -13353,17 +13555,20 @@ def run(
     # ordered right after it for that reason alone; detect-and-report only,
     # never blocks intake, moves a file, or writes an exempt row (see
     # `_run_raw_retention_phase`'s docstring).
-    _run_raw_retention_phase(ctx)
+    if not targeted:
+        _run_raw_retention_phase(ctx)
 
     # Phase: field-correction fast path (issue athenaeum#797) -- deterministic,
     # LLM-free, own runtime share. Ordered here (after the deadline is armed,
     # before the entity tier phase) per docs/design/field-corrections.md §10.1 so an
     # entity-phase overrun never starves this cheap path.
-    _run_correction_phase(ctx)
+    if not targeted:
+        _run_correction_phase(ctx)
 
     # Phase: a store's raw intake on this install (athenaeum#3000) -- deterministic,
     # LLM-free; the discovery that feeds classify skips raw/_stores/.
-    _run_store_intake_phase(ctx)
+    if not targeted:
+        _run_store_intake_phase(ctx)
 
     # Phase: OS signal handling is installed/removed INSIDE the entity-tier
     # phase below (`_run_entity_tier_phase`), not as its own standalone
@@ -13375,18 +13580,21 @@ def run(
     # sibling of the wiki-dedup pass immediately below, called BEFORE it
     # (deterministic/zero-cost, never folded into the expensive vector/LLM
     # dedup pass; see _run_name_collision_phase's docstring).
-    _run_name_collision_phase(ctx)
+    if not targeted:
+        _run_name_collision_phase(ctx)
 
     # Phase: athenaeum#1577 qualified-name entity-split scan. Runs right after
     # its exact-match sibling and before the expensive dedup pass, for the
     # reasons in _run_qualified_name_phase's docstring.
-    _run_qualified_name_phase(ctx)
+    if not targeted:
+        _run_qualified_name_phase(ctx)
 
     # Phase: athenaeum#290 wiki-page dedup pass (independent of the C1-C4 auto-memory
     # pipeline; runs on every mode) + the deadline check right after it.
-    _rc = _run_wiki_dedup_phase(ctx)
-    if _rc is not None:
-        return _rc
+    if not targeted:
+        _rc = _run_wiki_dedup_phase(ctx)
+        if _rc is not None:
+            return _rc
 
     if merge_only:
         # merge_only short-circuits the rest of the pipeline entirely.
@@ -13408,10 +13616,15 @@ def run(
     # Phase: auto-memory block (C1 discover + C2 cluster / C3 merge / C4
     # detect, retire, athenaeum#188 reresolve) — skipped entirely if the entity loop
     # already tripped the wall-clock deadline.
-    if not ctx.deadline_tripped:
+    if not ctx.deadline_tripped and not targeted:
         _rc = _run_auto_memory_phase(ctx)
         if _rc is not None:
             return _rc
+
+    if targeted:
+        # Issue athenaeum#3223: nothing after the entity loop touches files the
+        # caller did not name; go straight to finalize (spend ledger, exit codes).
+        return _run_finalize_phase(ctx)
 
     if cluster_only:
         # Same contract as the merge-only early return above: a clean
@@ -13533,6 +13746,10 @@ class IngestResult:
     exit_code: int
     duration_ms: int
     session: str | None = None
+    #: Issue athenaeum#3223: one ``{"ref", "outcome", "reason"}`` row per file a
+    #: ``--raw`` ingest was asked to compile. ``None`` on every other ingest, so
+    #: their summary is byte-identical to before.
+    file_outcomes: list[dict[str, Any]] | None = None
 
     def summary(self) -> dict[str, object]:
         """One-line JSON-serializable summary (counts + duration)."""
@@ -13547,7 +13764,174 @@ class IngestResult:
         }
         if self.session is not None:
             data["session"] = self.session
+        if self.file_outcomes is not None:
+            data["files"] = [dict(o) for o in self.file_outcomes]
         return data
+
+
+class RawTargetError(ValueError):
+    """A ``--raw`` target that must be refused, e.g. one outside the raw root (athenaeum#3223)."""
+
+
+_GLOB_META = frozenset("*?[")
+
+
+def resolve_raw_targets(
+    raw_root: Path, targets: Sequence[str]
+) -> tuple[list[Path], list[str]]:
+    """Resolve ``--raw`` paths and globs against *raw_root* (athenaeum#3223).
+
+    A relative target is taken relative to *raw_root*; an absolute one must
+    already lie inside it. Returns ``(files, unmatched)``: the sorted, de-duplicated
+    resolved files, and the targets that matched no file (reported ``not-found``
+    by the caller, never dropped silently). Only files count -- a target that
+    matches just a directory matches nothing.
+
+    Raises :class:`RawTargetError` for a target that reaches outside *raw_root*:
+    an absolute path elsewhere, a ``..`` segment that climbs out, a ``..`` after a
+    glob character (which cannot be checked before expansion), or a match whose
+    real path (symlinks followed) lies outside.
+    """
+    root = raw_root.resolve()
+    files: set[Path] = set()
+    unmatched: list[str] = []
+    for target in targets:
+        if not target or not target.strip():
+            raise RawTargetError("empty --raw target")
+        parts = Path(target).parts
+        literal: list[str] = []
+        past_meta = False
+        for part in parts:
+            if past_meta or _GLOB_META & set(part):
+                past_meta = True
+                if part == "..":
+                    raise RawTargetError(
+                        f"--raw target {target!r} has '..' after a glob; name the "
+                        "directory explicitly so it can be checked against the raw root"
+                    )
+                continue
+            literal.append(part)
+        base = Path(*literal) if literal else Path()
+        anchored = base if base.is_absolute() else root / base
+        try:
+            Path(os.path.normpath(anchored)).relative_to(root)
+        except ValueError:
+            raise RawTargetError(
+                f"--raw target {target!r} is outside the raw root ({root}); only "
+                "files under the raw root can be compiled on demand"
+            ) from None
+        pattern = target if Path(target).is_absolute() else os.path.join(
+            glob_mod.escape(str(root)), target
+        )
+        matched: list[Path] = []
+        for hit in sorted(glob_mod.glob(pattern, recursive=True)):
+            real = Path(hit).resolve()
+            try:
+                real.relative_to(root)
+            except ValueError:
+                raise RawTargetError(
+                    f"--raw target {target!r} resolves to {hit!r}, outside the "
+                    f"raw root ({root})"
+                ) from None
+            if real.is_file():
+                matched.append(real)
+        if matched:
+            files.update(matched)
+        else:
+            unmatched.append(target)
+    return sorted(files), unmatched
+
+
+def _ingest_raw_targets(
+    raw_root: Path,
+    wiki_root: Path,
+    knowledge_root: Path,
+    *,
+    targets: Sequence[str],
+    manifest_path: Path,
+    dry_run: bool,
+    run_kwargs: dict[str, Any],
+) -> IngestResult:
+    """The ``--raw`` branch of :func:`ingest` (issue athenaeum#3223).
+
+    Compiles only the named raw files through :func:`run` in targeted mode. It
+    deliberately bypasses the two early returns of the incremental path: the
+    incremental no-op gate (the named files are compiled whether or not the stamp
+    has seen them) and the manifest-only dry-run preview (so ``dry_run`` calls
+    ``run(dry_run=True)`` and each file gets a real outcome). Nothing is hashed
+    beyond the named files.
+
+    The stamp rule is :func:`ingest`'s own: a file that left the intake queue is
+    stamped, merged into the existing stamp; a retained, deferred, failed or held
+    file stays on disk and stays unstamped. A dry run and a nonzero compile never
+    stamp.
+    """
+    start = time.monotonic()
+    files, unmatched = resolve_raw_targets(raw_root, targets)
+    outcomes: list[dict[str, Any]] = [
+        {
+            "ref": t,
+            "path": t,
+            "outcome": "not-found",
+            "reason": "matched no file under the raw root",
+        }
+        for t in unmatched
+    ]
+    run_kwargs.pop("changed_paths", None)
+    run_kwargs.pop("entity_changed_paths", None)
+    run_kwargs.pop("targeted", None)
+    exit_code = 0
+    before: dict[str, str] = {}
+    if files:
+        for fpath in files:
+            try:
+                rel = fpath.relative_to(knowledge_root.resolve()).as_posix()
+                before[rel] = hashlib.sha256(fpath.read_bytes()).hexdigest()
+            except (ValueError, OSError):
+                continue
+        run_stats: dict[str, Any] = {}
+        exit_code = run(
+            raw_root=raw_root,
+            wiki_root=wiki_root,
+            knowledge_root=knowledge_root,
+            dry_run=dry_run,
+            entity_changed_paths=set(files),
+            targeted=True,
+            out_run_stats=run_stats,
+            **run_kwargs,
+        )
+        outcomes.extend(run_stats.get("file_outcomes") or [])
+    known = {str(o.get("path")) for o in outcomes}
+    for fpath in files:
+        ref = _raw_target_ref(raw_root, fpath)
+        if ref not in known:
+            # The run ended before reaching the file (a refusal or an early
+            # return): say so rather than leave it silent.
+            outcomes.append(
+                {
+                    "ref": ref,
+                    "path": ref,
+                    "outcome": "deferred",
+                    "reason": "run ended before this file",
+                }
+            )
+    processed = [rel for rel in before if not (knowledge_root.resolve() / rel).exists()]
+    if exit_code == 0 and not dry_run and processed:
+        stamp = dict(_load_ingest_manifest(manifest_path) or {})
+        stamp_stats = dict(_load_ingest_manifest_stats(manifest_path))
+        for rel in processed:
+            stamp[rel] = before[rel]
+        stamp_stats = {k: v for k, v in stamp_stats.items() if k in stamp}
+        _write_ingest_manifest(manifest_path, stamp, stats=stamp_stats)
+    return IngestResult(
+        mode="targeted",
+        new_or_changed=len(files),
+        compiled=len(processed),
+        noop=False,
+        exit_code=exit_code,
+        duration_ms=int((time.monotonic() - start) * 1000),
+        file_outcomes=outcomes,
+    )
 
 
 def _resolve_cache_dir(cache_dir: Path | None) -> Path:
@@ -13923,6 +14307,7 @@ def ingest(
     cache_dir: Path | None = None,
     config: dict[str, object] | None = None,
     dry_run: bool = False,
+    raw_targets: Sequence[str] | None = None,
     **run_kwargs: Any,
 ) -> IngestResult:
     """Compile new/changed raw intake into the wiki on demand (issue athenaeum#349).
@@ -13957,11 +14342,28 @@ def ingest(
     never stamped and stays discoverable for the next run. A truncated run
     therefore makes real, durable progress instead of leaving the stamp frozen
     behind a steady backlog.
+
+    Issue athenaeum#3223: ``raw_targets`` (paths or globs, resolved against
+    *raw_root*) switches to a targeted compile of exactly those files -- see
+    :func:`_ingest_raw_targets`. It bypasses the incremental no-op gate and the
+    manifest-only dry-run preview, so ``dry_run=True`` runs the compile in
+    no-write mode and returns a per-file outcome for each named file.
+    ``incremental`` and ``session`` do not apply to it.
     """
     start = time.monotonic()
     if config is None:
         config = load_config(knowledge_root)
     manifest_path = _resolve_cache_dir(cache_dir) / INGEST_MANIFEST_NAME
+    if raw_targets is not None:
+        return _ingest_raw_targets(
+            raw_root,
+            wiki_root,
+            knowledge_root,
+            targets=raw_targets,
+            manifest_path=manifest_path,
+            dry_run=dry_run,
+            run_kwargs=run_kwargs,
+        )
     mode = "incremental" if incremental else "full"
 
     stored = _load_ingest_manifest(manifest_path)

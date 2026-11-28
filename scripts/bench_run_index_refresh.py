@@ -2,7 +2,7 @@
 """Time ``athenaeum run``'s post-compile search-index refresh (athenaeum#3124).
 
 Builds a synthetic store of PAGES wiki pages, indexes it once, then times
-``_refresh_index_after_run`` three times with nothing changed and three times
+``refresh_index_after_run`` three times with nothing changed and three times
 after rewriting CHANGED pages. No model calls are made; ``run``'s compile is
 not part of the timing.
 
@@ -24,7 +24,7 @@ from pathlib import Path
 
 def main(backend: str, n_pages: int, n_changed: int, root: Path) -> None:
     import athenaeum.librarian as lib
-    from athenaeum._cmd_run import _refresh_index_after_run
+    from athenaeum._cli_shared import refresh_index_after_run
     from athenaeum.init import init_knowledge_dir
 
     rng = random.Random(7)
@@ -52,7 +52,7 @@ def main(backend: str, n_pages: int, n_changed: int, root: Path) -> None:
 
     def timed() -> float:
         start = time.perf_counter()
-        _refresh_index_after_run(knowledge, wiki, cache)
+        refresh_index_after_run(knowledge, wiki, cache)
         return time.perf_counter() - start
 
     unchanged = [timed() for _ in range(3)]
